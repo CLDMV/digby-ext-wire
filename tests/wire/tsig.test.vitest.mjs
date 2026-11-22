@@ -80,6 +80,8 @@ describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 		expect(code(() => appendTsig(capped, tsigRecord(1, 64)))).toBe("VALUE_OUT_OF_RANGE");
 		// and not a TSIG record at all
 		expect(code(() => appendTsig(capped, { ...tsig, type: TYPE.A, data: { address: "10.0.0.1", originalId: 1 } }))).toBe("VALUE_OUT_OF_RANGE");
+		// rdata that cannot encode: the codec's own error propagates untouched
+		expect(code(() => appendTsig(capped, { ...tsig, data: { ...tsig.data, mac: "not octets" } }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
 	it("the property holds across generated messages and TSIG records", () => {

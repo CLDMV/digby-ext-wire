@@ -145,26 +145,117 @@ function readRecord(r) {
  */
 export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true } = {}) {
 	checkInt(maxSize, MAX_MESSAGE, "maxSize");
-	return encodeCapped(message, { limit: maxSize, truncate: false, compress }).bytes;
+	return encodeCappedRaw(message, { limit: maxSize, truncate: false, compress }).bytes;
 }
+
+/**
+ * The objects a reserved {@link encodeCapped} returned, each with a copy of the bytes as they were returned, so
+ * {@link appendTsig} accepts only a genuine, unchanged one. The codec has no key, so it cannot check a MAC — it binds the
+ * truncating encode and the append instead (CLDMV/digby#39).
+ * @type {WeakMap<object, { snapshot: Uint8Array, reserved: number }>}
+ */
+const reservedEncodes = new WeakMap();
 
 /**
  * Encode a message into at most `limit` octets, truncating when it does not fit (RFC 2181 9): whole RRsets are dropped, never
  * part of one. An answer or authority RRset that does not fit sets TC and drops it and everything after it; an additional
- * RRset that does not fit is dropped with the rest of the additional section, without TC (it is optional data). The OPT and
- * TSIG records are always kept: each RRset is only kept when they still fit after it. Each section's records of one RRset
- * travel together even when the message interleaved them with other sets: they come out grouped, in first-seen set order
- * (CLDMV/digby#36), so the surviving sets keep the order they were first seen in.
+ * RRset that does not fit is dropped with the rest of the additional section, without TC (it is optional data). Each
+ * section's records of one RRset travel together even when the message interleaved them with other sets: they come out
+ * grouped, in first-seen set order (CLDMV/digby#36), so the surviving sets keep the order they were first seen in.
+ *
+ * A message that already carries a TSIG record is refused (CLDMV/digby#39): truncating a signed message invalidates the MAC
+ * (RFC 8945 5), which must cover the message actually sent. To send a signed, truncated message, encode the unsigned message
+ * with `reserveTsig` set to the TSIG record's size, sign exactly the bytes that come back, then append the signed record with
+ * {@link appendTsig}.
  *
  * @param {object} message
  * @param {object} options
  * @param {number} options.limit - the size cap in octets (at least 12)
+ * @param {number} [options.reserveTsig=0] - octets to leave free for a TSIG record appended afterwards: the result plus this
+ *   many octets fits `limit`
  * @param {boolean} [options.truncate=true]
  * @param {boolean} [options.compress=true]
- * @returns {{ bytes: Uint8Array, truncated: boolean }}
- * @throws {WireError} MESSAGE_TOO_LARGE when even the header, questions, OPT and TSIG exceed the limit
+ * @returns {{ bytes: Uint8Array, truncated: boolean, reserved: number }} `bytes` is the unsigned message when `reserveTsig`
+ *   is set (the final message when it is not); `reserved` echoes the option
+ * @throws {WireError} TSIG_PRESENT when the message already carries a TSIG record (CLDMV/digby#39); MESSAGE_TOO_LARGE when
+ *   even the header, questions and tail exceed the limit
  */
-export function encodeCapped(message, { limit, truncate = true, compress = true }) {
+export function encodeCapped(message, { limit, truncate = true, compress = true, reserveTsig = 0 } = {}) {
+	checkInt(limit, MAX_MESSAGE, "limit");
+	checkInt(reserveTsig, MAX_MESSAGE, "reserveTsig");
+	if (reserveTsig > limit) fail(WireErrorCode.MESSAGE_TOO_LARGE, `reserving ${reserveTsig} octets of the ${limit}-octet limit leaves no room for a message`);
+	obj(message, "message");
+	// the tail is written by the raw encode only for encodeMessage: a capped encode is unsigned by definition (see above)
+	for (const k of SECTIONS)
+		for (const rec of array(message[k] ?? [], k))
+			if (rec?.type === TYPE.TSIG)
+				fail(WireErrorCode.TSIG_PRESENT, "the message already carries a TSIG record: truncating it would invalidate the MAC — encode unsigned with reserveTsig, sign, then appendTsig (CLDMV/digby#39)");
+	const { bytes, truncated } = encodeCappedRaw(message, { limit: limit - reserveTsig, truncate, compress });
+	const out = { bytes, truncated, reserved: reserveTsig };
+	if (reserveTsig > 0) reservedEncodes.set(out, { snapshot: bytes.slice(), reserved: reserveTsig });
+	return out;
+}
+
+/**
+ * Append a signed TSIG record to the unsigned message {@link encodeCapped} returned with `reserveTsig` (CLDMV/digby#39). The
+ * codec holds no keys: the caller signs exactly the bytes `encodeCapped` returned (the message the receiver sees up to the
+ * TSIG) and hands the signed record here; this adds it as the last record of the additional section and bumps arcount, so the
+ * result is the signed message on the wire.
+ *
+ * Misuse is refused, not merely documented: only the object `encodeCapped` itself returned is accepted (a private WeakMap
+ * brands it), its bytes must be unchanged since it was returned (a copy is kept alongside and compared), the record's
+ * `data.originalId` must be the message's ID (RFC 8945 5), and the record must fit the space `reserveTsig` reserved.
+ *
+ * @param {{ bytes: Uint8Array, truncated: boolean, reserved: number }} capped - the object `encodeCapped` returned with
+ *   `reserveTsig` set
+ * @param {object} tsigRecord - the signed TSIG record (`name`, `type` TYPE.TSIG, `class`, `ttl`, `data` per rdata/tsig.mjs)
+ * @returns {Uint8Array} the signed message, still within the limit `encodeCapped` was given
+ * @throws {WireError} VALUE_OUT_OF_RANGE for anything that is not a fresh, untouched, matching reservation
+ */
+export function appendTsig(capped, tsigRecord) {
+	const state = typeof capped === "object" && capped !== null ? reservedEncodes.get(capped) : undefined;
+	if (state === undefined) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "appendTsig takes the object encodeCapped returned with reserveTsig set (CLDMV/digby#39)");
+	const { snapshot: bytes, reserved } = state;
+	if (!(capped.bytes instanceof Uint8Array) || capped.bytes.length !== bytes.length || capped.bytes.some((b, i) => b !== bytes[i]))
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
+	obj(tsigRecord, "TSIG record");
+	if (tsigRecord.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(tsigRecord.type)}`);
+	const id = (capped.bytes[0] << 8) | capped.bytes[1];
+	const originalId = tsigRecord.data?.originalId;
+	if (!Number.isInteger(originalId) || originalId !== id)
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the TSIG's original ID ${String(originalId)} is not this message's ID ${id}`);
+	// the record must fit the space reserved for it; a Writer capped at exactly the room left turns an oversized record into
+	// MESSAGE_TOO_LARGE, which is the oversized refusal here
+	const w = new Writer({ max: capped.bytes.length + reserved, compress: false });
+	w.raw(capped.bytes);
+	try {
+		writeRecord(w, tsigRecord);
+	} catch (err) {
+		if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)
+			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the TSIG record needs more than the ${reserved} octets reserved for it`);
+		throw err;
+	}
+	const out = new Uint8Array(w.length);
+	out.set(w.bytes.subarray(0, w.length));
+	const arcount = ((capped.bytes[10] << 8) | capped.bytes[11]) + 1;
+	out[10] = arcount >>> 8;
+	out[11] = arcount & 0xff;
+	return out;
+}
+
+/**
+ * The capped encode itself, with the OPT record and (for {@link encodeMessage}, which never truncates) a trailing TSIG record
+ * as an always-kept tail.
+ *
+ * @param {object} message
+ * @param {object} options
+ * @param {number} options.limit - the size cap in octets (at least 12); already reduced by any reserved TSIG space
+ * @param {boolean} options.truncate
+ * @param {boolean} options.compress
+ * @returns {{ bytes: Uint8Array, truncated: boolean }}
+ * @throws {WireError} MESSAGE_TOO_LARGE when even the header, questions and tail exceed the limit
+ */
+function encodeCappedRaw(message, { limit, truncate, compress }) {
 	checkInt(limit, MAX_MESSAGE, "limit");
 	obj(message, "message");
 	const questions = array(message.questions ?? [], "questions");
@@ -226,7 +317,7 @@ export function encodeCapped(message, { limit, truncate = true, compress = true 
 		w.u16(q.type);
 		w.u16(q.class ?? CLASS.IN);
 	}
-	if (!tailFits()) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the header, questions, OPT and TSIG alone exceed ${limit} octets`);
+	if (!tailFits()) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the header, questions and tail records alone exceed ${limit} octets`);
 
 	const written = [0, 0, 0];
 	let truncated = false;
