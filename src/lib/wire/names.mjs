@@ -14,11 +14,13 @@
  * Decode guards: a pointer must point strictly before the start of the segment being read (which rules out loops and forward
  * references), inside the message, with at most {@link MAX_POINTER_HOPS} hops; label types 0b01 and 0b10 are refused; the
  * name's wire length is at most 255 octets. When the reader carries per-message name state (set up by `decodeMessage`), the
- * decode memoises the name and every suffix of it — by start offset, at every label offset and every pointer target — so any
- * later name at a decoded offset, or pointer into one, reuses the cached string instead of re-expanding it; a memo hit carries
- * the wire length and pointer-hop count of a fresh decode at that offset, so the guards hold for hits exactly as for walks.
- * Only the label octets a decode formats for the first time are charged against {@link MAX_NAME_OCTETS}, so a message full of
- * compressed repeats cannot expand without bound.
+ * decode memoises every suffix of every name it decodes — by offset, at every label offset and every pointer target — so any
+ * later pointer into one reuses the cached suffix instead of re-expanding it; a hit carries the wire length and pointer-hop
+ * count of a fresh decode at that offset, so the guards hold for hits exactly as for walks. A memo entry stores its suffix's
+ * own labels and where the reused suffix behind it starts, and builds the suffix's presentation string only when a pointer
+ * actually reuses the entry (caching it then) — a message full of uncompressed names never materialises a string per suffix.
+ * Only the label octets a decode walks for the first time are charged against {@link MAX_NAME_OCTETS}: the cap bounds the
+ * decode's walk, not the characters it materialises — see the cap's note.
  */
 
 import { MAX_MESSAGE } from "./buffer.mjs";
@@ -32,10 +34,13 @@ export const MAX_NAME = 255;
 export const MAX_POINTER_HOPS = 128;
 /**
  * The default per-message cap on decoded name octets: the largest possible message. The cap counts the label octets a
- * decode formats for the first time; the memo records every label offset and pointer target (see {@link readName}), so
- * within one message each octet is charged at most once and a decode whose pointers land on label boundaries can never
- * exceed its own size. Going over means pointers into the interiors of labels — bytes no encoder produces, re-parsed as
- * new labels — or a change that breaks the memo's coverage, which is exactly what the cap exists to stop.
+ * decode walks for the first time; the memo records every label offset and pointer target (see {@link readName}), so
+ * within one message each octet is charged at most once and a decode whose pointers land on label boundaries never
+ * charges more than its own size. Going over means pointers into the interiors of labels — bytes no encoder produces,
+ * re-parsed as new labels — or a change that breaks the memo's coverage, which is exactly what the cap exists to stop.
+ * The cap bounds the walked octets, not the characters a decode materialises: materialisation is kept in check by the
+ * memo itself — a name's own text is built once, and a suffix's string only when a pointer reuses that entry, at most
+ * once per message (see {@link readName}) — not by this cap.
  */
 export const MAX_NAME_OCTETS = MAX_MESSAGE;
 
@@ -227,10 +232,9 @@ export function writeName(w, name, compress = false) {
 
 /**
  * Read a name, following compression pointers under the guards above. When the reader carries per-message name state
- * (see the file overview), a name is looked up in the memo by its start offset, a pointer to an already-decoded offset
- * — the start of a name, or any label offset or pointer target within one — reuses the cached suffix, a hit carries the
- * wire length and hop count of a fresh decode at that offset, and only the label octets the decode formats for the
- * first time are charged against the reader's cap.
+ * (see the file overview), a pointer to an already-decoded offset — the start of a name, or any label offset or pointer
+ * target within one — reuses the cached suffix, a hit carries the wire length and hop count of a fresh decode at that
+ * offset, and only the label octets the decode walks for the first time are charged against the reader's cap.
  *
  * @param {import("./buffer.mjs").Reader} r
  * @returns {string} the canonical presentation form
@@ -241,13 +245,6 @@ export function readName(r) {
 	const bytes = r.bytes;
 	const memo = r.nameMemo;
 	const start = r.pos;
-	if (memo !== undefined) {
-		const hit = memo.get(start);
-		if (hit !== undefined) {
-			r.pos = hit.end;
-			return hit.text;
-		}
-	}
 	let cur = start;
 	// Before the first pointer, reads are bounded by the reader's end (the rdata); after it, by the message.
 	let limit = r.end;
@@ -257,12 +254,11 @@ export function readName(r) {
 	let wire = 1;
 	/** @type {string[]} */
 	const parts = [];
-	/** @type {{ text: string, wire: number, hops: number } | null} - a cached suffix reused at a pointer target */
+	/** @type {MemoEntry | null} - a cached suffix reused at a pointer target */
 	let suffix = null;
 	// Suffixes of this name to memoise at completion: every label offset and pointer target the walk touches, so any
-	// later pointer into the name is a hit. `parts` is where the name's text starts from that offset, `wire`/`hops`
-	// the walk state before it, `after` whether a pointer was already taken (such offsets end at the walk's terminal
-	// octet rather than at the first pointer).
+	// later pointer into the name is a hit. `index` is where the name's own labels start from that offset (an index
+	// into `parts`), `wire`/`hops` the walk state before it.
 	const offsets = [];
 	for (;;) {
 		if (cur >= limit) fail(WireErrorCode.TRUNCATED, "a name runs past the end of its field", cur);
@@ -293,14 +289,14 @@ export function readName(r) {
 					if (hops + hit.hops > MAX_POINTER_HOPS) fail(WireErrorCode.POINTER_LIMIT, `more than ${MAX_POINTER_HOPS} compression pointers in one name`, cur);
 					if (parts.length === 0) {
 						// The name is exactly this pointer: the whole name is the cached one, nothing new is materialised.
-						for (const o of offsets) memo.set(o.at, { text: hit.text, wire: hit.wire - o.wire + 1, hops: hops + hit.hops - o.hops, end: cur + 2 });
-						memo.set(start, { text: hit.text, wire: total, hops: hops + hit.hops, end: r.pos });
-						return hit.text;
+						for (const o of offsets) memo.set(o.at, { rec: hit.rec, index: hit.index, wire: hit.wire - o.wire + 1, hops: hops + hit.hops - o.hops });
+						memo.set(start, { rec: hit.rec, index: hit.index, wire: total, hops: hops + hit.hops });
+						return entryText(hit);
 					}
 					suffix = hit;
 					break;
 				}
-				offsets.push({ at: target, parts: parts.length, wire, hops, after: true });
+				offsets.push({ at: target, index: parts.length, wire, hops });
 			}
 			cur = target;
 			floor = target;
@@ -310,7 +306,7 @@ export function readName(r) {
 		if (cur + 1 + len > limit) fail(WireErrorCode.TRUNCATED, "a label runs past the end of its field", cur);
 		wire += len + 1;
 		if (wire > MAX_NAME) fail(WireErrorCode.NAME_TOO_LONG, `a name is longer than ${MAX_NAME} octets`, cur);
-		if (memo !== undefined) offsets.push({ at: cur, parts: parts.length, wire: wire - len - 1, hops, after: hops > 0 });
+		if (memo !== undefined) offsets.push({ at: cur, index: parts.length, wire: wire - len - 1, hops });
 		parts.push(formatLabel(bytes, cur + 1, cur + 1 + len));
 		cur += 1 + len;
 	}
@@ -319,31 +315,55 @@ export function readName(r) {
 	const totalHops = suffix === null ? hops : hops + suffix.hops;
 	// The root as a reused suffix adds only the final dot; every other suffix's text already ends with one. A reused
 	// suffix always has labels of its own in front of it: a name that is exactly one pointer returned the cached
-	// string at the pointer above.
-	const text =
-		suffix === null
-			? parts.length === 0
-				? "."
-				: parts.join(".") + "."
-			: parts.join(".") + "." + (suffix.text === "." ? "" : suffix.text);
+	// string at the pointer above. The reuse builds (and caches) the suffix's string now, if it was not built before.
+	const suffixText = suffix === null ? "" : entryText(suffix);
+	const tail = suffixText === "." ? "" : suffixText;
+	const text = parts.length === 0 ? "." : parts.join(".") + "." + tail;
 	if (memo !== undefined) {
-		// Only the label octets this decode formats for the first time are charged: repeated names and suffixes come
+		// Only the label octets this decode walks for the first time are charged: repeated names and suffixes come
 		// from the memo, so a message full of compressed repeats charges no more than its own size.
 		chargeName(r, wire - 1, start);
-		// Memoise the whole name and every suffix of it, so any later pointer into it is a hit.
-		const terminalEnd = suffix === null ? cur : cur + 2;
-		for (const o of offsets) {
-			const from =
-				o.parts === parts.length
-					? suffix === null
-						? "."
-						: suffix.text
-					: parts.slice(o.parts).join(".") + "." + (suffix === null || suffix.text === "." ? "" : suffix.text);
-			memo.set(o.at, { text: from, wire: total - o.wire + 1, hops: totalHops - o.hops, end: o.after ? terminalEnd : r.pos });
-		}
-		memo.set(start, { text, wire: total, hops: totalHops, end: r.pos });
+		// Memoise the whole name and every suffix of it, so any later pointer into it is a hit. An entry holds the
+		// name's own labels and where its suffix starts among them; entryText builds the string only when a pointer
+		// actually reuses the entry, so a message of uncompressed names never materialises a string per suffix.
+		const rec = { labels: parts, tail, text };
+		for (const o of offsets) memo.set(o.at, { rec, index: o.index, wire: total - o.wire + 1, hops: totalHops - o.hops });
+		memo.set(start, { rec, index: 0, wire: total, hops: totalHops });
 	}
 	return text;
+}
+
+/**
+ * A memo entry: one decoded name suffix, keyed by its offset. `rec` is the decoded name the suffix belongs to — its
+ * own labels in presentation form and `tail`, the text of the reused suffix behind them (empty for the root or a name
+ * with no pointer). `index` is where the suffix starts among those labels (0 at the name's start; `labels.length` at an
+ * offset whose suffix is exactly the reused one). `wire`/`hops` are what a fresh decode at the offset would charge, so
+ * a hit can check the combined limits; `text` is the suffix's presentation string, built by {@link entryText} on first
+ * use and cached. An entry no pointer ever reuses never holds a string.
+ *
+ * @typedef {object} MemoEntry
+ * @property {{ labels: string[], tail: string, text: string }} rec
+ * @property {number} index
+ * @property {number} wire
+ * @property {number} hops
+ * @property {string} [text]
+ */
+
+/**
+ * The presentation text of a memo entry: the record's own labels from the entry's index on, plus the record's tail.
+ * Built on first use and cached on the entry. The record's full text (index 0) is built at completion — it is the
+ * decode's return value — so that case only reads it.
+ * @param {MemoEntry} entry
+ * @returns {string}
+ */
+function entryText(entry) {
+	if (entry.text !== undefined) return entry.text;
+	const { labels, tail, text } = entry.rec;
+	if (entry.index === 0) return (entry.text = text);
+	// An index at the end of the record's own labels is an offset whose suffix is exactly the reused one: the tail,
+	// or the root when there is none.
+	entry.text = entry.index === labels.length ? (tail === "" ? "." : tail) : labels.slice(entry.index).join(".") + "." + tail;
+	return entry.text;
 }
 
 /**

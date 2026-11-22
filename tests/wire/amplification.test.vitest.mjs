@@ -308,15 +308,8 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		expect(code(() => decodeMessage(one, { maxNameOctets: 11 }))).toBe(WireErrorCode.NAME_LIMIT);
 	});
 
-	// Review finding 5: the memo's guard branches, exercised through readName directly (it is exported) with a
-	// hand-constructed Reader — no decodeMessage path reaches them.
-	it("readName returns a pre-seeded memo entry at its start offset", () => {
-		const r = new Reader(hex.from(`03 616263 00 0001 0001`), 12);
-		r.nameMemo = new Map([[12, { text: "cached.", wire: 5, hops: 2, end: 16 }]]);
-		expect(readName(r)).toBe("cached.");
-		expect(r.pos).toBe(16);
-	});
-
+	// The charge bookkeeping, exercised through readName directly (it is exported) with a hand-constructed Reader —
+	// decodeMessage always sets a cap, so the no-cap paths are reachable only here.
 	it("readName with a memo but no cap decodes and charges nothing", () => {
 		const r = new Reader(hex.from(`03 616263 00`));
 		r.nameMemo = new Map();
@@ -334,6 +327,28 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		const m = decodeMessage(Uint8Array.from(b));
 		expect(m.questions[0].name).toBe("abc.");
 		expect(m.answers[0].name).toBe("x.");
+	});
+
+	it("a pointer to an offset whose suffix is exactly a reused suffix builds the entry text from the tail", () => {
+		// The question is the 255-octet zero-label name. The first answer's owner is one label plus a pointer to the
+		// question's second label (offset 14) — a memo hit, so no labels are read after the pointer and the entry's
+		// index equals the record's label count; its text is the record's tail. The second answer's owner is a bare
+		// pointer to the same offset, so the hit builds that text: exactly what a fresh walk from 14 decodes. The
+		// third and fourth do the same at the question's root terminator (offset 266, uncached — no name was read at
+		// it), whose record has no tail: the entry's text there is the root.
+		const b = [0, 0, 0x01, 0x00, 0, 1, 0, 4, 0, 0, 0, 0];
+		for (let i = 0; i < 127; i++) b.push(1, 0);
+		b.push(0, 0x00, 0x01, 0x00, 0x01); // the question ends at offset 271
+		b.push(1, 0x78, 0xc0, 0x0e, 0, 2, 0, 254, 0, 0, 0, 0, 0, 0); // owner "x" + pointer to 14
+		b.push(0xc0, 0x0e, 0, 2, 0, 254, 0, 0, 0, 0, 0, 0); // owner: a bare pointer to 14
+		b.push(1, 0x79, 0xc1, 0x0a, 0, 2, 0, 254, 0, 0, 0, 0, 0, 0); // owner "y" + pointer to 266
+		b.push(0xc1, 0x0a, 0, 2, 0, 254, 0, 0, 0, 0, 0, 0); // owner: a bare pointer to 266
+		const m = decodeMessage(Uint8Array.from(b));
+		const suffix = "\\000.".repeat(126);
+		expect(m.answers[0].name).toBe(`x.${suffix}`);
+		expect(m.answers[1].name).toBe(suffix);
+		expect(m.answers[2].name).toBe("y.");
+		expect(m.answers[3].name).toBe(".");
 	});
 
 	it("a pointer chain through an uncached pointer byte resolves through the memo", () => {
