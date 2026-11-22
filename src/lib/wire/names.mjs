@@ -238,8 +238,8 @@ export function writeName(w, name, compress = false) {
  *
  * @param {import("./buffer.mjs").Reader} r
  * @returns {string} the canonical presentation form
- * @throws {import("./errors.mjs").WireError} TRUNCATED, BAD_LABEL_TYPE, POINTER_FORWARD, POINTER_OUT_OF_RANGE, POINTER_LIMIT,
- *   NAME_TOO_LONG, NAME_LIMIT
+ * @throws {import("./errors.mjs").WireError} TRUNCATED, BAD_LABEL_TYPE, BAD_RDATA (a compression pointer in standalone rdata,
+ *   CLDMV/digby#38), POINTER_FORWARD, POINTER_OUT_OF_RANGE, POINTER_LIMIT, NAME_TOO_LONG, NAME_LIMIT
  */
 export function readName(r) {
 	const bytes = r.bytes;
@@ -269,6 +269,9 @@ export function readName(r) {
 		}
 		const kind = len & 0xc0;
 		if (kind === 0xc0) {
+			// standalone rdata (decodeRdataBytes) carries no compression: there is no message for a pointer to resolve
+			// against, so one is refused wherever the codec reads a name (CLDMV/digby#38)
+			if (r.standalone) fail(WireErrorCode.BAD_RDATA, "standalone rdata must not carry compression pointers", cur);
 			if (cur + 1 >= limit) fail(WireErrorCode.TRUNCATED, "a compression pointer is cut short", cur);
 			const target = ((len & 0x3f) << 8) | bytes[cur + 1];
 			if (target >= bytes.length) fail(WireErrorCode.POINTER_OUT_OF_RANGE, `a compression pointer to ${target} is past the end`, cur);

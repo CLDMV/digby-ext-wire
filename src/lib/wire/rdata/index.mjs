@@ -86,8 +86,8 @@ export function decodeRdata(type, r) {
 }
 
 /**
- * Decode standalone rdata octets. There is no message around them, so a compression pointer can only resolve against these
- * octets themselves: a backward pointer to an earlier position inside them resolves, and a forward or out-of-range one fails
+ * Decode standalone rdata octets. Standalone rdata carries no compression pointers (RFC 3597 5): there is no message for one
+ * to resolve against, so a pointer inside the octets is refused BAD_RDATA wherever the type's codec reads a name
  * (CLDMV/digby#38).
  * @param {number} type
  * @param {Uint8Array} octets
@@ -95,6 +95,7 @@ export function decodeRdata(type, r) {
  */
 export function decodeRdataBytes(type, octets) {
 	const r = new Reader(bytes(octets, "rdata"));
+	r.standalone = true; // readName refuses compression pointers on a standalone reader (CLDMV/digby#38)
 	return r.limit(octets.length, () => decodeRdata(type, r));
 }
 
