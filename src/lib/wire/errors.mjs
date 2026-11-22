@@ -27,7 +27,9 @@ export const WireErrorCode = Object.freeze({
 	POINTER_LIMIT: "POINTER_LIMIT", // more pointer hops in one name than any valid name needs
 	LABEL_TOO_LONG: "LABEL_TOO_LONG", // a label over 63 octets
 	NAME_TOO_LONG: "NAME_TOO_LONG", // a name over 255 octets in wire form
+	NAME_LIMIT: "NAME_LIMIT", // the message decodes more name octets than its cap allows (pointer fan-out amplification)
 	// Decode: message structure
+	QUESTION_LIMIT: "QUESTION_LIMIT", // a larger qdcount than the decode's maxQuestions allows
 	OPT_MISPLACED: "OPT_MISPLACED", // OPT outside the additional section, or with a non-root owner
 	MULTIPLE_OPT: "MULTIPLE_OPT", // more than one OPT record
 	TSIG_MISPLACED: "TSIG_MISPLACED", // TSIG not the last record of the additional section

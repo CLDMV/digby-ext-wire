@@ -40,10 +40,11 @@ describe(`wire properties (seed ${SEED})`, () => {
 			const m = genMessage(g);
 			const bytes = encodeMessage(m);
 			expect(bytes.length).toBeLessThanOrEqual(65535);
-			expect(decodeMessage(bytes)).toEqual(m);
+			// genMessage emits up to two questions; the decode default is one (the server path), so say so
+			expect(decodeMessage(bytes, { maxQuestions: 2 })).toEqual(m);
 			const plain = encodeMessage(m, { compress: false });
 			expect(plain.length).toBeGreaterThanOrEqual(bytes.length);
-			expect(decodeMessage(plain)).toEqual(m);
+			expect(decodeMessage(plain, { maxQuestions: 2 })).toEqual(m);
 		}
 	});
 
@@ -61,7 +62,7 @@ describe(`wire properties (seed ${SEED})`, () => {
 			}
 			const { bytes, truncated } = encodeCapped(m, { limit });
 			expect(bytes.length).toBeLessThanOrEqual(limit);
-			const d = decodeMessage(bytes);
+			const d = decodeMessage(bytes, { maxQuestions: 2 });
 			expect(d.flags.tc).toBe(m.flags.tc || truncated);
 			expect(d.edns).toEqual(m.edns);
 			expect(isRrsetPrefix(d.answers, m.answers)).toBe(true);

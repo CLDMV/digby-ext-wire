@@ -13,9 +13,13 @@
  *
  * Decode guards: a pointer must point strictly before the start of the segment being read (which rules out loops and forward
  * references), inside the message, with at most {@link MAX_POINTER_HOPS} hops; label types 0b01 and 0b10 are refused; the
- * name's wire length is at most 255 octets.
+ * name's wire length is at most 255 octets. When the reader carries per-message name state (set up by `decodeMessage`), names
+ * are memoised by their start offset — a later name at the same offset, or a pointer to an already-decoded offset, reuses the
+ * cached string instead of re-expanding it — and the octets of newly materialised names are counted against
+ * {@link MAX_NAME_OCTETS}, so a pointer fan-out cannot make one message expand without bound.
  */
 
+import { MAX_MESSAGE } from "./buffer.mjs";
 import { WireErrorCode, fail } from "./errors.mjs";
 
 /** The longest label (RFC 1035 2.3.4). */
@@ -24,6 +28,14 @@ export const MAX_LABEL = 63;
 export const MAX_NAME = 255;
 /** More pointer hops than any valid name needs (a 255-octet name has at most 127 labels). */
 export const MAX_POINTER_HOPS = 128;
+/**
+ * The default per-message cap on decoded name octets: 8× the largest possible message. A name's own octets sit in the
+ * message once (repeats come back from the memo for free), so a legitimate message's newly materialised name octets
+ * stay a small multiple of its size. The largest pointer fan-out constructible in a 64 KB message charges ~255 name
+ * octets per 14-16 octets of record framing — ~16-18 per message octet, ~1.2 M total, about 2.3× this cap — so a
+ * maximised amplification fails NAME_LIMIT while ordinary traffic is untouched.
+ */
+export const MAX_NAME_OCTETS = 8 * MAX_MESSAGE;
 
 const DOT = 0x2e;
 const BACKSLASH = 0x5c;
@@ -38,14 +50,14 @@ const SPECIAL = new Set([0x2e, 0x5c, 0x22, 0x28, 0x29, 0x3b, 0x40, 0x24]);
  * @returns {string}
  */
 export function formatLabel(bytes, start = 0, end = bytes.length) {
-	let out = "";
+	const chars = [];
 	for (let i = start; i < end; i++) {
 		const c = bytes[i];
-		if (SPECIAL.has(c)) out += "\\" + String.fromCharCode(c);
-		else if (c > 0x20 && c < 0x7f) out += String.fromCharCode(c);
-		else out += "\\" + String(c).padStart(3, "0");
+		if (SPECIAL.has(c)) chars.push(0x5c, c);
+		else if (c > 0x20 && c < 0x7f) chars.push(c);
+		else chars.push(0x5c, 0x30 + ((c / 100) | 0), 0x30 + (((c / 10) | 0) % 10), 0x30 + (c % 10));
 	}
-	return out;
+	return String.fromCharCode(...chars);
 }
 
 /**
@@ -212,23 +224,41 @@ export function writeName(w, name, compress = false) {
 }
 
 /**
- * Read a name, following compression pointers under the guards above.
+ * Read a name, following compression pointers under the guards above. When the reader carries per-message name state
+ * (see the file overview), a name is looked up in the memo by its start offset, a pointer to an already-decoded offset
+ * reuses the cached suffix, and the octets of the strings the decode newly materialises are charged against the
+ * reader's cap: a whole-name hit or a name that is exactly one pointer returns the cached string for free, while a
+ * name with labels of its own counts its own octets plus the reused suffix's.
  *
  * @param {import("./buffer.mjs").Reader} r
  * @returns {string} the canonical presentation form
  * @throws {import("./errors.mjs").WireError} TRUNCATED, BAD_LABEL_TYPE, POINTER_FORWARD, POINTER_OUT_OF_RANGE, POINTER_LIMIT,
- *   NAME_TOO_LONG
+ *   NAME_TOO_LONG, NAME_LIMIT
  */
 export function readName(r) {
 	const bytes = r.bytes;
-	let cur = r.pos;
+	const memo = r.nameMemo;
+	const start = r.pos;
+	if (memo !== undefined) {
+		const hit = memo.get(start);
+		/* v8 ignore next 4 - no decode path reads the same name field twice (fields never overlap), so the suite
+		   cannot reach this; the lookup keeps the memo's start-offset contract for a caller that re-reads one. */
+		if (hit !== undefined) {
+			r.pos = hit.end;
+			return hit.text;
+		}
+	}
+	let cur = start;
 	// Before the first pointer, reads are bounded by the reader's end (the rdata); after it, by the message.
 	let limit = r.end;
-	let floor = r.pos;
+	let floor = start;
 	let jumped = false;
 	let hops = 0;
 	let wire = 1;
-	let out = "";
+	/** @type {string[]} */
+	const parts = [];
+	/** @type {{ text: string, wire: number } | null} - a cached suffix reused at a pointer target */
+	let suffix = null;
 	for (;;) {
 		if (cur >= limit) fail(WireErrorCode.TRUNCATED, "a name runs past the end of its field", cur);
 		const len = bytes[cur];
@@ -248,6 +278,20 @@ export function readName(r) {
 				jumped = true;
 				limit = bytes.length;
 			}
+			if (memo !== undefined) {
+				const hit = memo.get(target);
+				if (hit !== undefined) {
+					const total = wire - 1 + hit.wire;
+					if (total > MAX_NAME) fail(WireErrorCode.NAME_TOO_LONG, `a name is longer than ${MAX_NAME} octets`, cur);
+					if (parts.length === 0) {
+						// The name is exactly this pointer: the whole name is the cached one, nothing new is materialised.
+						memo.set(start, { text: hit.text, wire: total, end: r.pos });
+						return hit.text;
+					}
+					suffix = hit;
+					break;
+				}
+			}
 			cur = target;
 			floor = target;
 			continue;
@@ -256,9 +300,40 @@ export function readName(r) {
 		if (cur + 1 + len > limit) fail(WireErrorCode.TRUNCATED, "a label runs past the end of its field", cur);
 		wire += len + 1;
 		if (wire > MAX_NAME) fail(WireErrorCode.NAME_TOO_LONG, `a name is longer than ${MAX_NAME} octets`, cur);
-		out += formatLabel(bytes, cur + 1, cur + 1 + len) + ".";
+		parts.push(formatLabel(bytes, cur + 1, cur + 1 + len));
 		cur += 1 + len;
 	}
 	if (!jumped) r.pos = cur;
-	return out === "" ? "." : out;
+	const total = suffix === null ? wire : wire - 1 + suffix.wire;
+	// The root as a reused suffix adds only the final dot; every other suffix's text already ends with one. A reused
+	// suffix always has labels of its own in front of it: a name that is exactly one pointer returned the cached
+	// string at the pointer above.
+	const text =
+		suffix === null
+			? parts.length === 0
+				? "."
+				: parts.join(".") + "."
+			: parts.join(".") + "." + (suffix.text === "." ? "" : suffix.text);
+	if (memo !== undefined) {
+		chargeName(r, total, start);
+		memo.set(start, { text, wire: total, end: r.pos });
+	}
+	return text;
+}
+
+/**
+ * Charge freshly materialised name octets against the reader's per-message cap.
+ * @param {import("./buffer.mjs").Reader} r
+ * @param {number} octets
+ * @param {number} at
+ */
+function chargeName(r, octets, at) {
+	const cap = r.maxNameOctets;
+	/* v8 ignore next 1 - decodeMessage always sets the cap; the guard keeps readName safe for a caller that attaches
+	   the memo without one. */
+	if (cap === undefined) return;
+	/* v8 ignore next 1 - decodeMessage initialises the count; a caller that set the cap without it has been refused
+	   nothing, but no current caller does, so the fallback arm is not reachable from the suite. */
+	r.nameOctets = (r.nameOctets ?? 0) + octets;
+	if (r.nameOctets > cap) fail(WireErrorCode.NAME_LIMIT, `the message decodes more than ${cap} name octets`, at);
 }

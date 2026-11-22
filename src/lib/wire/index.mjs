@@ -31,7 +31,7 @@ export {
 	typeToString
 } from "./constants.mjs";
 export { MAX_MESSAGE } from "./buffer.mjs";
-export { MAX_LABEL, MAX_NAME, canonicalName, formatName, labelCount, nameKey, namesEqual, parseName } from "./names.mjs";
+export { MAX_LABEL, MAX_NAME, MAX_NAME_OCTETS, canonicalName, formatName, labelCount, nameKey, namesEqual, parseName } from "./names.mjs";
 export { decodeMessage, encodeCapped, encodeMessage } from "./message.mjs";
 export { DEFAULT_UDP_CAP, TCP_MAX, TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "./limits.mjs";
 export { TYPED, decodeRdataBytes, encodeRdataBytes, formatGeneric, formatRdata, isTyped, parseRdata } from "./rdata/index.mjs";

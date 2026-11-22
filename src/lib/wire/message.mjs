@@ -27,7 +27,7 @@ import { CLASS, TYPE } from "./constants.mjs";
 import { joinOptTtl, readOptions, splitOptTtl, writeOptions } from "./edns.mjs";
 import { WireError, WireErrorCode, fail } from "./errors.mjs";
 import { HEADER_SIZE, TC_BIT, packFlags, unpackFlags } from "./header.mjs";
-import { nameKey, readName, writeName } from "./names.mjs";
+import { MAX_NAME_OCTETS, nameKey, readName, writeName } from "./names.mjs";
 import { array, obj, string } from "./rdata/common.mjs";
 import { decodeRdata, encodeRdata } from "./rdata/index.mjs";
 
@@ -37,15 +37,26 @@ const MAX_TTL = 0x7fffffff;
 /**
  * Decode a message.
  *
+ * The decode bounds exist so one packet cannot make the decode allocate without bound: `maxQuestions` caps the question
+ * section (a DNS query carries one question, so the server decode path keeps the default), and `maxNameOctets` caps the
+ * name octets a decode newly materialises — with names memoised per message (see `readName`), a compression-pointer
+ * fan-out that re-expands one name per pointer fails NAME_LIMIT instead of producing megabytes of strings.
+ *
  * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input
  * @param {object} [options]
  * @param {boolean} [options.allowTrailing=false] - accept octets after the last section instead of failing TRAILING_DATA
+ * @param {number} [options.maxQuestions=1] - the most questions to decode; a larger qdcount fails QUESTION_LIMIT. Raise it
+ *   only for a caller that legitimately decodes multi-question messages (round-trip tooling does).
+ * @param {number} [options.maxNameOctets=MAX_NAME_OCTETS] - the most name octets (wire form, including reused compression
+ *   suffixes) one decode may materialise; going over fails NAME_LIMIT
  * @returns {object} the message (shape above)
  * @throws {WireError} for any malformed input; nothing else
  */
-export function decodeMessage(input, { allowTrailing = false } = {}) {
+export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, maxNameOctets = MAX_NAME_OCTETS } = {}) {
 	const bytes = asBytes(input);
 	if (bytes.length > MAX_MESSAGE) fail(WireErrorCode.INPUT_TOO_LARGE, `a message is at most ${MAX_MESSAGE} octets, got ${bytes.length}`);
+	checkInt(maxQuestions, 0xffff, "maxQuestions");
+	checkInt(maxNameOctets, Number.MAX_SAFE_INTEGER, "maxNameOctets");
 	const r = new Reader(bytes);
 	if (bytes.length < HEADER_SIZE) fail(WireErrorCode.TRUNCATED, `a message is at least ${HEADER_SIZE} octets, got ${bytes.length}`, 0);
 	const id = r.u16();
@@ -53,8 +64,17 @@ export function decodeMessage(input, { allowTrailing = false } = {}) {
 	const qd = r.u16();
 	const counts = [r.u16(), r.u16(), r.u16()];
 
+	// Per-decode name state, read by readName (see names.mjs): the start-offset memo of decoded names and the running
+	// count of newly materialised name octets against the cap.
+	r.nameMemo = new Map();
+	r.nameOctets = 0;
+	r.maxNameOctets = maxNameOctets;
+
 	const questions = [];
-	for (let i = 0; i < qd; i++) questions.push({ name: readName(r), type: r.u16(), class: r.u16() });
+	for (let i = 0; i < qd; i++) {
+		if (i >= maxQuestions) fail(WireErrorCode.QUESTION_LIMIT, `the message declares ${qd} questions, more than the ${maxQuestions} the decode allows`, r.pos);
+		questions.push({ name: readName(r), type: r.u16(), class: r.u16() });
+	}
 
 	const message = { id, flags, rcode: rcodeLow, questions, answers: [], authorities: [], additionals: [], edns: null };
 	let extendedRcode = 0;

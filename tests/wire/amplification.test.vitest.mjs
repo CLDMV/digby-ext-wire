@@ -134,6 +134,28 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		expect(err).toBe(WireErrorCode.NAME_LIMIT);
 	});
 
+	it("a memoised suffix reused behind long own labels still respects MAX_NAME", () => {
+		// The first question's name is 199 wire octets; the second is a 62-octet label plus a pointer to it, which
+		// walks to 262 octets. The memo path skips walking the suffix, so the combined-length check at the reuse is
+		// what must keep the per-name limit (a naive memo would return the 262-octet name).
+		const b = [0, 0, 0x01, 0x00, 0, 2, 0, 0, 0, 0, 0, 0];
+		for (let i = 0; i < 99; i++) b.push(1, 0);
+		b.push(0, 0x00, 0x01, 0x00, 0x01);
+		b.push(62, ...Array(62).fill(0x61), 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01);
+		expect(code(() => decodeMessage(Uint8Array.from(b), { maxQuestions: 2 }))).toBe(WireErrorCode.NAME_TOO_LONG);
+	});
+
+	it("a pointer to the root adds only the final dot behind its own labels", () => {
+		// The question's name is the root; the answer's owner is one label plus a pointer back to it, so the reused
+		// suffix is "." itself — the result is "a.", not "a..".
+		const b = [0, 0, 0x01, 0x00, 0, 1, 0, 1, 0, 0, 0, 0];
+		b.push(0, 0x00, 0x01, 0x00, 0x01); // question: root name, type A, class IN
+		b.push(1, 0x61, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 1, 0, 4, 0x7f, 0, 0, 1);
+		const m = decodeMessage(Uint8Array.from(b));
+		expect(m.questions[0].name).toBe(".");
+		expect(m.answers[0].name).toBe("a.");
+	});
+
 	it("maxNameOctets is tunable: a cap below a name's wire size rejects it, one at or above it allows it", () => {
 		const one = hex.from(`0000 0000 0001 0000 0000 0000 03 777777 07 6578616d706c65 00 0001 0001`);
 		expect(decodeMessage(one, { maxNameOctets: 13 }).questions[0].name).toBe("www.example."); // the name is 13 wire octets
