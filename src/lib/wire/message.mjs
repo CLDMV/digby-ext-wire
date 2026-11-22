@@ -117,7 +117,9 @@ export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, 
 }
 
 /**
- * Read one resource record.
+ * Read one resource record. The envelope's class and TTL are decoded as they arrive, with no record-level rules applied: what
+ * a record's class and TTL must be is the verifier layer's job, not the codec's — a TSIG record's class ANY and TTL 0
+ * (RFC 8945 4.1.1) are judged there, so decode stays lenient and a verifier sees exactly what arrived (CLDMV/digby#39).
  * @param {Reader} r
  */
 function readRecord(r) {
@@ -270,11 +272,14 @@ export function appendTsig(capped, tsigRecord) {
  *
  * @param {object} tsigRecord - a TSIG record (`name`, `type` TYPE.TSIG, `class`, `ttl`, `data` per rdata/tsig.mjs)
  * @returns {number}
- * @throws {WireError} whatever encoding the record raises
+ * @throws {WireError} VALUE_OUT_OF_RANGE for anything that is not a TSIG record; whatever encoding the record raises
  */
 export function tsigRecordSize(tsigRecord) {
+	obj(tsigRecord, "TSIG record");
+	const type = tsigRecord.type; // read once: the check and the write below act on the same value
+	if (type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `tsigRecordSize measures a TSIG record, got type ${String(type)}`);
 	const w = new Writer({ max: MAX_MESSAGE, compress: false });
-	writeRecord(w, tsigRecord);
+	writeRecord(w, tsigRecord, type);
 	return w.length;
 }
 
