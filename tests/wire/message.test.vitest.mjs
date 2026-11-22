@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { CLASS, OPCODE, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { packFlags, unpackFlags } from "../../src/lib/wire/header.mjs";
-import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
 import { parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
@@ -122,6 +122,21 @@ describe("messages", () => {
 		expect(code(() => decodeMessage(hex.from(`0000 0000 0000 0001 0000 0000 00 ffff 0001 00000000 0000`)))).toBe("BAD_RDATA");
 		expect(code(() => encodeMessage({ id: 0, answers: [{ name: ".", type: 65535, ttl: 0, data: { data: new Uint8Array(0) } }] }))).toBe("VALUE_OUT_OF_RANGE");
 		expect(code(() => parseRecord("a. 3600 IN TYPE65535 \\# 0"))).toBe("BAD_PRESENTATION");
+	});
+
+	it("refuses records of the reserved type 0 (RFC 6895; CLDMV/digby#38)", () => {
+		// the questions, the type bitmaps and RRSIG's typeCovered already refuse it; the record envelope does too now
+		expect(code(() => decodeMessage(hex.from(`0000 0000 0000 0001 0000 0000 00 0000 0001 00000000 0000`)))).toBe("BAD_RDATA");
+		expect(code(() => encodeMessage({ id: 0, answers: [{ name: ".", type: 0, ttl: 0, data: { data: new Uint8Array(0) } }] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("keeps a SIG(0) record: typeCovered 0 stays unchecked (RFC 2931; CLDMV/digby#38)", () => {
+		// SIG rdata is RFC 3597 octets to the codec and its first field is the typeCovered, which a SIG(0) transaction
+		// signature sets to 0 (RFC 2931) — the codec must never start checking it
+		const b = hex.from(`0000 0000 0000 0001 0000 0000 00 0018 00ff 00000000 0016 0000 03 00 0000000a 0000000a 0000000a 0000 0161 0062`);
+		const m = decodeMessage(b);
+		expect(m.answers[0].type).toBe(TYPE.SIG);
+		expect(hex.to(encodeMessage(m))).toBe(hex.to(b));
 	});
 
 	it("refuses a question of a reserved type: 0 and 65535 (CLDMV/digby#38)", () => {
@@ -249,5 +264,53 @@ describe("encodeCapped and TSIG (CLDMV/digby#39)", () => {
 		const roomy = encodeCapped(m, { limit: full + need, reserveTsig: need });
 		expect(roomy.truncated).toBe(false);
 		expect(roomy.bytes.length).toBe(full);
+	});
+
+	it("tsigRecordSize measures a TSIG record only (CLDMV/digby#39)", () => {
+		// an A record is 26 octets on the wire, but the reservation is for a TSIG record: measuring anything else would
+		// have appendTsig refuse it later anyway, so refuse it here
+		expect(code(() => tsigRecordSize({ name: ".", type: 1, class: 1, ttl: 0, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => tsigRecordSize(null))).toBe("VALUE_OUT_OF_RANGE");
+	});
+});
+
+describe("truncation refuses messages whose meaning it would destroy (CLDMV/digby#43)", () => {
+	const SOA = (serial) => ({
+		name: "example.",
+		type: TYPE.SOA,
+		class: 1,
+		ttl: 60,
+		data: { mname: "ns.example.", rname: "host.example.", serial, refresh: 0, retry: 0, expire: 0, minimum: 0 }
+	});
+	const A = (i) => ({ name: `h${i}.example.`, type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.1" } });
+	// the records between the SOAs make the message need truncation at a 512-octet limit
+	const transfer = (type) => ({
+		id: 1,
+		flags: { qr: true },
+		questions: [{ name: "example.", type, class: 1 }],
+		answers: [SOA(3), ...Array.from({ length: 40 }, (_, i) => A(i)), SOA(3)]
+	});
+	const update = {
+		id: 1,
+		flags: { opcode: OPCODE.UPDATE },
+		questions: [],
+		authorities: [SOA(3), ...Array.from({ length: 40 }, (_, i) => A(i)), SOA(3)]
+	};
+
+	it("refuses to truncate an UPDATE (TRUNCATION_REFUSED)", () => {
+		// dropping whole RRsets out of an update section changes the update it describes
+		expect(code(() => encodeCapped(update, { limit: 512 }))).toBe("TRUNCATION_REFUSED");
+		// when the message fits it still encodes normally
+		const capped = encodeCapped(update, { limit: 65535 });
+		expect(capped.truncated).toBe(false);
+		expect(decodeMessage(capped.bytes).authorities).toHaveLength(42);
+	});
+
+	it.each([TYPE.AXFR, TYPE.IXFR])("refuses to truncate a transfer with a type-%s question (TRUNCATION_REFUSED)", (type) => {
+		// an AXFR's SOA bookends and an IXFR's SOA-diff structure break when whole RRsets drop
+		expect(code(() => encodeCapped(transfer(type), { limit: 512 }))).toBe("TRUNCATION_REFUSED");
+		const capped = encodeCapped(transfer(type), { limit: 65535 });
+		expect(capped.truncated).toBe(false);
+		expect(decodeMessage(capped.bytes).answers).toHaveLength(42);
 	});
 });
