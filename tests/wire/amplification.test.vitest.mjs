@@ -5,9 +5,9 @@
 
 /**
  * @fileoverview Regression tests for the decode amplification of CLDMV/digby#34: one 64 KB packet whose compression
- * pointers all resolve to the same name must not re-expand that name per pointer, and the pointer fan-outs the fuzzer
+ * pointers all resolve to the same name must not re-expand that name per pointer, the pointer fan-outs the fuzzer
  * cannot reach (a fresh label before every pointer, in owner names or in NS rdata) must be stopped by the per-message
- * name-octets cap.
+ * name-octets cap, and a packet of uncompressed repeated names must not pay a string per suffix.
  */
 
 import { performance } from "node:perf_hooks";
@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 import { Reader } from "../../src/lib/wire/buffer.mjs";
 import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage } from "../../src/lib/wire/message.mjs";
-import { readName } from "../../src/lib/wire/names.mjs";
+import { MAX_NAME_OCTETS, readName } from "../../src/lib/wire/names.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {
@@ -137,6 +137,69 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		expect(m.answers).toHaveLength(4079);
 		const target = `a.${"\\000.".repeat(126)}`;
 		for (const a of m.answers) expect(a.data.target).toBe(target);
+	});
+
+	// Round 2 finding: a name of k fresh labels must not format a string per label offset. The memo's completion loop
+	// builds `parts.slice(o.parts).join(".") + "." + …` for every label offset of every name — about k²/2 suffix
+	// strings per name — even when no pointer ever reuses any of them. This packet is 247 uncompressed 255-octet
+	// names (127 zero-byte labels each, no pointer anywhere): 10,038,081 characters of memo text from a 65,472-octet
+	// packet (~153x its size), where the names' own text is 156,946. The memo must store each suffix structurally and
+	// build a suffix's string only when a pointer actually reuses it.
+	function uncompressedNamesPacket() {
+		const answers = 247;
+		const b = [0, 0, 0x01, 0x00, 0, 1, answers >> 8, answers & 0xff, 0, 0, 0, 0]; // qdcount 1, ancount = answers
+		b.push(0, 0x00, 0x01, 0x00, 0x01); // the question's name is the root
+		for (let i = 0; i < answers; i++) {
+			for (let j = 0; j < 127; j++) b.push(1, 0); // 127 one-octet zero labels
+			b.push(0); // the root terminator: the owner is a full 255-octet name
+			b.push(0, 2, 0, 0xfe, 0, 0, 0, 0, 0, 0); // type NS, class NONE, ttl 0, rdlength 0 (the RFC 2136 empty-rdata form)
+		}
+		return Uint8Array.from(b); // 12 + 5 + 247 * 265 = 65,472 octets
+	}
+
+	it("uncompressed repeated names do not format a suffix string per label offset", () => {
+		const packet = uncompressedNamesPacket();
+		expect(packet.length).toBe(65472);
+		// The bound counts the characters of suffix text the memo holds — exact and immune to GC timing, where a
+		// heapUsed delta is not (measured deltas for identical builds of one memo moved 14.8-22.7 MB with GC luck).
+		// 1,000,000 sits ~6x above the fixed cost (the names' own 156,946 characters, held once each) and ~10x below
+		// the per-offset formatting's 10,038,081.
+		const CHARS_BUDGET = 1_000_000;
+		const TIME_BUDGET_MS = 50;
+
+		// Drive readName over the packet's owner names on a Reader that stays alive: inside decodeMessage the
+		// per-message name state dies with the Reader, so the memo's contents are only observable here.
+		const r = new Reader(packet, 12);
+		r.nameMemo = new Map();
+		r.nameOctets = 0;
+		r.maxNameOctets = MAX_NAME_OCTETS;
+		readName(r); // the question's root name, as decodeMessage reads it
+		r.pos += 4; // qtype, qclass
+		for (let i = 0; i < 247; i++) {
+			readName(r); // the owner: a full uncompressed 255-octet name
+			r.pos += 10; // type, class, ttl, rdlength
+		}
+		// 127 distinct offsets per name (a name's start is its first label offset) plus the question's root.
+		if (r.nameMemo.size !== 1 + 247 * 127) throw new Error("the memo was discarded early");
+		// An entry holds a string only once a pointer has built one (none here); the names' own text lives once per
+		// record, on the entry for the name's start.
+		let chars = 0;
+		for (const e of r.nameMemo.values()) {
+			const t = e.text ?? (e.index === 0 ? e.rec.text : undefined);
+			if (t !== undefined) chars += t.length;
+		}
+		expect(chars, `the memo holds ${chars} characters of suffix text`).toBeLessThan(CHARS_BUDGET);
+
+		// End-to-end decode: correctness and time.
+		const decode = () => decodeMessage(packet);
+		decode(); // warm-up, so the timed run measures steady-state rather than JIT
+		const t0 = performance.now();
+		const m = decode();
+		const ms = performance.now() - t0;
+		expect(ms, `decode took ${ms} ms`).toBeLessThan(TIME_BUDGET_MS);
+		const name = "\\000.".repeat(127);
+		expect(m.answers).toHaveLength(247);
+		for (const a of m.answers) expect(a.name).toBe(name);
 	});
 
 	it("a memoised suffix reused behind long own labels still respects MAX_NAME", () => {
