@@ -452,6 +452,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 
 	const written = [0, 0, 0];
 	let truncated = false;
+	let dropped = false; // any RRset dropped from any section — an additionals-only drop never sets TC, but it is still a drop (CLDMV/digby#43)
 	if (!truncate) {
 		// a non-truncating encode writes the records exactly as they are: record order is meaning (a transfer's SOA bookends,
 		// an IXFR's SOA-diff structure, an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36)
@@ -526,6 +527,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 					}
 					w.rollback(mark);
 					keptSets = k;
+					dropped = true;
 					if (s < 2) truncated = true;
 					break; // the truncation point: this set and everything after it, in every section, is dropped
 				}
@@ -540,10 +542,12 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			if (keptSets < sets.length) break outer;
 		}
 	}
-	if (truncated) {
+	if (dropped) {
 		// Truncating must not corrupt a message whose meaning lives in its record structure (CLDMV/digby#43): whole
 		// RRsets drop, and out of an UPDATE that changes the update it describes; out of a transfer it breaks the SOA
-		// bookends (AXFR) or the SOA-diff structure (IXFR). A message that fits still encodes normally.
+		// bookends (AXFR) or the SOA-diff structure (IXFR). Any drop from any section counts: an additionals-only
+		// drop never sets TC (RFC 2181 9 — additionals are optional data), but it is still a drop. A message that
+		// fits still encodes normally.
 		if ((message.flags?.opcode ?? 0) === OPCODE.UPDATE)
 			fail(WireErrorCode.TRUNCATION_REFUSED, "an UPDATE cannot be truncated: dropping RRsets would change the update it describes");
 		if (questions.some((q) => q.type === TYPE.AXFR || q.type === TYPE.IXFR))
