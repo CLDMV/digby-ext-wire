@@ -274,15 +274,17 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 	});
 
 	it("a pointer chain through an uncached pointer byte resolves through the memo", () => {
-		// The question is "abc."; a pointer to it sits at offset 21, never read as a name; the answer's owner is one
-		// label plus a pointer to 21 — an uncached jump target whose walk is itself a pointer to a memoised name.
-		const b = [0, 0, 0x01, 0x00, 0, 1, 0, 1, 0, 0, 0, 0];
+		// The first answer's TXT rdata carries a pointer to the question (octets 35-36) that no name was ever read
+		// at; the second answer's owner is one label plus a pointer to 35 — an uncached jump target whose walk is
+		// itself a pointer to a memoised name.
+		const b = [0, 0, 0x01, 0x00, 0, 1, 0, 2, 0, 0, 0, 0];
 		b.push(3, 0x61, 0x62, 0x63, 0, 0x00, 0x01, 0x00, 0x01); // question: "abc." A IN, ends at offset 21
-		b.push(0xc0, 0x0c); // a pointer to 12 at offset 21, never walked
-		b.push(1, 0x78, 0xc0, 0x15, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 0x7f, 0, 0, 1); // owner "x" + pointer to 21
+		b.push(1, 0x78, 0x00, 0x00, 0x10, 0x00, 0x01, 0, 0, 0, 0, 0, 3, 2, 0xc0, 0x0c); // "x." TXT rdata 02 C0 0C
+		b.push(1, 0x79, 0xc0, 0x23, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 0x7f, 0, 0, 1); // owner "y" + pointer to 35
 		const m = decodeMessage(Uint8Array.from(b));
-		// the owner is "x" plus a pointer to offset 21, whose name is "abc." (itself a pointer to the question)
-		expect(m.answers[0].name).toBe("x.abc.");
+		expect(m.answers[0].name).toBe("x.");
+		// the owner is "y" plus a pointer to 35, whose name is "abc." (itself a pointer to the question)
+		expect(m.answers[1].name).toBe("y.abc.");
 	});
 
 	it("readName with a cap but no counter initialises it from zero", () => {
