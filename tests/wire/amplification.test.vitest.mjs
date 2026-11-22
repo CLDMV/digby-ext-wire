@@ -12,8 +12,10 @@
 
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
+import { Reader } from "../../src/lib/wire/buffer.mjs";
 import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage } from "../../src/lib/wire/message.mjs";
+import { readName } from "../../src/lib/wire/names.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {
@@ -39,11 +41,10 @@ function amplificationPacket() {
 
 const ZERO_LABEL_NAME = "\\000.".repeat(127);
 
-// The worst pointer fan-out constructible in one 64 KB message: the question is a 253-octet zero-label name (126
-// labels, held just under MAX_NAME on purpose) and every answer's owner is one fresh label plus a pointer to it, so
-// each 14-octet record (class NONE with empty rdata keeps it minimal) expands to a 255-octet name. Every name stays
-// within MAX_NAME, so the per-name guard never fires and the per-message name-octets cap is what stops the fan-out —
-// 4,661 records would otherwise materialise ~1.19 M name octets. The fuzzer's mutations cannot build this shape.
+// A maximal pointer fan-out over a repeated suffix: the question is a 253-octet zero-label name (126 labels, held
+// just under MAX_NAME) and every answer's owner is one fresh label plus a pointer to it — 4,661 14-octet records
+// (class NONE with empty rdata keeps them minimal). Every pointer is a memo hit, so the decode is linear and charges
+// only each owner's own label octet; the materialised characters are the names' inherent content.
 function ownerFanoutPacket() {
 	const records = Math.floor((65535 - 12 - 257) / 14); // the question is 257 octets, each record 14
 	const b = [0, 0, 0x01, 0x00, 0, 1, records >> 8, records & 0xff, 0, 0, 0, 0]; // qdcount 1, ancount = records
@@ -56,9 +57,8 @@ function ownerFanoutPacket() {
 	return Uint8Array.from(b);
 }
 
-// The rdata variant the issue describes: NS records whose owner is a bare pointer (free) and whose rdata name is one
-// fresh label plus a pointer to the 253-octet question name — 16 octets of record expand to a 255-octet name, again
-// held within MAX_NAME so the name-octets cap is what catches it.
+// The rdata variant of the same fan-out: NS records whose owner is a bare pointer (free) and whose rdata name is one
+// fresh label plus a pointer to the 253-octet question name — again all memo hits, linear in the record count.
 function rdataFanoutPacket() {
 	const records = Math.floor((65535 - 12 - 257) / 16); // the question is 257 octets, each record 16
 	const b = [0, 0, 0x01, 0x00, 0, 1, records >> 8, records & 0xff, 0, 0, 0, 0]; // qdcount 1, ancount = records
@@ -120,18 +120,23 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		expect(code(() => decodeMessage(two))).toBe(WireErrorCode.QUESTION_LIMIT);
 	});
 
-	it("a maximal owner-name pointer fan-out is stopped by the name-octets cap", () => {
+	it("a maximal owner-name pointer fan-out decodes through the memo", () => {
 		const packet = ownerFanoutPacket();
 		expect(packet.length).toBeLessThanOrEqual(65535);
-		const err = code(() => decodeMessage(packet));
-		expect(err).toBe(WireErrorCode.NAME_LIMIT);
+		const m = decodeMessage(packet);
+		expect(m.answers).toHaveLength(4661);
+		const name = `a.${"\\000.".repeat(126)}`;
+		expect(m.answers[0].name).toBe(name);
+		expect(m.answers[m.answers.length - 1].name).toBe(name);
 	});
 
-	it("NS rdata amplifies the same way and is stopped by the name-octets cap", () => {
+	it("NS rdata amplification decodes through the memo as well", () => {
 		const packet = rdataFanoutPacket();
 		expect(packet.length).toBeLessThanOrEqual(65535);
-		const err = code(() => decodeMessage(packet));
-		expect(err).toBe(WireErrorCode.NAME_LIMIT);
+		const m = decodeMessage(packet);
+		expect(m.answers).toHaveLength(4079);
+		const target = `a.${"\\000.".repeat(126)}`;
+		for (const a of m.answers) expect(a.data.target).toBe(target);
 	});
 
 	it("a memoised suffix reused behind long own labels still respects MAX_NAME", () => {
@@ -233,10 +238,36 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		for (const a of m.answers) expect(a.name.endsWith(apex)).toBe(true);
 	});
 
-	it("maxNameOctets is tunable: a cap below a name's wire size rejects it, one at or above it allows it", () => {
+	it("maxNameOctets is tunable: a cap below a name's own label octets rejects it, one at or above it allows it", () => {
 		const one = hex.from(`0000 0000 0001 0000 0000 0000 03 777777 07 6578616d706c65 00 0001 0001`);
-		expect(decodeMessage(one, { maxNameOctets: 13 }).questions[0].name).toBe("www.example."); // the name is 13 wire octets
-		expect(code(() => decodeMessage(one, { maxNameOctets: 12 }))).toBe(WireErrorCode.NAME_LIMIT);
+		// the name's own labels are 12 wire octets (13 with the root); the charge counts own labels only
+		expect(decodeMessage(one, { maxNameOctets: 12 }).questions[0].name).toBe("www.example.");
+		expect(code(() => decodeMessage(one, { maxNameOctets: 11 }))).toBe(WireErrorCode.NAME_LIMIT);
+	});
+
+	// Review finding 5: the memo's guard branches, exercised through readName directly (it is exported) with a
+	// hand-constructed Reader — no decodeMessage path reaches them.
+	it("readName returns a pre-seeded memo entry at its start offset", () => {
+		const r = new Reader(hex.from(`03 616263 00 0001 0001`), 12);
+		r.nameMemo = new Map([[12, { text: "cached.", wire: 5, hops: 2, end: 16 }]]);
+		expect(readName(r)).toBe("cached.");
+		expect(r.pos).toBe(16);
+	});
+
+	it("readName with a memo but no cap decodes and charges nothing", () => {
+		const r = new Reader(hex.from(`03 616263 00`));
+		r.nameMemo = new Map();
+		expect(readName(r)).toBe("abc.");
+		expect(r.maxNameOctets).toBeUndefined();
+		expect(r.nameOctets).toBeUndefined(); // chargeName returned at the cap guard
+	});
+
+	it("readName with a cap but no counter initialises it from zero", () => {
+		const r = new Reader(hex.from(`03 616263 00`));
+		r.nameMemo = new Map();
+		r.maxNameOctets = 100;
+		expect(readName(r)).toBe("abc.");
+		expect(r.nameOctets).toBe(4); // (r.nameOctets ?? 0) + the name's 4 own label octets
 	});
 });
 

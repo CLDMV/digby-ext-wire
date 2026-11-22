@@ -47,8 +47,8 @@ const MAX_TTL = 0x7fffffff;
  * @param {boolean} [options.allowTrailing=false] - accept octets after the last section instead of failing TRAILING_DATA
  * @param {number} [options.maxQuestions=1] - the most questions to decode; a larger qdcount fails QUESTION_LIMIT. Raise it
  *   only for a caller that legitimately decodes multi-question messages (round-trip tooling does).
- * @param {number} [options.maxNameOctets=MAX_NAME_OCTETS] - the most name octets (wire form, including reused compression
- *   suffixes) one decode may materialise; going over fails NAME_LIMIT
+ * @param {number} [options.maxNameOctets=MAX_NAME_OCTETS] - the most name label octets one decode may format for the first
+ *   time (repeated names and suffixes come back from the memo for free); going over fails NAME_LIMIT
  * @returns {object} the message (shape above)
  * @throws {WireError} for any malformed input; nothing else
  */

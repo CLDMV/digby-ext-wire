@@ -76,7 +76,7 @@ function checkInput(input) {
 	const t0 = performance.now();
 	let m;
 	try {
-		m = decodeMessage(input);
+		m = decodeMessage(input, { maxQuestions: 2 });
 	} catch (err) {
 		if (!(err instanceof WireError)) throw report("decode threw a non-WireError", input, err);
 		if (!Object.values(WireErrorCode).includes(err.code)) throw report("decode threw an unknown code", input, err);
@@ -94,7 +94,7 @@ function checkInput(input) {
 	}
 	let back;
 	try {
-		back = decodeMessage(again);
+		back = decodeMessage(again, { maxQuestions: 2 });
 	} catch (err) {
 		throw report("the re-encoding did not decode", input, err);
 	}
