@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { CLASS, OPCODE, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { packFlags, unpackFlags } from "../../src/lib/wire/header.mjs";
-import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
 import { parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
@@ -185,5 +185,53 @@ describe("messages", () => {
 		expect(code(() => encodeMessage(big, { maxSize: 512 }))).toBe("MESSAGE_TOO_LARGE");
 		expect(encodeMessage(big).length).toBeGreaterThan(512);
 		expect(code(() => encodeMessage({ questions: [{ name: "example.com.", type: 1 }] }, { maxSize: 20 }))).toBe("MESSAGE_TOO_LARGE");
+	});
+});
+
+describe("encodeCapped and TSIG (CLDMV/digby#39)", () => {
+	const A = (i) => ({ name: "ns.example.", type: 1, class: 1, ttl: 60, data: { address: `10.0.0.${i}` } });
+	const TXT = (name, n) => ({ name, type: TYPE.TXT, class: 1, ttl: 60, data: { strings: [Uint8Array.from({ length: n }, () => 0x78)] } });
+	const message = (sections) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [], authorities: [], additionals: [], ...sections });
+
+	it("refuses a message that already carries a TSIG record", () => {
+		const tsig = decodeMessage(hex.from(`0000 0000 0000 0000 0000 0001 00 00fa 00ff 00000000 0011 00 000000000000 012c 0000 0000 0000 0000`)).additionals[0];
+		const rec = { name: ".", type: 1, class: 1, ttl: 0, data: { address: "1.2.3.4" } };
+		// even well-formed and last: truncating a signed message invalidates its MAC (RFC 8945 5)
+		expect(code(() => encodeCapped(message({ additionals: [rec, tsig] }), { limit: 512 }))).toBe("TSIG_PRESENT");
+		expect(code(() => encodeCapped(message({ answers: [tsig] }), { limit: 512 }))).toBe("TSIG_PRESENT");
+		// the refusal points at the issue, so a caller passing pre-signed input learns the flow instead of a bare code
+		try {
+			encodeCapped(message({ additionals: [tsig] }), { limit: 512 });
+			expect.unreachable("encodeCapped accepted a pre-signed message");
+		} catch (err) {
+			expect(err).toBeInstanceOf(WireError);
+			expect(err.message).toContain("CLDMV/digby#39");
+		}
+		// encodeMessage never truncates, so a signed message still encodes
+		expect(decodeMessage(encodeMessage(message({ additionals: [tsig] }))).additionals).toEqual([tsig]);
+	});
+
+	it("reserves octets: the result plus the reservation fits the cap", () => {
+		const m = message({ answers: [TXT("p1.example.", 200), A(1)], additionals: [A(2)] });
+		const full = encodeMessage(m).length;
+		// the default stays exactly what it was: bytes and truncated, nothing reserved
+		const base = encodeCapped(m, { limit: full });
+		expect(base.truncated).toBe(false);
+		expect(base.reserved).toBe(0);
+		expect(decodeMessage(base.bytes).answers).toEqual([TXT("p1.example.", 200), A(1)]);
+		const need = 84; // a hmac-sha256 TSIG record is about this size; any nonzero reserve must shrink the budget
+		const capped = encodeCapped(m, { limit: full, reserveTsig: need });
+		expect(capped.reserved).toBe(need);
+		expect(capped.bytes.length + need).toBeLessThanOrEqual(full);
+		// the shrunken budget dropped an answer RRset, so TC sets exactly as it would for a kept TSIG record
+		expect(capped.truncated).toBe(true);
+		const d = decodeMessage(capped.bytes);
+		expect(d.flags.tc).toBe(true);
+		expect(d.answers).toEqual([]);
+		expect(d.additionals).toEqual([]);
+		// with room for both the message and the reservation nothing is dropped
+		const roomy = encodeCapped(m, { limit: full + need, reserveTsig: need });
+		expect(roomy.truncated).toBe(false);
+		expect(roomy.bytes.length).toBe(full);
 	});
 });

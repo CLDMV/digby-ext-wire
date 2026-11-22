@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { DEFAULT_UDP_CAP, TCP_MAX, TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "../../src/lib/wire/limits.mjs";
-import { decodeMessage, encodeCapped } from "../../src/lib/wire/message.mjs";
+import { appendTsig, decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
 
 const code = (fn) => {
 	try {
@@ -95,7 +95,7 @@ describe("truncation (RFC 2181 9)", () => {
 		expect(decodeMessage(roomy.bytes).answers).toHaveLength(50);
 	});
 
-	it("always keeps a TSIG record, last", () => {
+	it("refuses a signed message; truncate first, sign, then append (CLDMV/digby#39)", () => {
 		const tsig = {
 			name: "key.example.",
 			type: TYPE.TSIG,
@@ -104,10 +104,18 @@ describe("truncation (RFC 2181 9)", () => {
 			data: { algorithm: "hmac-sha256.", timeSigned: 1, fudge: 300, mac: new Uint8Array(32), originalId: 1, error: 0, otherData: new Uint8Array(0) }
 		};
 		const msg = response({ answers: rrset("big.example.", 40), additionals: [a("x.example.", 1), tsig] });
-		const { bytes, truncated } = encodeForTransport(msg, { transport: "udp" });
-		expect(truncated).toBe(true);
-		expect(bytes.length).toBeLessThanOrEqual(512);
-		expect(decodeMessage(bytes).additionals).toEqual([tsig]);
+		// a transport encode may truncate, which would invalidate the TSIG's MAC
+		expect(code(() => encodeForTransport(msg, { transport: "udp" }))).toBe("TSIG_PRESENT");
+		// instead: encode unsigned with the record's size reserved, sign the truncated message, append
+		const unsigned = { ...msg, additionals: [a("x.example.", 1)] };
+		const need = encodeMessage({ additionals: [tsig] }).length - 12;
+		const capped = encodeCapped(unsigned, { limit: 512, reserveTsig: need });
+		expect(capped.truncated).toBe(true);
+		const signed = appendTsig(capped, tsig);
+		expect(signed.length).toBeLessThanOrEqual(512);
+		const d = decodeMessage(signed);
+		expect(d.flags.tc).toBe(true);
+		expect(d.additionals).toEqual([tsig]);
 	});
 
 	it("treats records with the same owner (any case), type and class as one RRset; RRSIGs by the type covered", () => {

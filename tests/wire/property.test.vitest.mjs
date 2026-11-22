@@ -58,30 +58,30 @@ describe(`wire properties (seed ${SEED})`, () => {
 		const g = prng(SEED ^ 0x5bd1e995);
 		for (let i = 0; i < MESSAGES; i++) {
 			const m = genMessage(g, { maxRecords: 8 });
-			const full = encodeMessage(m).length;
-			const tsig = m.additionals.filter((r) => r.type === TYPE.TSIG);
-			const minimal = encodeMessage({ ...m, answers: [], authorities: [], additionals: tsig }).length;
+			// the capped encode refuses a message that already carries a TSIG record (CLDMV/digby#39): the generator sometimes
+			// adds one, so drop it here — the capped encode is unsigned, and the reserve/append flow is covered in
+			// tsig.test.vitest.mjs
+			const unsigned = { ...m, additionals: m.additionals.filter((r) => r.type !== TYPE.TSIG) };
+			const full = encodeMessage(unsigned).length;
+			const minimal = encodeMessage({ ...unsigned, answers: [], authorities: [], additionals: [] }).length;
 			const limit = g.int(12, full + 16);
 			if (limit < minimal) {
-				expect(() => encodeCapped(m, { limit })).toThrow(WireError);
+				expect(() => encodeCapped(unsigned, { limit })).toThrow(WireError);
 				continue;
 			}
-			const { bytes, truncated } = encodeCapped(m, { limit });
+			const { bytes, truncated } = encodeCapped(unsigned, { limit });
 			expect(bytes.length).toBeLessThanOrEqual(limit);
 			const d = decodeMessage(bytes, { maxQuestions: 2 });
-			expect(d.flags.tc).toBe(m.flags.tc || truncated);
-			expect(d.edns).toEqual(m.edns);
-			expect(isGroupedPrefix(d.answers, m.answers)).toBe(true);
-			expect(isGroupedPrefix(d.authorities, m.authorities)).toBe(true);
-			const addKept = d.additionals.filter((r) => r.type !== TYPE.TSIG);
-			const addAll = m.additionals.filter((r) => r.type !== TYPE.TSIG);
-			expect(isGroupedPrefix(addKept, addAll)).toBe(true);
-			expect(d.additionals.filter((r) => r.type === TYPE.TSIG)).toEqual(tsig);
+			expect(d.flags.tc).toBe(unsigned.flags.tc || truncated);
+			expect(d.edns).toEqual(unsigned.edns);
+			expect(isGroupedPrefix(d.answers, unsigned.answers)).toBe(true);
+			expect(isGroupedPrefix(d.authorities, unsigned.authorities)).toBe(true);
+			expect(isGroupedPrefix(d.additionals, unsigned.additionals)).toBe(true);
 			// TC exactly when an answer or authority RRset was dropped
-			const droppedPrimary = d.answers.length < m.answers.length || d.authorities.length < m.authorities.length;
+			const droppedPrimary = d.answers.length < unsigned.answers.length || d.authorities.length < unsigned.authorities.length;
 			expect(truncated).toBe(droppedPrimary);
-			if (droppedPrimary) expect(addKept).toEqual([]);
-			if (d.answers.length < m.answers.length) expect(d.authorities).toEqual([]);
+			if (droppedPrimary) expect(d.additionals).toEqual([]);
+			if (d.answers.length < unsigned.answers.length) expect(d.authorities).toEqual([]);
 			if (limit >= full) expect(truncated).toBe(false);
 		}
 	});

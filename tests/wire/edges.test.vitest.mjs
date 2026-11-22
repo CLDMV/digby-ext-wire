@@ -34,6 +34,7 @@ describe("the public surface", () => {
 			"decodeMessage",
 			"encodeMessage",
 			"encodeCapped",
+			"appendTsig",
 			"encodeForTransport",
 			"udpLimit",
 			"frameTcp",
