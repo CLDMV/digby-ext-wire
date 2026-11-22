@@ -76,7 +76,10 @@ export function frameTcp(message) {
 
 /**
  * Split a TCP byte stream into length-prefixed messages. Incomplete data stays buffered until more arrives; the buffer never
- * holds more than one partial frame (at most 65537 octets) between calls.
+ * holds more than one partial frame (at most 65537 octets) between calls. Once a frame's length prefix is known, a buffer of
+ * exactly that frame size is preallocated and filled at an offset as octets arrive — a frame delivered one octet at a time
+ * costs one allocation and one copy per octet, not a re-concatenation of everything held per push. Completed frames are always
+ * a fresh buffer: a copy of the caller's chunk, never a view into it, and never framer state a later push would overwrite.
  *
  * @example
  * const frames = new TcpFramer();
@@ -84,8 +87,12 @@ export function frameTcp(message) {
  */
 export class TcpFramer {
 	constructor() {
-		/** @type {Uint8Array} */
-		this.pending = new Uint8Array(0);
+		/** Prefix octets of the next frame held so far (0 or 1 of the 2 the length needs). @type {Uint8Array} */
+		this.prefix = new Uint8Array(0);
+		/** The frame being filled, once its length prefix is known; null until then. @type {Uint8Array|null} */
+		this.frame = null;
+		/** Payload octets already copied into {@link TcpFramer#frame}. */
+		this.filled = 0;
 	}
 
 	/**
@@ -95,27 +102,60 @@ export class TcpFramer {
 	 */
 	push(chunk) {
 		const add = asBytes(chunk);
-		let buf;
-		if (this.pending.length === 0) buf = add;
-		else {
-			buf = new Uint8Array(this.pending.length + add.length);
-			buf.set(this.pending);
-			buf.set(add, this.pending.length);
-		}
 		const out = [];
 		let pos = 0;
-		while (buf.length - pos >= 2) {
-			const len = (buf[pos] << 8) | buf[pos + 1];
-			if (buf.length - pos - 2 < len) break;
-			out.push(buf.slice(pos + 2, pos + 2 + len));
+		// A frame whose length is known continues with whatever this chunk starts with.
+		if (this.frame !== null) {
+			pos = this.#fill(add, 0, out);
+		} else if (this.prefix.length === 1 && add.length > 0) {
+			// one held prefix octet plus the chunk's first octet complete the length prefix
+			this.frame = new Uint8Array((this.prefix[0] << 8) | add[0]);
+			this.filled = 0;
+			this.prefix = new Uint8Array(0);
+			pos = this.#fill(add, 1, out);
+		}
+		// Whole frames contained in the rest of the chunk: one exact-size copy each.
+		while (add.length - pos >= 2) {
+			const len = (add[pos] << 8) | add[pos + 1];
+			if (add.length - pos - 2 < len) break;
+			out.push(add.slice(pos + 2, pos + 2 + len));
 			pos += 2 + len;
 		}
-		this.pending = buf.slice(pos);
+		// Whatever remains is the start of one frame: either a lone prefix octet, or a known length to preallocate and fill.
+		const rest = add.length - pos;
+		if (rest > 0) {
+			if (rest === 1) this.prefix = add.slice(pos, pos + 1);
+			else {
+				this.frame = new Uint8Array((add[pos] << 8) | add[pos + 1]);
+				this.filled = 0;
+				this.prefix = new Uint8Array(0);
+				this.#fill(add, pos + 2, out);
+			}
+		}
 		return out;
+	}
+
+	/**
+	 * Copy `add[start..]` into the frame being filled, completing and emitting it when full.
+	 * @param {Uint8Array} add - the chunk being pushed
+	 * @param {number} start - the offset in `add` where the frame's next payload octet sits
+	 * @param {Uint8Array[]} out - completed frames are pushed here
+	 * @returns {number} the offset in `add` after the octets consumed
+	 */
+	#fill(add, start, out) {
+		const take = Math.min(this.frame.length - this.filled, add.length - start);
+		this.frame.set(add.subarray(start, start + take), this.filled);
+		this.filled += take;
+		const end = start + take;
+		if (this.filled < this.frame.length) return end;
+		out.push(this.frame);
+		this.frame = null;
+		this.filled = 0;
+		return end;
 	}
 
 	/** Octets held for an incomplete frame. */
 	get buffered() {
-		return this.pending.length;
+		return this.prefix.length + (this.frame !== null ? 2 + this.filled : 0);
 	}
 }
