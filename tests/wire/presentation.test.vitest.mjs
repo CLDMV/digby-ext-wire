@@ -218,4 +218,13 @@ describe("formatRecord validates its input (CLDMV/digby#37)", () => {
 		expect(formatRecord({ name: "a.", ttl: 0, class: 255, type: 1, data: null })).toBe("a. 0 ANY A");
 		expect(formatRecord({ name: "a.", ttl: 0, class: 254, type: 1, data: null })).toBe("a. 0 NONE A");
 	});
+
+	it("refuses what parseRecord refuses: record type 65535, and empty rdata for a type that must carry rdata (CLDMV/digby#38)", () => {
+		// type 65535 is reserved at the record layer, yet formatRecord printed "a. 1 IN TYPE65535 \# 0"
+		expect(code(() => formatRecord({ name: "a.", ttl: 1, type: 65535, data: { data: new Uint8Array(0) } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 1, type: 65535, data: null }))).toBe("VALUE_OUT_OF_RANGE");
+		// TSIG is in the empty-rdata-required set, yet formatRecord printed "a. 0 ANY TSIG"
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: 255, type: 250, data: null }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: 254, type: 249, data: null }))).toBe("VALUE_OUT_OF_RANGE");
+	});
 });

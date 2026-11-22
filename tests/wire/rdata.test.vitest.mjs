@@ -356,4 +356,11 @@ describe("formatRdata validates its input (CLDMV/digby#37)", () => {
 		expect(formatRdata(TYPE.MX, { preference: 1, exchange: "a;b." })).toBe(String.raw`1 a\;b.`);
 		expect(formatRdata(TYPE.A, { address: "1.2.3.4" })).toBe("1.2.3.4");
 	});
+
+	it("caps generic rdata at a record's 65535-octet limit (CLDMV/digby#37)", () => {
+		// 70,000 octets printed as a 140,009-character "\# 70000 ..." line, past the wire bound
+		expect(code(() => formatRdata(999, { data: new Uint8Array(70000) }))).toBe("MESSAGE_TOO_LARGE");
+		// the boundary still formats: 65,535 octets is exactly the rdata length field's maximum
+		expect(formatRdata(999, { data: new Uint8Array(65535) })).toHaveLength(9 + 2 * 65535);
+	});
 });
