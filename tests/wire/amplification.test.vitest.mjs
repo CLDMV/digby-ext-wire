@@ -274,12 +274,12 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 	});
 
 	it("a pointer chain through an uncached pointer byte resolves through the memo", () => {
-		// The question is "abc."; a pointer to it sits at offset 17, never read as a name; the answer's owner is one
-		// label plus a pointer to 17 — an uncached jump target whose walk is itself a pointer to a memoised name.
+		// The question is "abc."; a pointer to it sits at offset 21, never read as a name; the answer's owner is one
+		// label plus a pointer to 21 — an uncached jump target whose walk is itself a pointer to a memoised name.
 		const b = [0, 0, 0x01, 0x00, 0, 1, 0, 1, 0, 0, 0, 0];
-		b.push(3, 0x61, 0x62, 0x63, 0, 0x00, 0x01, 0x00, 0x01); // question: "abc." A IN, ends at offset 17
-		b.push(0xc0, 0x11); // a pointer to 12, never walked
-		b.push(1, 0x78, 0xc0, 0x11, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 0x7f, 0, 0, 1); // owner "x" + pointer to 17
+		b.push(3, 0x61, 0x62, 0x63, 0, 0x00, 0x01, 0x00, 0x01); // question: "abc." A IN, ends at offset 21
+		b.push(0xc0, 0x15); // a pointer to 12 at offset 21, never walked
+		b.push(1, 0x78, 0xc0, 0x15, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 0x7f, 0, 0, 1); // owner "x" + pointer to 21
 		const m = decodeMessage(Uint8Array.from(b));
 		expect(m.answers[0].name).toBe("x.");
 	});
