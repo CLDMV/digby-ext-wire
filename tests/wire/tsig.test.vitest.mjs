@@ -103,20 +103,33 @@ describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 		expect(err.message).toMatch(/original ID of type string/);
 	});
 
-	it("reads each record's type once: a getter cannot slip a TSIG past the TSIG_PRESENT refusal (CLDMV/digby#39)", () => {
+	it("reads each record's type once: the TSIG-present refusal names TSIG_PRESENT (CLDMV/digby#39)", () => {
 		let reads = 0;
 		const sneaky = {
 			get type() {
-				return ++reads === 1 ? TYPE.A : TYPE.TSIG;
+				return ++reads === 1 ? TYPE.TSIG : TYPE.A;
 			},
 			name: "key.example.",
 			class: CLASS.ANY,
 			ttl: 0,
 			data: tsigRecord(1).data
 		};
-		// the TSIG-present check and the encode must act on the same one read of rec.type: it must not go out as a TSIG
-		// record behind the check's back
-		expect(() => encodeCapped(message({ additionals: [A(1), sneaky] }), { limit: 400 })).toThrow(WireError);
+		// the TSIG-present check and the encode act on the same one read of rec.type: the TSIG is shown once and refused as
+		// TSIG_PRESENT — and the encode never gets a second read that could see an A record instead
+		expect(code(() => encodeCapped(message({ additionals: [A(1), sneaky] }), { limit: 400 }))).toBe("TSIG_PRESENT");
+		// a getter that hides the TSIG behind a valid type on that one read never sends the TSIG either: the record encodes
+		// as the type the one read produced, whose rdata cannot carry TSIG data
+		let flips = 0;
+		const flip = {
+			get type() {
+				return ++flips === 1 ? TYPE.A : TYPE.TSIG;
+			},
+			name: "key.example.",
+			class: CLASS.ANY,
+			ttl: 0,
+			data: tsigRecord(1).data
+		};
+		expect(() => encodeCapped(message({ additionals: [A(1), flip] }), { limit: 400 })).toThrow(WireError);
 	});
 
 	it("the property holds across generated messages and TSIG records", () => {
