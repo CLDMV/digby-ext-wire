@@ -18,8 +18,8 @@ import { describe, expect, it } from "vitest";
 import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
 import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
-import { formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
-import { genMessage, hex, prng, regroupMessage, seedFromEnv } from "../helpers/wire-gen.mjs";
+import { TYPED, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { genMessage, genRdata, genRecord, hex, prng, regroupMessage, seedFromEnv } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_FUZZ_SEED");
 const ITERATIONS = Number(process.env.DIGBY_FUZZ_ITERATIONS || 20000);
@@ -153,6 +153,74 @@ describe(`wire fuzz (seed ${SEED}, ${ITERATIONS} iterations)`, () => {
 				expect(parseRecord(formatRecord(rec))).toEqual(rec);
 			} catch (err) {
 				if (!(err instanceof WireError)) throw new Error(`parseRecord threw a non-WireError (seed ${SEED}) on ${JSON.stringify(text)}: ${err?.stack ?? err}`);
+			}
+		}
+	});
+
+	// Malformed API-supplied shapes must reach the formatters as WireError (or come back as valid text), never a TypeError,
+	// undefined or injected record text (CLDMV/digby#37).
+	const MANGLE_VALUES = [undefined, null, 0, -1, 1.5, 2 ** 32, true, "", "x;y", "1 IN A 9.9.9.9 ;", "a. b", [], {}, [1, 2, 3], { address: "1.2.3.4" }];
+
+	/** A copy of a valid rdata / record object with one field deleted, mistyped or replaced wholesale. */
+	function mangle(g, data) {
+		if (data === null || typeof data !== "object") return g.pick(MANGLE_VALUES);
+		const out = { ...data };
+		const keys = Object.keys(out);
+		if (!keys.length || g.chance(0.15)) return g.pick(MANGLE_VALUES);
+		const k = g.pick(keys);
+		switch (g.int(0, 3)) {
+			case 0:
+				delete out[k];
+				break;
+			case 1:
+				out[k] = g.pick(MANGLE_VALUES);
+				break;
+			case 2:
+				out[k] = Array.isArray(out[k]) ? [...out[k], g.pick(MANGLE_VALUES)] : [out[k], g.pick(MANGLE_VALUES)];
+				break;
+			default:
+				out[k] = { ...out[k], extra: "1 IN A 9.9.9.9 ;" };
+		}
+		return out;
+	}
+
+	const reportShape = (kind, shape, err) => new Error(`${kind} (seed ${SEED}) on ${JSON.stringify(shape, (_, v) => (v instanceof Uint8Array ? hex.to(v) : String(v)))}: ${err?.stack ?? err}`);
+
+	it("the formatters take malformed shapes only as WireError or valid text", () => {
+		const g = prng(SEED ^ 0x811c9dc5);
+		const codes = Object.values(WireErrorCode);
+		for (let i = 0; i < ITERATIONS / 4; i++) {
+			const type = g.chance(0.8) ? g.pick(TYPED) : 1234 + (i % 5000); // typed most of the time, otherwise generic
+			const data = mangle(g, genRdata(g, type, []));
+			try {
+				const text = formatRdata(type, data);
+				if (typeof text !== "string") throw reportShape("formatRdata returned a non-string", { type, data }, text);
+				try {
+					parseRdata(type, text);
+				} catch (err) {
+					if (!(err instanceof WireError)) throw reportShape("the formatted text did not re-parse as WireError-or-value", { type, data }, err);
+				}
+			} catch (err) {
+				if (!(err instanceof WireError) || !codes.includes(err.code)) throw reportShape("formatRdata threw a non-WireError", { type, data }, err);
+			}
+			const rec = genRecord(g, []);
+			const field = g.pick(["name", "ttl", "class", "type", "data"]);
+			const bad =
+				field === "name"
+					? { ...rec, name: g.pick(["a.", "a;b.", "", 5, "..", "@"]) }
+					: field === "data"
+						? { ...rec, data: mangle(g, rec.data) }
+						: { ...rec, [field]: g.pick(MANGLE_VALUES) };
+			try {
+				const text = formatRecord(bad);
+				if (typeof text !== "string") throw reportShape("formatRecord returned a non-string", bad, text);
+				try {
+					parseRecord(text);
+				} catch (err) {
+					if (!(err instanceof WireError)) throw reportShape("the formatted record did not re-parse as WireError-or-value", bad, err);
+				}
+			} catch (err) {
+				if (!(err instanceof WireError) || !codes.includes(err.code)) throw reportShape("formatRecord threw a non-WireError", bad, err);
 			}
 		}
 	});

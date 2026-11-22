@@ -166,3 +166,31 @@ describe("records", () => {
 		for (const r of recs) expect(parseRecord(formatRecord(r))).toEqual(r);
 	});
 });
+
+describe("formatRecord validates its input (CLDMV/digby#37)", () => {
+	it("refuses a TTL that is not a 32-bit integer instead of injecting its text", () => {
+		expect(code(() => formatRecord({ name: "a.", ttl: "1 IN A 9.9.9.9 ;", type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: -1, type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 1.5, type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 2 ** 32, type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		// the codec's TTL domain matches encode's (RFC 2181: at most 2^31 - 1; decode maps more to 0)
+		expect(code(() => formatRecord({ name: "a.", ttl: 2 ** 31, type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: null, type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("refuses a class or type that is not an integer in range instead of printing CLASSxx / TYPExx text", () => {
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: "IN", type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: 70000, type: 1, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: "A", data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: 70000, data: { address: "1.2.3.4" } }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("refuses a malformed owner name and malformed rdata with a WireError", () => {
+		expect(code(() => formatRecord({ name: "", ttl: 0, type: 1, data: { address: "1.2.3.4" } }))).toBe("BAD_PRESENTATION");
+		// no data field at all: formatRdata must refuse it, not print "undefined" or throw a TypeError
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: 1 }))).toBe("VALUE_OUT_OF_RANGE");
+		// a TXT with no strings field and an SVCB with no fields must be a WireError, not a TypeError
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: 16, data: {} }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: 64, data: {} }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+});

@@ -299,3 +299,26 @@ describe("malformed presentation rdata", () => {
 		expect(formatRdata(TYPE.RRSIG, parseRdata(TYPE.RRSIG, "A 13 2 3600 4294967295 0 1 example. AQID"))).toContain(" 21060207062815 19700101000000 ");
 	});
 });
+
+describe("formatRdata validates its input (CLDMV/digby#37)", () => {
+	it("refuses malformed rdata shapes with a WireError instead of a TypeError or undefined", () => {
+		// the reproducing cases from the issue
+		expect(code(() => formatRdata(TYPE.A, {}))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRdata(TYPE.MX, { preference: "x;y", exchange: "a. b" }))).toBe("VALUE_OUT_OF_RANGE");
+		// a bad shape in a field the format function reads directly must not throw a TypeError
+		expect(code(() => formatRdata(TYPE.TXT, {}))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRdata(TYPE.TXT, { strings: [] }))).toBe("BAD_RDATA");
+		expect(code(() => formatRdata(TYPE.SVCB, {}))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRdata(TYPE.SVCB, { priority: 1, target: ".", params: [{}] }))).toBe("BAD_SVCPARAM");
+		expect(code(() => formatRdata(TYPE.A, null))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRdata(TYPE.A, { address: 1.2 }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRdata(TYPE.MX, { preference: 1, exchange: "a. b" }))).toBe("BAD_PRESENTATION");
+		expect(code(() => formatRdata(TYPE.MX, { preference: 70000, exchange: "a." }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("formats only what the wire round-trip produced, so nothing unvalidated is echoed", () => {
+		// the exchange name is re-canonicalised through decode: a raw `;` would start a comment in the zone text
+		expect(formatRdata(TYPE.MX, { preference: 1, exchange: "a;b." })).toBe(String.raw`1 a\;b.`);
+		expect(formatRdata(TYPE.A, { address: "1.2.3.4" })).toBe("1.2.3.4");
+	});
+});
