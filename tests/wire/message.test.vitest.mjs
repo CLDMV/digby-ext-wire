@@ -4,10 +4,12 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { Writer } from "../../src/lib/wire/buffer.mjs";
 import { CLASS, OPCODE, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { packFlags, unpackFlags } from "../../src/lib/wire/header.mjs";
+import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
+import { TC_BIT, packFlags, unpackFlags } from "../../src/lib/wire/header.mjs";
 import { decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
+import { nameKey, writeName } from "../../src/lib/wire/names.mjs";
 import { parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
@@ -312,5 +314,38 @@ describe("truncation refuses messages whose meaning it would destroy (CLDMV/digb
 		const capped = encodeCapped(transfer(type), { limit: 65535 });
 		expect(capped.truncated).toBe(false);
 		expect(decodeMessage(capped.bytes).answers).toHaveLength(42);
+	});
+
+	it("refuses to truncate an UPDATE whose additionals alone drop (CLDMV/digby#43)", () => {
+		// dropping additionals never sets TC (RFC 2181 9: they are optional data), but it still changes the update
+		// the message describes — the refusal keys on any drop, not on TC
+		const small = {
+			id: 1,
+			flags: { opcode: OPCODE.UPDATE },
+			questions: [],
+			answers: [A(0), A(1)],
+			additionals: Array.from({ length: 60 }, (_, i) => A(2 + i))
+		};
+		expect(code(() => encodeCapped(small, { limit: 200 }))).toBe("TRUNCATION_REFUSED");
+		// when everything fits it still encodes normally
+		const capped = encodeCapped(small, { limit: 65535 });
+		expect(capped.truncated).toBe(false);
+		expect(decodeMessage(capped.bytes).additionals).toHaveLength(60);
+	});
+
+	it.each([TYPE.AXFR, TYPE.IXFR])("refuses to truncate a type-%s transfer whose additionals alone drop (CLDMV/digby#43)", (type) => {
+		// the transfer refusal used to key on truncation actually happening (TC), which additionals-only drops
+		// never set — the answers fit, the additionals do not, and the SOA bookends are still broken
+		const small = {
+			id: 1,
+			flags: { qr: true },
+			questions: [{ name: "example.", type, class: 1 }],
+			answers: [SOA(3), A(0), A(1), SOA(3)],
+			additionals: Array.from({ length: 60 }, (_, i) => A(2 + i))
+		};
+		expect(code(() => encodeCapped(small, { limit: 220 }))).toBe("TRUNCATION_REFUSED");
+		const capped = encodeCapped(small, { limit: 65535 });
+		expect(capped.truncated).toBe(false);
+		expect(decodeMessage(capped.bytes).additionals).toHaveLength(60);
 	});
 });
