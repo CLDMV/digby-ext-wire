@@ -234,8 +234,11 @@ export function appendTsig(capped, tsigRecord) {
 	if (tsigRecord.ttl !== 0) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has TTL 0 (RFC 8945 4.1.1), got ${String(tsigRecord.ttl)}`);
 	const id = (capped.bytes[0] << 8) | capped.bytes[1];
 	const originalId = tsigRecord.data?.originalId;
-	if (!Number.isInteger(originalId) || originalId !== id)
-		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the TSIG's original ID ${String(originalId)} is not this message's ID ${id}`);
+	if (!Number.isInteger(originalId) || originalId !== id) {
+		// a non-number's String() can equal the message's ID ("4660"), so name the type (CLDMV/digby#39)
+		const shown = typeof originalId === "number" ? String(originalId) : `of type ${typeof originalId} (${String(originalId)})`;
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the TSIG's original ID ${shown} is not this message's ID ${id}`);
+	}
 	// the record must fit the space reserved for it; a Writer capped at exactly the room left turns an oversized record into
 	// MESSAGE_TOO_LARGE, which is the oversized refusal here
 	const w = new Writer({ max: capped.bytes.length + reserved, compress: false });
