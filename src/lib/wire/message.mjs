@@ -252,6 +252,21 @@ export function appendTsig(capped, tsigRecord) {
 }
 
 /**
+ * The wire size of a TSIG record in octets: what {@link appendTsig} adds to the message for it — the owner name written
+ * uncompressed, exactly as the space `encodeCapped`'s `reserveTsig` reserves is filled (CLDMV/digby#39). The record is
+ * validated the same way encoding it is, so a record that cannot go on the wire fails here.
+ *
+ * @param {object} tsigRecord - a TSIG record (`name`, `type` TYPE.TSIG, `class`, `ttl`, `data` per rdata/tsig.mjs)
+ * @returns {number}
+ * @throws {WireError} whatever encoding the record raises
+ */
+export function tsigRecordSize(tsigRecord) {
+	const w = new Writer({ max: MAX_MESSAGE, compress: false });
+	writeRecord(w, tsigRecord);
+	return w.length;
+}
+
+/**
  * The capped encode itself, with the OPT record and (for {@link encodeMessage}, which never truncates) a trailing TSIG record
  * as an always-kept tail.
  *

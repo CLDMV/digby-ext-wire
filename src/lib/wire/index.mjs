@@ -6,7 +6,7 @@
 /**
  * @fileoverview The DNS wire codec's public surface. A pure module: no I/O, no network, `node:` built-ins only.
  *
- * - messages: {@link decodeMessage}, {@link encodeMessage}, {@link encodeCapped}, {@link appendTsig}
+ * - messages: {@link decodeMessage}, {@link encodeMessage}, {@link encodeCapped}, {@link appendTsig}, {@link tsigRecordSize}
  * - transports: {@link encodeForTransport}, {@link udpLimit}, {@link frameTcp}, {@link TcpFramer}
  * - rdata: {@link decodeRdataBytes}, {@link encodeRdataBytes}, {@link parseRdata}, {@link formatRdata}
  * - records in presentation form: {@link parseRecord}, {@link formatRecord}, {@link parseTtl}
@@ -32,7 +32,7 @@ export {
 } from "./constants.mjs";
 export { MAX_MESSAGE } from "./buffer.mjs";
 export { MAX_LABEL, MAX_NAME, MAX_NAME_OCTETS, canonicalName, formatName, labelCount, nameKey, namesEqual, parseName } from "./names.mjs";
-export { appendTsig, decodeMessage, encodeCapped, encodeMessage } from "./message.mjs";
+export { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "./message.mjs";
 export { DEFAULT_UDP_CAP, TCP_MAX, TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "./limits.mjs";
 export { TYPED, decodeRdataBytes, encodeRdataBytes, formatGeneric, formatRdata, isTyped, parseRdata } from "./rdata/index.mjs";
 export { formatRecord, parseRecord, parseTtl } from "./presentation.mjs";
