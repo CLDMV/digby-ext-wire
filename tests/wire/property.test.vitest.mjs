@@ -125,7 +125,8 @@ describe(`wire properties (seed ${SEED})`, () => {
 		const g = prng(SEED ^ 0xcc9e2d51);
 		for (let i = 0; i < PER_TYPE * 4; i++) {
 			let type;
-			do type = g.int(0, 65535);
+			// 0 and 65535 are reserved at the record layer and the assertions below format and re-parse whole records
+			do type = g.int(1, 65534);
 			while (TYPED.includes(type));
 			const data = genRdata(g, type, []);
 			expect(decodeRdataBytes(type, encodeRdataBytes(type, data))).toEqual(data);

@@ -181,6 +181,14 @@ describe("records", () => {
 		for (const r of recs) expect(parseRecord(formatRecord(r))).toEqual(r);
 	});
 
+	it("refuses record type 0: reserved like 65535, as the wire's record layer refuses it (CLDMV/digby#38)", () => {
+		// both would otherwise carry a TYPE0 record through parse and format — the generic zero-length form even parses
+		expect(code(() => parseRecord("a.example. 0 IN TYPE0 \\# 0"))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseRecord("a.example. 0 ANY TYPE0 \\# 0"))).toBe("BAD_PRESENTATION");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: 0, data: { data: new Uint8Array(0) } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: 255, type: 0, data: null }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
 	it("parses the RFC 2136 update form: class ANY or NONE with no rdata text is data: null (CLDMV/digby#37)", () => {
 		expect(parseRecord("a.example. 0 ANY A")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.ANY, type: 1, data: null });
 		expect(parseRecord("a.example. 0 NONE A")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.NONE, type: 1, data: null });
