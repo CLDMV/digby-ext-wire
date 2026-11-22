@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { decodeMessage, encodeCapped, wireCounters } from "../../src/lib/wire/message.mjs";
+import { decodeMessage, encodeCapped, encodeMessage, wireCounters } from "../../src/lib/wire/message.mjs";
 
 // A 100-label apex of one-octet labels: 201 wire octets, the "long apex" shape of CLDMV/digby#40.
 const apex = Array.from({ length: 100 }, (_, i) => String.fromCharCode(0x61 + (i % 26))).join(".") + ".";
