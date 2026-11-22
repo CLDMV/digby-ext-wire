@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { DEFAULT_UDP_CAP, TCP_MAX, TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "../../src/lib/wire/limits.mjs";
-import { appendTsig, decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { appendTsig, decodeMessage, encodeCapped, tsigRecordSize } from "../../src/lib/wire/message.mjs";
 
 const code = (fn) => {
 	try {
@@ -108,7 +108,7 @@ describe("truncation (RFC 2181 9)", () => {
 		expect(code(() => encodeForTransport(msg, { transport: "udp" }))).toBe("TSIG_PRESENT");
 		// instead: encode unsigned with the record's size reserved, sign the truncated message, append
 		const unsigned = { ...msg, additionals: [a("x.example.", 1)] };
-		const need = encodeMessage({ additionals: [tsig] }).length - 12;
+		const need = tsigRecordSize(tsig);
 		const capped = encodeCapped(unsigned, { limit: 512, reserveTsig: need });
 		expect(capped.truncated).toBe(true);
 		const signed = appendTsig(capped, tsig);

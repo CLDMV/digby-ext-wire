@@ -11,9 +11,9 @@
 
 import { describe, expect, it } from "vitest";
 import { Reader, Writer } from "../../src/lib/wire/buffer.mjs";
-import { TYPE } from "../../src/lib/wire/constants.mjs";
+import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
-import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
 import { parseName, formatName, readName, writeName } from "../../src/lib/wire/names.mjs";
 import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
@@ -70,6 +70,31 @@ describe(`wire properties (seed ${SEED})`, () => {
 			if (droppedPrimary) expect(d.additionals).toEqual([]);
 			if (d.answers.length < unsigned.answers.length) expect(d.authorities).toEqual([]);
 			if (limit >= full) expect(truncated).toBe(false);
+		}
+	});
+
+	it("a random reserve/append round signs the capped encode (CLDMV/digby#39)", () => {
+		const g = prng(SEED ^ 0x9e3779b9);
+		for (let i = 0; i < MESSAGES; i++) {
+			const m = genMessage(g, { maxRecords: 6 });
+			// genMessage sometimes adds a TSIG itself; the capped encode refuses one, so sign after truncation
+			const unsigned = { ...m, additionals: m.additionals.filter((r) => r.type !== TYPE.TSIG) };
+			const tsig = { name: genName(g, []), type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: { ...genRdata(g, TYPE.TSIG, []), originalId: unsigned.id } };
+			const need = tsigRecordSize(tsig);
+			const limit = g.int(12, encodeMessage(unsigned).length + 16);
+			let capped;
+			try {
+				capped = encodeCapped(unsigned, { limit, reserveTsig: need });
+			} catch (err) {
+				expect(err).toBeInstanceOf(WireError); // the header, questions and OPT alone exceed limit - need
+				continue;
+			}
+			expect(capped.bytes.length + need, `i ${i}`).toBeLessThanOrEqual(limit);
+			const signed = appendTsig(capped, tsig);
+			expect(signed.length, `i ${i}`).toBeLessThanOrEqual(limit);
+			const d = decodeMessage(signed, { maxQuestions: 2 });
+			expect(d.additionals.at(-1), `i ${i}`).toEqual(tsig);
+			expect(d.additionals.at(-1).data.originalId, `i ${i}`).toBe(d.id);
 		}
 	});
 

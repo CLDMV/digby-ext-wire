@@ -14,7 +14,7 @@
 import { describe, expect, it } from "vitest";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
-import { appendTsig, decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
 import { genMessage, genName, genRdata, prng, seedFromEnv } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_TSIG_SEED");
@@ -43,13 +43,10 @@ const tsigRecord = (originalId, macLen = 32) => ({
 	data: { algorithm: "hmac-sha256.", timeSigned: 1, fudge: 300, mac: new Uint8Array(macLen), originalId, error: 0, otherData: new Uint8Array(0) }
 });
 
-/** The octets one record takes on the wire (an owner-uncompressed message holding just that record). */
-const recordSize = (rec) => encodeMessage({ additionals: [rec] }).length - 12;
-
 describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 	it("appendTsig appends the signed record as the last additional record and keeps the cap", () => {
 		const tsig = tsigRecord(1);
-		const need = recordSize(tsig);
+		const need = tsigRecordSize(tsig);
 		const capped = encodeCapped(message({ additionals: [A(1), TXT("p1.example.", 200), A(2), TXT("p2.example.", 10)] }), { limit: 280, reserveTsig: need });
 		expect(capped.reserved).toBe(need);
 		expect(capped.bytes.length + need).toBeLessThanOrEqual(280);
@@ -65,7 +62,7 @@ describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 
 	it("appendTsig refuses everything but a fresh, untouched, matching reservation", () => {
 		const tsig = tsigRecord(1);
-		const need = recordSize(tsig);
+		const need = tsigRecordSize(tsig);
 		const capped = encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: need });
 		// not the object encodeCapped returned: bare bytes, or a result with no space reserved
 		expect(code(() => appendTsig(capped.bytes, tsig))).toBe("VALUE_OUT_OF_RANGE");
@@ -84,6 +81,44 @@ describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 		expect(code(() => appendTsig(capped, { ...tsig, data: { ...tsig.data, mac: "not octets" } }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
+	it("refuses a TSIG record whose class is not ANY or whose TTL is not 0 (RFC 8945 4.1.1, CLDMV/digby#39)", () => {
+		const capped = encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: tsigRecordSize(tsigRecord(1)) });
+		expect(code(() => appendTsig(capped, { ...tsigRecord(1), class: CLASS.IN }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => appendTsig(capped, { ...tsigRecord(1), class: 1 }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => appendTsig(capped, { ...tsigRecord(1), ttl: 300 }))).toBe("VALUE_OUT_OF_RANGE");
+		// the RFC 8945 form itself is accepted: class ANY, TTL 0
+		expect(appendTsig(capped, tsigRecord(1)).length).toBe(capped.bytes.length + tsigRecordSize(tsigRecord(1)));
+	});
+
+	it("names the type of a non-numeric original ID in the refusal (CLDMV/digby#39)", () => {
+		const capped = encodeCapped(message({ id: 4660, additionals: [A(1)] }), { limit: 280, reserveTsig: tsigRecordSize(tsigRecord(4660)) });
+		let err;
+		try {
+			appendTsig(capped, { ...tsigRecord(4660), data: { ...tsigRecord(4660).data, originalId: "4660" } });
+		} catch (e) {
+			err = e;
+		}
+		// a string "4660" reads as the message's own ID in the old message; the type must be named
+		expect(err).toBeInstanceOf(WireError);
+		expect(err.message).toMatch(/original ID of type string/);
+	});
+
+	it("reads each record's type once: a getter cannot slip a TSIG past the TSIG_PRESENT refusal (CLDMV/digby#39)", () => {
+		let reads = 0;
+		const sneaky = {
+			get type() {
+				return ++reads === 1 ? TYPE.A : TYPE.TSIG;
+			},
+			name: "key.example.",
+			class: CLASS.ANY,
+			ttl: 0,
+			data: tsigRecord(1).data
+		};
+		// the TSIG-present check and the encode must act on the same one read of rec.type: it must not go out as a TSIG
+		// record behind the check's back
+		expect(() => encodeCapped(message({ additionals: [A(1), sneaky] }), { limit: 400 })).toThrow(WireError);
+	});
+
 	it("the property holds across generated messages and TSIG records", () => {
 		const g = prng(SEED);
 		for (let i = 0; i < 200; i++) {
@@ -91,7 +126,7 @@ describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 			// genMessage sometimes adds a TSIG itself; the capped encode refuses one (CLDMV/digby#39), so sign after truncation
 			const unsigned = { ...m, additionals: m.additionals.filter((r) => r.type !== TYPE.TSIG) };
 			const tsig = { name: genName(g, []), type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: { ...genRdata(g, TYPE.TSIG, []), originalId: unsigned.id } };
-			const need = recordSize(tsig);
+			const need = tsigRecordSize(tsig);
 			const limit = g.int(12, encodeMessage(unsigned).length + 16);
 			let capped;
 			try {
