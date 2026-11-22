@@ -23,7 +23,7 @@
  */
 
 import { MAX_MESSAGE, Reader, Writer, asBytes, checkInt } from "./buffer.mjs";
-import { CLASS, TYPE, classToString, typeToString } from "./constants.mjs";
+import { CLASS, OPCODE, TYPE, classToString, typeToString } from "./constants.mjs";
 import { joinOptTtl, readOptions, splitOptTtl, writeOptions } from "./edns.mjs";
 import { WireError, WireErrorCode, fail } from "./errors.mjs";
 import { HEADER_SIZE, TC_BIT, packFlags, unpackFlags } from "./header.mjs";
@@ -417,6 +417,15 @@ function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
 				}
 			if (keptSets < sets.length) break outer;
 		}
+	}
+	if (truncated) {
+		// Truncating must not corrupt a message whose meaning lives in its record structure (CLDMV/digby#43): whole
+		// RRsets drop, and out of an UPDATE that changes the update it describes; out of a transfer it breaks the SOA
+		// bookends (AXFR) or the SOA-diff structure (IXFR). A message that fits still encodes normally.
+		if ((message.flags?.opcode ?? 0) === OPCODE.UPDATE)
+			fail(WireErrorCode.TRUNCATION_REFUSED, "an UPDATE cannot be truncated: dropping RRsets would change the update it describes");
+		if (questions.some((q) => q.type === TYPE.AXFR || q.type === TYPE.IXFR))
+			fail(WireErrorCode.TRUNCATION_REFUSED, "a transfer cannot be truncated: dropping RRsets would break the SOA bookends (AXFR) or the SOA-diff structure (IXFR)");
 	}
 	writeTail();
 	if (edns) written[2]++;

@@ -41,6 +41,7 @@ export const WireErrorCode = Object.freeze({
 	VALUE_OUT_OF_RANGE: "VALUE_OUT_OF_RANGE", // a number that does not fit its field, or a field of the wrong kind
 	MESSAGE_TOO_LARGE: "MESSAGE_TOO_LARGE", // the encoding exceeds the size cap and cannot be truncated to fit
 	TSIG_PRESENT: "TSIG_PRESENT", // a capped encode was given a message that already carries a TSIG record; truncating it would invalidate the MAC (CLDMV/digby#39)
+	TRUNCATION_REFUSED: "TRUNCATION_REFUSED", // a capped encode was asked to truncate a message whose meaning truncation would destroy — an UPDATE, or a question of type AXFR or IXFR (CLDMV/digby#43)
 	// Presentation format
 	BAD_PRESENTATION: "BAD_PRESENTATION", // text that does not parse as the type's presentation form
 	RELATIVE_NAME: "RELATIVE_NAME", // a relative name with no origin to complete it
