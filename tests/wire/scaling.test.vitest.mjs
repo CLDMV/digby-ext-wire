@@ -151,7 +151,7 @@ describe("encode scaling (CLDMV/digby#40)", () => {
 	});
 
 	it("never registers a suffix first written past 0x3fff, while a shorter suffix registered below still compresses", () => {
-		// The registration guard (only offsets below 0x3fff become compression targets) at its edge: `a.b.` written
+		// The registration guard (only offsets below 0x4000 become compression targets) at its edge: `a.b.` written
 		// first registers `b.` at offset 2; filler pushes the writer past 0x3fff; `c.b.` and `d.c.b.` are then
 		// written entirely past it — their longer suffixes (c.b., d.c.b.) are never registered, and both names
 		// compress at the below-registered `b.` (captured from the encoder, and through encodeMessage on the
@@ -164,5 +164,23 @@ describe("encode scaling (CLDMV/digby#40)", () => {
 		writeName(w, "c.b.", true);
 		writeName(w, "d.c.b.", true);
 		expect(hex.to(w.bytes.subarray(at, w.length)), "past-0x3fff suffixes are not targets").toBe("0163c00201640163c002");
+	});
+
+	it("registers a name written at exactly 0x3fff but not at exactly 0x4000", () => {
+		// The guard is `w.length < 0x4000` (a pointer's offset is 14 bits, so 0x3fff is the largest target): a
+		// name whose first label lands at exactly 0x3fff registers — the pointer to it is 0xffff — and a name at
+		// exactly 0x4000 does not.
+		const w = new Writer();
+		writeName(w, "a.b.", true); // registers b. at offset 2
+		w.raw(new Uint8Array(0x3fff - 5)); // the writer is at exactly 0x3fff
+		writeName(w, "c.b.", true); // c.b. registers at 0x3fff; b. compresses to c002
+		writeName(w, "e.c.b.", true); // e is past 0x3fff; c.b. is a target: the pointer is 0xffff
+		expect(hex.to(w.bytes.subarray(0x3fff, w.length)), "a name registered at 0x3fff is a target").toBe("0163c0020165ffff");
+		const w2 = new Writer();
+		writeName(w2, "a.b.", true);
+		w2.raw(new Uint8Array(0x4000 - 5)); // the writer is at exactly 0x4000
+		writeName(w2, "c.b.", true); // c.b. does NOT register at 0x4000; b. still compresses to c002
+		writeName(w2, "e.c.b.", true); // e and c are both unregistered: c is written in full
+		expect(hex.to(w2.bytes.subarray(0x4000, w2.length)), "a name at 0x4000 is not a target").toBe("0163c00201650163c002");
 	});
 });

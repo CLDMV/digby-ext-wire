@@ -111,9 +111,10 @@ function checkInput(input) {
 		let text;
 		try {
 			if (rec.type === 0) {
-				// the presentation layer refuses the reserved types (CLDMV/digby#38); the wire layer's own type-0 refusal is
-				// that issue's wire-side slice and has not landed on this branch, so decode can still hand one over. Expect
-				// the refusal here, not a round-trip — once readRecord refuses type 0 this branch never fires.
+				// the presentation layer refuses the reserved types (CLDMV/digby#38), and so does the wire layer now:
+				// readRecord refuses type 0 at message.mjs (f5a1908). This branch is dead by design — decode can no
+				// longer hand a reserved-type record over — and stays as the honest invariant: formatRecord refuses
+				// what it is handed rather than round-tripping it.
 				expect(() => formatRecord(rec)).toThrow(WireError);
 				continue;
 			}
