@@ -193,12 +193,14 @@ export function encodeCapped(message, { limit, truncate = true, compress = true,
 	checkInt(reserveTsig, MAX_MESSAGE, "reserveTsig");
 	if (reserveTsig > limit) fail(WireErrorCode.MESSAGE_TOO_LARGE, `reserving ${reserveTsig} octets of the ${limit}-octet limit leaves no room for a message`);
 	obj(message, "message");
-	// the tail is written by the raw encode only for encodeMessage: a capped encode is unsigned by definition (see above)
-	for (const k of SECTIONS)
-		for (const rec of array(message[k] ?? [], k))
-			if (rec?.type === TYPE.TSIG)
+	// Each record's type is read once and the snapshot is what both the TSIG-present check and the encode act on, so a
+	// getter cannot show the check one type and the encode another (CLDMV/digby#39).
+	const types = SECTIONS.map((k) => array(message[k] ?? [], k).map((rec) => rec?.type));
+	for (const sectionTypes of types)
+		for (const type of sectionTypes)
+			if (type === TYPE.TSIG)
 				fail(WireErrorCode.TSIG_PRESENT, "the message already carries a TSIG record: truncating it would invalidate the MAC — encode unsigned with reserveTsig, sign, then appendTsig (CLDMV/digby#39)");
-	const { bytes, truncated } = encodeCappedRaw(message, { limit: limit - reserveTsig, truncate, compress });
+	const { bytes, truncated } = encodeCappedRaw(message, { limit: limit - reserveTsig, truncate, compress, types });
 	const out = { bytes, truncated, reserved: reserveTsig };
 	if (reserveTsig > 0) reservedEncodes.set(out, { snapshot: bytes.slice(), reserved: reserveTsig });
 	return out;
@@ -227,7 +229,8 @@ export function appendTsig(capped, tsigRecord) {
 	if (!(capped.bytes instanceof Uint8Array) || capped.bytes.length !== bytes.length || capped.bytes.some((b, i) => b !== bytes[i]))
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
 	obj(tsigRecord, "TSIG record");
-	if (tsigRecord.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(tsigRecord.type)}`);
+	const type = tsigRecord.type; // read once: the check and the write below act on the same value
+	if (type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(type)}`);
 	// a TSIG record carries class ANY and TTL 0 on the wire (RFC 8945 4.1.1) (CLDMV/digby#39)
 	if (tsigRecord.class !== CLASS.ANY)
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has class ANY (RFC 8945 4.1.1), got ${classToString(tsigRecord.class)}`);
@@ -244,7 +247,7 @@ export function appendTsig(capped, tsigRecord) {
 	const w = new Writer({ max: capped.bytes.length + reserved, compress: false });
 	w.raw(capped.bytes);
 	try {
-		writeRecord(w, tsigRecord);
+		writeRecord(w, tsigRecord, type);
 	} catch (err) {
 		if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)
 			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the TSIG record needs more than the ${reserved} octets reserved for it`);
@@ -282,10 +285,12 @@ export function tsigRecordSize(tsigRecord) {
  * @param {number} options.limit - the size cap in octets (at least 12); already reduced by any reserved TSIG space
  * @param {boolean} options.truncate
  * @param {boolean} options.compress
+ * @param {number[][]} [types=null] - the record types `encodeCapped` already read once (per section, per position); read
+ *   from the records when omitted (encodeMessage)
  * @returns {{ bytes: Uint8Array, truncated: boolean }}
  * @throws {WireError} MESSAGE_TOO_LARGE when even the header, questions and tail exceed the limit
  */
-function encodeCappedRaw(message, { limit, truncate, compress }) {
+function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
 	checkInt(limit, MAX_MESSAGE, "limit");
 	obj(message, "message");
 	const questions = array(message.questions ?? [], "questions");
@@ -300,8 +305,9 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	sections.forEach((list, s) =>
 		list.forEach((rec, i) => {
 			obj(rec, "a record");
-			if (rec.type === TYPE.OPT) fail(WireErrorCode.OPT_MISPLACED, "give EDNS as message.edns, not as an OPT record");
-			if (rec.type === TYPE.TSIG) {
+			const type = types ? types[s][i] : rec.type;
+			if (type === TYPE.OPT) fail(WireErrorCode.OPT_MISPLACED, "give EDNS as message.edns, not as an OPT record");
+			if (type === TYPE.TSIG) {
 				if (s !== 2 || i !== list.length - 1) fail(WireErrorCode.TSIG_MISPLACED, "TSIG must be the last record of the additional section");
 				tsig = rec;
 			}
@@ -356,8 +362,8 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		// a non-truncating encode writes the records exactly as they are: record order is meaning (a transfer's SOA bookends,
 		// an IXFR's SOA-diff structure, an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36)
 		for (let s = 0; s < 3; s++)
-			for (const rec of sections[s]) {
-				writeRecord(w, rec);
+			for (let i = 0; i < sections[s].length; i++) {
+				writeRecord(w, sections[s][i], types?.[s][i]);
 				written[s]++;
 			}
 	} else {
@@ -373,7 +379,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				const first = sets[k][0].at;
 				// records before this set's first record belong to sets already decided as kept: write them for good
 				for (let i = pos; i < first; i++) {
-					writeRecord(w, list[i]);
+					writeRecord(w, list[i], types?.[s][i]);
 					written[s]++;
 				}
 				pos = first;
@@ -383,7 +389,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 					// the section from `first` on with this set slotted in at its positions: records of the sets kept so far
 					// (owner < k) and this set's own (owner === k), in position order — records of sets not decided yet stay
 					// out. This is the final write order, so the measurement is the bytes that would actually go out
-					for (let i = first; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i]);
+					for (let i = first; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i], types?.[s][i]);
 					fits = w.length <= limit && tailFits();
 				} catch (err) {
 					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
@@ -399,7 +405,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			// the surviving records from `pos` on: all of them, or — after a drop — only the records of the sets kept so far
 			for (let i = pos; i < list.length; i++)
 				if (owner[i] < keptSets) {
-					writeRecord(w, list[i]);
+					writeRecord(w, list[i], types?.[s][i]);
 					written[s]++;
 				}
 			if (keptSets < sets.length) break outer;
@@ -447,15 +453,19 @@ function rrsets(list) {
 }
 
 /**
- * Write one resource record.
+ * Write one resource record. `type` is the record's type where the caller has already read it once — the capped encode
+ * snapshots each record's type so a getter cannot change it between reads (CLDMV/digby#39); it is read from `rec` here
+ * when omitted.
  * @param {Writer} w
  * @param {object} rec
+ * @param {number} [type]
  */
-function writeRecord(w, rec) {
-	if (rec.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "record type 65535 is reserved");
+function writeRecord(w, rec, type) {
+	const t = type ?? rec.type;
+	if (t === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "record type 65535 is reserved");
 	const cls = rec.class ?? CLASS.IN;
 	writeName(w, string(rec.name, "record name"), true);
-	w.u16(rec.type);
+	w.u16(t);
 	w.u16(cls);
 	checkInt(rec.ttl, MAX_TTL, "ttl");
 	w.u32(rec.ttl);
@@ -463,9 +473,9 @@ function writeRecord(w, rec) {
 	w.u16(0);
 	if (rec.data === null) {
 		if (cls !== CLASS.ANY && cls !== CLASS.NONE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "empty rdata (data: null) is only for class ANY or NONE");
-		if (RDATA_REQUIRED.has(rec.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(rec.type)} rdata must be present; the empty-rdata update form does not apply to it`);
+		if (RDATA_REQUIRED.has(t)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(t)} rdata must be present; the empty-rdata update form does not apply to it`);
 	} else {
-		encodeRdata(w, rec.type, rec.data);
+		encodeRdata(w, t, rec.data);
 	}
 	w.patch16(lenAt, w.length - lenAt - 2);
 }
