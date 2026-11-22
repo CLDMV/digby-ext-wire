@@ -156,6 +156,83 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		expect(m.answers[0].name).toBe("a.");
 	});
 
+	// Review finding 1: pointers into the MIDDLE of a name must be memo hits too. The question is the 255-octet
+	// zero-label name; every answer's owner is a bare pointer to its second label (offset 14). Without middle-offset
+	// memoisation each 12-octet answer re-walks 253 wire octets and re-formats 630 characters — 2,000 answers
+	// materialise ~1.26 M characters from a 24 KB packet (~50x its size). With the memo recording every label offset,
+	// the packet charges only the question's own 254 label octets, so a cap of twice the packet size — which the
+	// broken decoder blows through — must decode.
+	function middlePointerPacket() {
+		const answers = 2000;
+		const b = [0, 0, 0x01, 0x00, 0, 1, answers >> 8, answers & 0xff, 0, 0, 0, 0];
+		for (let i = 0; i < 127; i++) b.push(1, 0);
+		b.push(0, 0x00, 0x01, 0x00, 0x01); // root, type A, class IN
+		for (let i = 0; i < answers; i++) {
+			// owner: pointer to offset 14 (the second label); type NS, class NONE, ttl 0, rdlength 0
+			b.push(0xc0, 0x0e, 0, 2, 0, 254, 0, 0, 0, 0, 0, 0);
+		}
+		return Uint8Array.from(b); // 12 + 255 + 4 + 2000 * 12 = 24271 octets
+	}
+
+	it("a pointer into the middle of a name reuses the memo and charges nothing", () => {
+		const packet = middlePointerPacket();
+		expect(packet.length).toBe(24271);
+		const suffix = "\\000.".repeat(126);
+		const m = decodeMessage(packet, { maxNameOctets: 2 * packet.length });
+		expect(m.questions[0].name).toBe("\\000.".repeat(127));
+		expect(m.answers).toHaveLength(2000);
+		for (const a of m.answers) expect(a.name).toBe(suffix);
+		expect(decodeMessage(packet).answers).toHaveLength(2000); // the default cap leaves room, too
+	});
+
+	// Review finding 2: a memo hit must equal a fresh decode at that offset, including its pointer-hop count. 200
+	// answers chain their owners backwards (each a bare pointer to the previous owner's field start, the first to the
+	// root question at offset 12), so a fresh decode of the Nth owner takes N hops and refuses at POINTER_LIMIT past
+	// MAX_POINTER_HOPS; a memo that drops the hop count accepts the whole chain.
+	function pointerChainPacket() {
+		const answers = 200;
+		const b = [0, 0, 0x01, 0x00, 0, 1, answers >> 8, answers & 0xff, 0, 0, 0, 0];
+		b.push(0, 0x00, 0x01, 0x00, 0x01); // the question's name is the root, at offset 12
+		for (let i = 0; i < answers; i++) {
+			const target = i === 0 ? 12 : 17 + 12 * (i - 1); // the previous answer's owner field start
+			b.push(0xc0 | (target >> 8), target & 0xff, 0, 2, 0, 254, 0, 0, 0, 0, 0, 0);
+		}
+		return Uint8Array.from(b); // 12 + 5 + 200 * 12 = 2417 octets
+	}
+
+	it("a memo hit carries the pointer-hop count of a fresh decode", () => {
+		const packet = pointerChainPacket();
+		expect(packet.length).toBe(2417);
+		expect(code(() => decodeMessage(packet))).toBe(WireErrorCode.POINTER_LIMIT);
+	});
+
+	// Review finding 3: a legitimate large response must decode. 2,900 A records over a 201-octet apex (100
+	// one-octet labels), each owner a fresh 4-octet label plus a pointer to the apex: 61,117 octets. The repeated
+	// apex is memoised, so the decode charges only each owner's own label octets (~14.7 K); a cap that charges the
+	// reused suffix per record (~597 K) wrongly refuses it.
+	function apexResponsePacket() {
+		const answers = 2900;
+		const c = (n) => 0x61 + (n % 26);
+		const b = [0, 0, 0x01, 0x00, 0, 1, answers >> 8, answers & 0xff, 0, 0, 0, 0];
+		for (let i = 0; i < 100; i++) b.push(1, c(i)); // the apex: 100 one-octet labels, 201 wire octets
+		b.push(0, 0x00, 0x01, 0x00, 0x01);
+		for (let i = 0; i < answers; i++) {
+			// owner: fresh 4-octet label + pointer to the apex; type A, class IN, ttl 0, rdlength 4, rdata 127.0.0.1
+			b.push(4, c(i), c(i >> 1), c(i >> 2), c(i >> 3), 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 0x7f, 0, 0, 1);
+		}
+		return Uint8Array.from(b); // 12 + 201 + 4 + 2900 * 21 = 61117 octets
+	}
+
+	it("a large response with a repeated compressed apex decodes", () => {
+		const packet = apexResponsePacket();
+		expect(packet.length).toBe(61117);
+		const apex = Array.from({ length: 100 }, (_, i) => String.fromCharCode(0x61 + (i % 26))).join(".") + ".";
+		const m = decodeMessage(packet);
+		expect(m.questions[0].name).toBe(apex);
+		expect(m.answers).toHaveLength(2900);
+		for (const a of m.answers) expect(a.name.endsWith(apex)).toBe(true);
+	});
+
 	it("maxNameOctets is tunable: a cap below a name's wire size rejects it, one at or above it allows it", () => {
 		const one = hex.from(`0000 0000 0001 0000 0000 0000 03 777777 07 6578616d706c65 00 0001 0001`);
 		expect(decodeMessage(one, { maxNameOctets: 13 }).questions[0].name).toBe("www.example."); // the name is 13 wire octets
