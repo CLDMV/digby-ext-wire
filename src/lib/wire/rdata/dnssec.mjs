@@ -35,7 +35,7 @@ export function readTypeBitmap(r) {
 		const map = r.take(len);
 		if (map[len - 1] === 0) badRdata("a type bitmap window has a trailing zero octet", at);
 		if (win === 0 && map[0] & 0x80) badRdata("a type bitmap must not include type 0", at); // type 0 is reserved (CLDMV/digby#38)
-		if (win === 255 && map[len - 1] & 1) badRdata("a type bitmap must not include type 65535", at); // 65535 is reserved (CLDMV/digby#38)
+		if (win === 255 && len === 32 && map[31] & 1) badRdata("a type bitmap must not include type 65535", at); // 65535 is reserved (CLDMV/digby#38): the last bit of a full last window
 		for (let i = 0; i < len; i++) for (let bit = 0; bit < 8; bit++) if (map[i] & (0x80 >> bit)) types.push(win * 256 + i * 8 + bit);
 		last = win;
 	}
