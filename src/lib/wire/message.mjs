@@ -523,9 +523,12 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// octets per record, and the running bound is the sum of the measurements. When the bound plus the tail bound
 	// fits the limit, the set fits — no trial write. Otherwise the trial is written out for real (all kept sets
 	// plus this one, at their original positions from the set's first record on — records before it are final),
-	// which decides it exactly and, on a keep, replaces the running bound with the exact length. The output is the
-	// last trial that fits, whole sets at their original positions, nothing dangles — the round-2 design's
-	// exactness, preserved.
+	// which decides the keep exactly — for the drop-here stream. The running bound, though, keeps the gated
+	// measurement rather than the trial's length: a later kept set interleaves its records between this set's and
+	// can push this set's trial-time registrations past 0x4000, so the trial's length is exact only for the stream
+	// it wrote (observed: the trial kept a three-record NS set at 129 octets while the interleaved b.test. record
+	// grew its real bytes to 197, and the encode went out over its limit with truncated false). The output is whole
+	// sets at their original positions, nothing dangles — the round-2 design's exactness, preserved.
 	//
 	// The shift gate (CLDMV/digby#43). The probe writes set k's records consecutively, but the real stream
 	// interleaves other kept records between them, so a record q of set k sits at a real offset of up to its probe
@@ -603,11 +606,15 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			for (let k = 0; k < sets.length; k++) {
 				const first = sets[k][0];
 				// records before this set's first record belong to sets already decided as kept: write them for
-				// good, so their compression targets are final and the next measurement is seeded with them
+				// good, so their compression targets are final and the next measurement is seeded with them. Their
+				// exact octets leave the running bound as they enter the stream, which keeps the bound's meaning —
+				// the octets the kept sets still add from `pos` on — and the probe's offset free of double counts.
+				const before = w.length;
 				for (let i = pos; i < first; i++) {
 					writeRecord(w, list[i]);
 					written[s]++;
 				}
+				keptBound -= w.length - before;
 				pos = first;
 				while (synced < w.added.length) {
 					probe.names.set(w.added[synced], w.names.get(w.added[synced]));
@@ -655,8 +662,22 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 					fits = false;
 				}
 				if (fits) {
-					keptBound = w.length - mark.length; // exact, so later trials bound tightly again
+					// The trial decided the keep exactly — but its length is exact only for the stream it wrote, the
+					// drop-here stream: sets 0..k with everything after dropped. A later kept set interleaves its
+					// records between this set's, pushing this set's registrations to higher offsets — past 0x4000
+					// for the ones the trial made just below it — and the real stream then writes those records
+					// longer than the trial did. The running bound therefore keeps the gated measurement, which no
+					// interleaving can invalidate (the gate cleared it against the uncompressed bounds of every
+					// other set's records in the window); when the gate flagged the measurement, the set's own
+					// uncompressed bounds, which nothing beats.
 					w.rollback(mark);
+					if (shiftUnsafe || contribution === Infinity) {
+						// no measurement bound to trust: the set's uncompressed octets, which no interleaving beats
+						const last = sets[k][sets[k].length - 1];
+						keptBound += shiftBound(first, last + 1);
+					} else {
+						keptBound += contribution;
+					}
 					continue;
 				}
 				w.rollback(mark);
