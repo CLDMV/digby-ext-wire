@@ -36,7 +36,18 @@ const SOA = (serial) => ({
 const NS = { name: "example.", type: TYPE.NS, class: 1, ttl: 60, data: { target: "ns.example." } };
 // the RFC 2136 delete-RRset form: class ANY (or NONE) with empty rdata
 const DEL = (cls) => ({ name: "x.example.", type: TYPE.A, class: cls, ttl: 0, data: null });
-const message = (sections) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [], authorities: [], additionals: [], ...sections });
+// flags and edns materialised the way the decoder returns them, so a whole-message round-trip can be compared with toEqual
+const message = (sections) => ({
+	id: 1,
+	flags: { qr: true, opcode: 0, aa: false, tc: false, rd: false, ra: false, z: false, ad: false, cd: false },
+	rcode: 0,
+	questions: [],
+	answers: [],
+	authorities: [],
+	additionals: [],
+	edns: null,
+	...sections
+});
 
 describe("record order is kept; grouping only decides truncation (CLDMV/digby#36)", () => {
 	it("never sends part of the interleaved ns.example A set (the issue's packet)", () => {
