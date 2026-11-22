@@ -16,7 +16,7 @@ import { CLASS, classFromString, classToString, isClassToken, typeFromString, ty
 import { WireErrorCode, fail } from "./errors.mjs";
 import { RDATA_REQUIRED } from "./message.mjs";
 import { canonicalName } from "./names.mjs";
-import { formatRdata, isTyped, parseRdataTokens } from "./rdata/index.mjs";
+import { formatRdata, isTyped, parseRdataTokens, snapshotRdata } from "./rdata/index.mjs";
 import { Tokens, tokenize } from "./text.mjs";
 
 export { formatRdata, parseRdata, formatGeneric } from "./rdata/index.mjs";
@@ -104,26 +104,29 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
  */
 export function formatRecord(rec) {
 	if (rec === null || typeof rec !== "object" || Array.isArray(rec)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a record must be an object");
-	const name = canonicalName(rec.name); // parses, so no unvalidated name text reaches the line
-	if (!Number.isInteger(rec.ttl) || rec.ttl < 0 || rec.ttl > MAX_TTL) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `TTL out of range: ${String(rec.ttl)}`);
-	const cls = rec.class ?? CLASS.IN;
+	// one copy of the caller's record (CLDMV/digby#39): every field is read exactly once, and the validation and the line are
+	// built from the copy — a getter cannot show the checks one value and the printed line another
+	const snap = { name: rec.name, ttl: rec.ttl, class: rec.class, type: rec.type, data: snapshotRdata(rec.data) };
+	const name = canonicalName(snap.name); // parses, so no unvalidated name text reaches the line
+	if (!Number.isInteger(snap.ttl) || snap.ttl < 0 || snap.ttl > MAX_TTL) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `TTL out of range: ${String(snap.ttl)}`);
+	const cls = snap.class ?? CLASS.IN;
 	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${String(cls)}`);
-	if (!Number.isInteger(rec.type) || rec.type < 0 || rec.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(rec.type)}`);
+	if (!Number.isInteger(snap.type) || snap.type < 0 || snap.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(snap.type)}`);
 	// the record-layer rules parseRecord and writeRecord apply (CLDMV/digby#38): types 0 and 65535 are reserved, and empty
 	// rdata is only the RFC 2136 update form — a type that must carry rdata (RDATA_REQUIRED) never takes it
-	if (rec.type === 0 || rec.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `record type ${rec.type} is reserved`);
-	const head = `${name} ${rec.ttl} ${classToString(cls)} ${typeToString(rec.type)}`;
-	if (rec.data === null) {
+	if (snap.type === 0 || snap.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `record type ${snap.type} is reserved`);
+	const head = `${name} ${snap.ttl} ${classToString(cls)} ${typeToString(snap.type)}`;
+	if (snap.data === null) {
 		// the RFC 2136 empty-rdata update form, same rule as writeRecord: empty rdata is only a class ANY or NONE record, so
 		// anything else would print a line parseRecord refuses (CLDMV/digby#37)
 		if (cls !== CLASS.ANY && cls !== CLASS.NONE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "empty rdata (data: null) is only for class ANY or NONE");
-		if (RDATA_REQUIRED.has(rec.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(rec.type)} rdata must be present; the empty-rdata update form does not apply to it`);
+		if (RDATA_REQUIRED.has(snap.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(snap.type)} rdata must be present; the empty-rdata update form does not apply to it`);
 		return head;
 	}
 	// under class ANY or NONE, zero-length rdata IS the update form — the wire reader maps rdlength 0 to data: null
 	// (CLDMV/digby#37) — so a zero-length generic rdata value has no line of its own: `\# 0` parses back as data: null.
 	// Refuse it and ask for the update form itself.
-	if ((cls === CLASS.ANY || cls === CLASS.NONE) && !isTyped(rec.type) && rec.data?.data instanceof Uint8Array && rec.data.data.length === 0)
+	if ((cls === CLASS.ANY || cls === CLASS.NONE) && !isTyped(snap.type) && snap.data?.data instanceof Uint8Array && snap.data.data.length === 0)
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "zero-length rdata in class ANY or NONE is the empty-rdata update form; give data: null");
-	return `${head} ${formatRdata(rec.type, rec.data)}`;
+	return `${head} ${formatRdata(snap.type, snap.data)}`;
 }

@@ -29,7 +29,7 @@ import { WireError, WireErrorCode, fail } from "./errors.mjs";
 import { HEADER_SIZE, TC_BIT, packFlags, unpackFlags } from "./header.mjs";
 import { MAX_NAME_OCTETS, nameKey, readName, writeName } from "./names.mjs";
 import { array, obj, string } from "./rdata/common.mjs";
-import { decodeRdata, encodeRdata } from "./rdata/index.mjs";
+import { decodeRdata, encodeRdata, snapshotRdata } from "./rdata/index.mjs";
 
 const SECTIONS = ["answers", "authorities", "additionals"];
 const MAX_TTL = 0x7fffffff;
@@ -164,7 +164,90 @@ function readRecord(r) {
  */
 export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true } = {}) {
 	checkInt(maxSize, MAX_MESSAGE, "maxSize");
-	return encodeCappedRaw(message, { limit: maxSize, truncate: false, compress }).bytes;
+	return encodeCappedRaw(snapshotMessage(message), { limit: maxSize, truncate: false, compress }).bytes;
+}
+
+/**
+ * Validate a record or question type when the caller's object is copied (CLDMV/digby#39): an integer in 0..0xffff, and
+ * neither reserved value (RFC 6895; CLDMV/digby#38). Because the copy is what the encode writes, there is never a
+ * `type ?? rec.type` fallback read anywhere.
+ * @param {unknown} t
+ * @param {string} what
+ * @returns {number}
+ */
+function checkType(t, what) {
+	if (!Number.isInteger(t) || t < 0 || t > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} out of range: ${String(t)}`);
+	if (t === 0 || t === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} ${t} is reserved`);
+	return t;
+}
+
+/**
+ * Copy a question into a plain object, once (CLDMV/digby#39): every field is read exactly once from the caller's object and
+ * the encode writes the copy, so a getter cannot show the checks one value and the writer another.
+ * @param {object} q
+ * @returns {object}
+ */
+function snapshotQuestion(q) {
+	obj(q, "a question");
+	return { name: string(q.name, "question name"), type: checkType(q.type, "question type"), class: q.class ?? CLASS.IN };
+}
+
+/**
+ * Copy a record into a plain object, once (CLDMV/digby#39): every field is read exactly once, the type is validated on the
+ * copy, and the rdata value is copied one level past the deepest field the codecs read (see {@link snapshotRdata}). `what`
+ * names the record in the refusal ("a record", "TSIG record").
+ * @param {object} rec
+ * @param {string} [what]
+ * @returns {object}
+ */
+function snapshotRecord(rec, what = "a record") {
+	obj(rec, what);
+	return {
+		name: string(rec.name, "record name"),
+		type: checkType(rec.type, "record type"),
+		class: rec.class ?? CLASS.IN,
+		ttl: rec.ttl,
+		data: snapshotRdata(rec.data)
+	};
+}
+
+/**
+ * Copy the EDNS fields into a plain object, once (CLDMV/digby#39). A falsy `edns` stays absent, exactly as the encode skips
+ * it. Each option is copied shallowly: its fields are plain values and octets, which the option writers read once.
+ * @param {object} edns
+ * @returns {object | null}
+ */
+function snapshotEdns(edns) {
+	if (!edns) return null;
+	obj(edns, "edns");
+	const options = array(edns.options ?? [], "EDNS options").map((o) => {
+		obj(o, "an EDNS option");
+		return { ...o };
+	});
+	return { udpSize: edns.udpSize, version: edns.version, dnssecOk: edns.dnssecOk, z: edns.z, options };
+}
+
+/**
+ * Copy the message envelope into a plain object, once (CLDMV/digby#39): the header fields, EDNS and every question and record
+ * of every section are read exactly once from the caller's object, and the encode acts on the copy only — a getter can
+ * neither slip a TSIG past the TSIG-present check nor show the writer another value.
+ * @param {object} message
+ * @returns {object}
+ */
+function snapshotMessage(message) {
+	obj(message, "message");
+	const flags = message.flags;
+	const edns = message.edns;
+	return {
+		id: message.id,
+		flags: flags !== null && typeof flags === "object" ? { ...flags } : flags,
+		rcode: message.rcode,
+		questions: array(message.questions ?? [], "questions").map(snapshotQuestion),
+		answers: array(message.answers ?? [], "answers").map((rec) => snapshotRecord(rec)),
+		authorities: array(message.authorities ?? [], "authorities").map((rec) => snapshotRecord(rec)),
+		additionals: array(message.additionals ?? [], "additionals").map((rec) => snapshotRecord(rec)),
+		edns: snapshotEdns(edns)
+	};
 }
 
 /**
@@ -204,15 +287,15 @@ export function encodeCapped(message, { limit, truncate = true, compress = true,
 	checkInt(limit, MAX_MESSAGE, "limit");
 	checkInt(reserveTsig, MAX_MESSAGE, "reserveTsig");
 	if (reserveTsig > limit) fail(WireErrorCode.MESSAGE_TOO_LARGE, `reserving ${reserveTsig} octets of the ${limit}-octet limit leaves no room for a message`);
-	obj(message, "message");
-	// Each record's type is read once and the snapshot is what both the TSIG-present check and the encode act on, so a
-	// getter cannot show the check one type and the encode another (CLDMV/digby#39).
-	const types = SECTIONS.map((k) => array(message[k] ?? [], k).map((rec) => rec?.type));
-	for (const sectionTypes of types)
-		for (const type of sectionTypes)
-			if (type === TYPE.TSIG)
+	// one snapshot of the caller's input (CLDMV/digby#39): the TSIG-present check and the encode act on the same copied
+	// records, whose types were validated at the copy — a getter can neither slip a TSIG past the check nor show the encode
+	// another type
+	const snap = snapshotMessage(message);
+	for (const section of [snap.answers, snap.authorities, snap.additionals])
+		for (const rec of section)
+			if (rec.type === TYPE.TSIG)
 				fail(WireErrorCode.TSIG_PRESENT, "the message already carries a TSIG record: truncating it would invalidate the MAC — encode unsigned with reserveTsig, sign, then appendTsig (CLDMV/digby#39)");
-	const { bytes, truncated } = encodeCappedRaw(message, { limit: limit - reserveTsig, truncate, compress, types });
+	const { bytes, truncated } = encodeCappedRaw(snap, { limit: limit - reserveTsig, truncate, compress });
 	const out = { bytes, truncated, reserved: reserveTsig };
 	if (reserveTsig > 0) reservedEncodes.set(out, { snapshot: bytes.slice(), reserved: reserveTsig });
 	return out;
@@ -238,17 +321,19 @@ export function appendTsig(capped, tsigRecord) {
 	const state = typeof capped === "object" && capped !== null ? reservedEncodes.get(capped) : undefined;
 	if (state === undefined) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "appendTsig takes the object encodeCapped returned with reserveTsig set (CLDMV/digby#39)");
 	const { snapshot: bytes, reserved } = state;
-	if (!(capped.bytes instanceof Uint8Array) || capped.bytes.length !== bytes.length || capped.bytes.some((b, i) => b !== bytes[i]))
-		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
-	obj(tsigRecord, "TSIG record");
-	const type = tsigRecord.type; // read once: the check and the write below act on the same value
-	if (type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(type)}`);
+	// The caller's bytes are read once and compared element by element — never through a method the array could override
+	// (a Uint8Array subclass's .some() would lie, CLDMV/digby#39) — and the message is written from the codec's own copy, so
+	// a getter cannot hand the comparison one message and the write another, and the ID and arcount come from the copy too.
+	const given = capped.bytes;
+	if (!(given instanceof Uint8Array) || given.length !== bytes.length) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
+	for (let i = 0; i < bytes.length; i++) if (given[i] !== bytes[i]) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
+	const rec = snapshotRecord(tsigRecord, "TSIG record");
+	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(rec.type)}`);
 	// a TSIG record carries class ANY and TTL 0 on the wire (RFC 8945 4.1.1) (CLDMV/digby#39)
-	if (tsigRecord.class !== CLASS.ANY)
-		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has class ANY (RFC 8945 4.1.1), got ${classToString(tsigRecord.class)}`);
-	if (tsigRecord.ttl !== 0) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has TTL 0 (RFC 8945 4.1.1), got ${String(tsigRecord.ttl)}`);
-	const id = (capped.bytes[0] << 8) | capped.bytes[1];
-	const originalId = tsigRecord.data?.originalId;
+	if (rec.class !== CLASS.ANY) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has class ANY (RFC 8945 4.1.1), got ${classToString(rec.class)}`);
+	if (rec.ttl !== 0) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has TTL 0 (RFC 8945 4.1.1), got ${String(rec.ttl)}`);
+	const id = (bytes[0] << 8) | bytes[1];
+	const originalId = rec.data?.originalId;
 	if (!Number.isInteger(originalId) || originalId !== id) {
 		// a non-number's String() can equal the message's ID ("4660"), so name the type (CLDMV/digby#39)
 		const shown = typeof originalId === "number" ? String(originalId) : `of type ${typeof originalId} (${String(originalId)})`;
@@ -256,10 +341,10 @@ export function appendTsig(capped, tsigRecord) {
 	}
 	// the record must fit the space reserved for it; a Writer capped at exactly the room left turns an oversized record into
 	// MESSAGE_TOO_LARGE, which is the oversized refusal here
-	const w = new Writer({ max: capped.bytes.length + reserved, compress: false });
-	w.raw(capped.bytes);
+	const w = new Writer({ max: bytes.length + reserved, compress: false });
+	w.raw(bytes);
 	try {
-		writeRecord(w, tsigRecord, type);
+		writeRecord(w, rec);
 	} catch (err) {
 		if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)
 			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the TSIG record needs more than the ${reserved} octets reserved for it`);
@@ -267,7 +352,7 @@ export function appendTsig(capped, tsigRecord) {
 	}
 	const out = new Uint8Array(w.length);
 	out.set(w.bytes.subarray(0, w.length));
-	const arcount = ((capped.bytes[10] << 8) | capped.bytes[11]) + 1;
+	const arcount = ((bytes[10] << 8) | bytes[11]) + 1;
 	out[10] = arcount >>> 8;
 	out[11] = arcount & 0xff;
 	return out;
@@ -283,47 +368,42 @@ export function appendTsig(capped, tsigRecord) {
  * @throws {WireError} VALUE_OUT_OF_RANGE for anything that is not a TSIG record; whatever encoding the record raises
  */
 export function tsigRecordSize(tsigRecord) {
-	obj(tsigRecord, "TSIG record");
-	const type = tsigRecord.type; // read once: the check and the write below act on the same value
-	if (type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `tsigRecordSize measures a TSIG record, got type ${String(type)}`);
+	const rec = snapshotRecord(tsigRecord, "TSIG record");
+	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `tsigRecordSize measures a TSIG record, got type ${String(rec.type)}`);
 	const w = new Writer({ max: MAX_MESSAGE, compress: false });
-	writeRecord(w, tsigRecord, type);
+	writeRecord(w, rec);
 	return w.length;
 }
 
 /**
  * The capped encode itself, with the OPT record and (for {@link encodeMessage}, which never truncates) a trailing TSIG record
- * as an always-kept tail.
+ * as an always-kept tail. `message` is a {@link snapshotMessage} copy (CLDMV/digby#39): plain objects throughout, so reading
+ * a field here can never re-run a getter on the caller's input.
  *
  * @param {object} message
  * @param {object} options
  * @param {number} options.limit - the size cap in octets (at least 12); already reduced by any reserved TSIG space
  * @param {boolean} options.truncate
  * @param {boolean} options.compress
- * @param {number[][]} [types=null] - the record types `encodeCapped` already read once (per section, per position); read
- *   from the records when omitted (encodeMessage)
  * @returns {{ bytes: Uint8Array, truncated: boolean }}
  * @throws {WireError} MESSAGE_TOO_LARGE when even the header, questions and tail exceed the limit; TRUNCATION_REFUSED when
  *   truncation would corrupt an UPDATE or a transfer (CLDMV/digby#43)
  */
-function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
+function encodeCappedRaw(message, { limit, truncate, compress }) {
 	checkInt(limit, MAX_MESSAGE, "limit");
-	obj(message, "message");
-	const questions = array(message.questions ?? [], "questions");
-	const sections = SECTIONS.map((k) => array(message[k] ?? [], k));
+	const questions = message.questions ?? [];
+	const sections = [message.answers ?? [], message.authorities ?? [], message.additionals ?? []];
 	const edns = message.edns ?? null;
 	const rcode = message.rcode ?? 0;
 	checkInt(rcode, 0xfff, "rcode");
 	if (rcode > 0xf && !edns) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `rcode ${rcode} needs EDNS (its upper bits live in the OPT record)`);
 
-	// split off a trailing TSIG; refuse OPT and misplaced TSIG records
+	// split off a trailing TSIG; refuse OPT and misplaced TSIG records (the types were validated at the copy, CLDMV/digby#39)
 	let tsig = null;
 	sections.forEach((list, s) =>
 		list.forEach((rec, i) => {
-			obj(rec, "a record");
-			const type = types ? types[s][i] : rec.type;
-			if (type === TYPE.OPT) fail(WireErrorCode.OPT_MISPLACED, "give EDNS as message.edns, not as an OPT record");
-			if (type === TYPE.TSIG) {
+			if (rec.type === TYPE.OPT) fail(WireErrorCode.OPT_MISPLACED, "give EDNS as message.edns, not as an OPT record");
+			if (rec.type === TYPE.TSIG) {
 				if (s !== 2 || i !== list.length - 1) fail(WireErrorCode.TSIG_MISPLACED, "TSIG must be the last record of the additional section");
 				tsig = rec;
 			}
@@ -364,11 +444,9 @@ function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
 	w.u16(0);
 	w.u16(0);
 	for (const q of questions) {
-		obj(q, "a question");
-		writeName(w, string(q.name, "question name"), true);
-		if (q.type === 0 || q.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `question type ${String(q.type)} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
+		writeName(w, q.name, true);
 		w.u16(q.type);
-		w.u16(q.class ?? CLASS.IN);
+		w.u16(q.class);
 	}
 	if (!tailFits()) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the header, questions and tail records alone exceed ${limit} octets`);
 
@@ -379,7 +457,7 @@ function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
 		// an IXFR's SOA-diff structure, an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36)
 		for (let s = 0; s < 3; s++)
 			for (let i = 0; i < sections[s].length; i++) {
-				writeRecord(w, sections[s][i], types?.[s][i]);
+				writeRecord(w, sections[s][i]);
 				written[s]++;
 			}
 	} else {
@@ -418,7 +496,7 @@ function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
 					const probeMark = probe.checkpoint();
 					let contribution;
 					try {
-						for (const at of sets[k]) writeRecord(probe, list[at], types?.[s][at]);
+						for (const at of sets[k]) writeRecord(probe, list[at]);
 						contribution = probe.length - (w.length + keptBound);
 					} catch (err) {
 						if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
@@ -435,7 +513,7 @@ function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
 					const mark = w.checkpoint();
 					let fits = true;
 					try {
-						for (let i = 0; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i], types?.[s][i]);
+						for (let i = 0; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i]);
 						fits = w.length <= limit && tailFits();
 					} catch (err) {
 						if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
@@ -456,7 +534,7 @@ function encodeCappedRaw(message, { limit, truncate, compress, types = null }) {
 			// original positions, written for good once
 			for (let i = 0; i < list.length; i++)
 				if (owner[i] < keptSets) {
-					writeRecord(w, list[i], types?.[s][i]);
+					writeRecord(w, list[i]);
 					written[s]++;
 				}
 			if (keptSets < sets.length) break outer;
@@ -513,31 +591,26 @@ function rrsets(list) {
 }
 
 /**
- * Write one resource record. `type` is the record's type where the caller has already read it once — the capped encode
- * snapshots each record's type so a getter cannot change it between reads (CLDMV/digby#39); it is read from `rec` here
- * when omitted.
+ * Write one resource record from a {@link snapshotRecord} copy: the type was validated when the copy was taken (CLDMV/digby#39),
+ * so there is no fallback read and the record on the wire is exactly the record the checks saw — however many times the
+ * truncation logic writes the same record.
  * @param {Writer} w
- * @param {object} rec
- * @param {number} [type]
+ * @param {object} snap
  */
-function writeRecord(w, rec, type) {
+function writeRecord(w, snap) {
 	wireCounters.recordWrites++;
-	const t = type ?? rec.type;
-	// 0 and 65535 are reserved (RFC 6895), matching the questions and the decode (CLDMV/digby#38)
-	if (t === 0 || t === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `record type ${t} is reserved`);
-	const cls = rec.class ?? CLASS.IN;
-	writeName(w, string(rec.name, "record name"), true);
-	w.u16(t);
-	w.u16(cls);
-	checkInt(rec.ttl, MAX_TTL, "ttl");
-	w.u32(rec.ttl);
+	writeName(w, snap.name, true);
+	w.u16(snap.type);
+	w.u16(snap.class);
+	checkInt(snap.ttl, MAX_TTL, "ttl");
+	w.u32(snap.ttl);
 	const lenAt = w.length;
 	w.u16(0);
-	if (rec.data === null) {
-		if (cls !== CLASS.ANY && cls !== CLASS.NONE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "empty rdata (data: null) is only for class ANY or NONE");
-		if (RDATA_REQUIRED.has(t)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(t)} rdata must be present; the empty-rdata update form does not apply to it`);
+	if (snap.data === null) {
+		if (snap.class !== CLASS.ANY && snap.class !== CLASS.NONE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "empty rdata (data: null) is only for class ANY or NONE");
+		if (RDATA_REQUIRED.has(snap.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(snap.type)} rdata must be present; the empty-rdata update form does not apply to it`);
 	} else {
-		encodeRdata(w, t, rec.data);
+		encodeRdata(w, snap.type, snap.data);
 	}
 	w.patch16(lenAt, w.length - lenAt - 2);
 }

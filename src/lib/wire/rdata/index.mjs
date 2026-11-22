@@ -160,6 +160,26 @@ export function parseRdataTokens(type, t, origin, cls) {
 }
 
 /**
+ * Copy a caller-supplied rdata value into a plain structure, once (CLDMV/digby#39): every field of every plain object and
+ * array is read exactly once, so a getter cannot show the validation one value and the encoder another. Octets (Uint8Array
+ * instances, subclasses included) are shared by reference — their elements cannot change via getters. The copy descends one
+ * level past the deepest field the codecs read (a field, its elements, an element's own fields); values below that are shared
+ * by reference, which also bounds the copy on a self-referential value.
+ * @param {unknown} data
+ * @param {number} [depth]
+ * @returns {unknown}
+ */
+export function snapshotRdata(data, depth = 0) {
+	if (data === null || typeof data !== "object") return data;
+	if (data instanceof Uint8Array) return data;
+	if (depth >= 4) return data;
+	if (Array.isArray(data)) return data.map((e) => snapshotRdata(e, depth + 1));
+	const out = {};
+	for (const k of Object.keys(data)) out[k] = snapshotRdata(data[k], depth + 1);
+	return out;
+}
+
+/**
  * Format rdata in presentation form: the type's own form, or `\# <length> <hex>` for types without one. The data is validated
  * by encoding it first, and the formatted text is produced from what the wire round-trip decoded — the canonical presentation
  * of rdata that actually encodes — so a malformed shape raises the encode's `WireError` and no unvalidated field is ever
@@ -172,10 +192,12 @@ export function parseRdataTokens(type, t, origin, cls) {
  *   BAD_SVCPARAM, BAD_PRESENTATION, MESSAGE_TOO_LARGE, ...)
  */
 export function formatRdata(type, data) {
+	// one copy of the caller's value (CLDMV/digby#39): the encode and the round-trip act on it, never on the original
+	const snap = snapshotRdata(data);
 	const codec = CODECS.get(type);
-	if (codec?.format) return codec.format(decodeRdataBytes(type, encodeRdataBytes(type, data)));
+	if (codec?.format) return codec.format(decodeRdataBytes(type, encodeRdataBytes(type, snap)));
 	// typed on the wire but generic in text (OPT), and types with no codec: encode, then print the octets
-	return formatGeneric(encodeRdataBytes(type, data));
+	return formatGeneric(encodeRdataBytes(type, snap));
 }
 
 /**
@@ -186,7 +208,7 @@ export function formatRdata(type, data) {
  */
 export function encodeRdataBytes(type, data) {
 	const w = new Writer({ compress: false });
-	encodeRdata(w, type, data);
+	encodeRdata(w, type, snapshotRdata(data));
 	return w.finish();
 }
 

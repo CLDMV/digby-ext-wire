@@ -43,17 +43,20 @@ export function readTypeBitmap(r) {
 }
 
 /**
- * Write a type bitmap. The types may come in any order; duplicates collapse.
+ * Write a type bitmap. The types may come in any order; duplicates collapse. The list is copied once and validated on the
+ * copy (CLDMV/digby#39), so a getter list cannot show the validation one set and the writer another.
  * @param {import("../buffer.mjs").Writer} w
  * @param {number[]} types
  */
 export function writeTypeBitmap(w, types) {
+	const list = [];
 	for (const t of array(types, "the type list")) {
 		if (!Number.isInteger(t) || t < 0 || t > 0xffff) badRdata(`type ${String(t)} is out of range`);
 		if (t === 0) badRdata("a type bitmap must not include type 0"); // type 0 is reserved (CLDMV/digby#38)
 		if (t === 0xffff) badRdata("a type bitmap must not include type 65535"); // 65535 is reserved (CLDMV/digby#38)
+		list.push(t);
 	}
-	const sorted = [...new Set(types)].sort((a, b) => a - b);
+	const sorted = [...new Set(list)].sort((a, b) => a - b);
 	let i = 0;
 	while (i < sorted.length) {
 		const win = sorted[i] >> 8;
@@ -183,8 +186,9 @@ export const RRSIG = {
 	},
 	encode(w, data) {
 		obj(data, "RRSIG");
-		if (data.typeCovered === 0 || data.typeCovered === 0xffff) badRdata(`RRSIG type covered ${String(data.typeCovered)} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
-		w.u16(data.typeCovered);
+		const covered = data.typeCovered; // read once: the check and the write act on the same value (CLDMV/digby#39)
+		if (covered === 0 || covered === 0xffff) badRdata(`RRSIG type covered ${String(covered)} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
+		w.u16(covered);
 		w.u8(data.algorithm);
 		w.u8(data.labels);
 		w.u32(data.originalTtl);
