@@ -99,4 +99,71 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 		expect(d.answers[kept - 1].name).toBe(`h${kept - 1}.example.`);
 		expect(writes, `${writes} record writes for ${n} records`).toBeLessThan(n / 10);
 	}, 120_000);
+
+	// The suffix these shapes share lives only in the section's names — the question does not carry it — so a probe
+	// that measures a set against nothing but the targets written before the section pays the full 60-octet suffix
+	// for every record, and the over-the-bound trials re-encode the kept tail (CLDMV/digby#43).
+	const sectionSuffix = `${"abc".repeat(20)}.`; // 60 octets
+	const sectionSuffixShape = (n, type, data) => ({
+		id: 0x0201,
+		flags: { qr: true, ra: true },
+		questions: [{ name: "example.", type: TYPE.A, class: CLASS.IN }],
+		answers: Array.from({ length: n }, (_, i) => ({ name: `h${i}.${sectionSuffix}`, type, class: CLASS.IN, ttl: 0, data: data(i) }))
+	});
+	const aRecord = () => ({ address: "127.0.0.1" });
+	const mxRecord = (i) => ({ preference: 10, exchange: `m${i}.${sectionSuffix}` });
+
+	it("bounds the trials' writes by the kept records when the shared suffix is only in the section (CLDMV/digby#43)", () => {
+		const n = 5000;
+		for (const [tag, type, data] of [
+			["distinct A owners", TYPE.A, aRecord],
+			["MX with the suffix in both owner and rdata", TYPE.MX, mxRecord]
+		]) {
+			const m = sectionSuffixShape(n, type, data);
+			wireCounters.recordWrites = 0;
+			const r = encodeCapped(m, { limit: 65535 });
+			const writes = wireCounters.recordWrites;
+			expect(r.truncated, `${tag}: the limit truncates`).toBe(true);
+			const d = decodeMessage(r.bytes);
+			const kept = d.answers.length;
+			expect(kept, `${tag}: keeps a fraction of the records`).toBeGreaterThan(1000);
+			// the survivors are whole sets in first-seen order
+			expect(d.answers[0].name).toBe(`h0.${sectionSuffix}`);
+			expect(d.answers[kept - 1].name).toBe(`h${kept - 1}.${sectionSuffix}`);
+			// one plain encode when the message fits, one write of the survivors, one probe measurement per kept
+			// set: a small constant per kept record — the probe used to pay ~61 per kept record here
+			expect(writes, `${tag}: ${writes} record writes for ${kept} kept records`).toBeLessThanOrEqual(5 * kept);
+		}
+	}, 120_000);
+
+	it("costs one plain encode when the message fits: record writes equal the record count (CLDMV/digby#43)", () => {
+		const sets = 50;
+		const perSet = 20;
+		const m = interleaved(sets, perSet);
+		wireCounters.recordWrites = 0;
+		const r = encodeCapped(m, { limit: 65535 });
+		expect(r.truncated).toBe(false);
+		// a fitting message takes the single-pass path — exactly encodeMessage's work, one write per record
+		expect(wireCounters.recordWrites, `${wireCounters.recordWrites} writes for ${sets * perSet} records`).toBe(sets * perSet);
+		// and a message that fits EXACTLY at its limit still takes the single-pass path
+		const full = encodeMessage(m).length;
+		wireCounters.recordWrites = 0;
+		const exact = encodeCapped(m, { limit: full });
+		expect(exact.truncated).toBe(false);
+		expect(wireCounters.recordWrites).toBe(sets * perSet);
+	}, 120_000);
+
+	it("keeps the truncating encode's record writes flat from 5,000 to 320,000 records (CLDMV/digby#43)", () => {
+		const count = (n) => {
+			const m = distinct(n);
+			wireCounters.recordWrites = 0;
+			encodeCapped(m, { limit: 65535 });
+			return wireCounters.recordWrites;
+		};
+		const small = count(5000);
+		const large = count(320000);
+		// the work is bounded by the output (the kept records), not the input: past the limit, more input records
+		// cost grouping only, no record writes
+		expect(large, `${large} writes at 320k records vs ${small} at 5k`).toBeLessThanOrEqual(2 * small + 1000);
+	}, 120_000);
 });
