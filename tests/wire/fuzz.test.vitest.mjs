@@ -110,6 +110,13 @@ function checkInput(input) {
 	for (const rec of [...m.answers, ...m.authorities, ...m.additionals]) {
 		let text;
 		try {
+			if (rec.type === 0) {
+				// the presentation layer refuses the reserved types (CLDMV/digby#38); the wire layer's own type-0 refusal is
+				// that issue's wire-side slice and has not landed on this branch, so decode can still hand one over. Expect
+				// the refusal here, not a round-trip — once readRecord refuses type 0 this branch never fires.
+				expect(() => formatRecord(rec)).toThrow(WireError);
+				continue;
+			}
 			if (rec.data === null) {
 				// the RFC 2136 update form: the line is the bare head, and it must re-parse to the same data: null record
 				// (CLDMV/digby#37)
