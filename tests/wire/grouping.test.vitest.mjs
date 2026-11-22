@@ -4,15 +4,17 @@
  */
 
 /**
- * RRset grouping across a whole section (CLDMV/digby#36, RFC 2181 9): records with the same owner, type and class form one
- * RRset even when they are not adjacent in the section, so a capped encode never sends part of an RRset. The sets come out
- * in first-seen order with their records in section order; truncation drops whole sets and sets TC per the section.
+ * Record order and RRset grouping (CLDMV/digby#36, RFC 2181 9): an encode keeps the section's record order, always — record
+ * order is meaning (a transfer's SOA bookends, an IXFR's SOA-diff structure, an update's interleaved adds and deletes). The
+ * RRset grouping is consulted only by a truncating encode, to decide what it keeps: whole RRsets survive or drop, never part
+ * of one; the survivors keep their original positions, so the surviving sets still come in first-seen order; and TC follows
+ * the section rules.
  */
 
 import { describe, expect, it } from "vitest";
-import { TYPE } from "../../src/lib/wire/constants.mjs";
+import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
-import { regroup, rrsetKey } from "../helpers/wire-gen.mjs";
+import { wholeSetPrefix } from "../helpers/wire-gen.mjs";
 
 const SECTIONS = ["answers", "authorities", "additionals"];
 const A = (i) => ({ name: "ns.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: `10.0.0.${i}` } });
@@ -24,45 +26,64 @@ const TXT = (name, n) => ({
 	ttl: 60,
 	data: { strings: Array.from({ length: Math.ceil(n / 255) }, (_, i) => Uint8Array.from({ length: Math.min(255, n - i * 255) }, () => 0x78)) }
 });
+const SOA = (serial) => ({
+	name: "example.",
+	type: TYPE.SOA,
+	class: 1,
+	ttl: 60,
+	data: { mname: "ns.example.", rname: "host.example.", serial, refresh: 0, retry: 0, expire: 0, minimum: 0 }
+});
+const NS = { name: "example.", type: TYPE.NS, class: 1, ttl: 60, data: { target: "ns.example." } };
+// the RFC 2136 delete-RRset form: class ANY (or NONE) with empty rdata
+const DEL = (cls) => ({ name: "x.example.", type: TYPE.A, class: cls, ttl: 0, data: null });
 const message = (sections) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [], authorities: [], additionals: [], ...sections });
 
-/** Whether `kept` is a prefix of `regroup(all)` that ends on an RRset boundary (a whole number of sets). */
-function isGroupedPrefix(kept, all) {
-	const grouped = regroup(all);
-	if (kept.length > grouped.length) return false;
-	for (let i = 0; i < kept.length; i++) expect(kept[i]).toEqual(grouped[i]);
-	return kept.length === 0 || kept.length === grouped.length || rrsetKey(grouped[kept.length]) !== rrsetKey(grouped[kept.length - 1]);
-}
-
-describe("RRsets group across a whole section (CLDMV/digby#36)", () => {
+describe("record order is kept; grouping only decides truncation (CLDMV/digby#36)", () => {
 	it("never sends part of the interleaved ns.example A set (the issue's packet)", () => {
 		const m = message({ additionals: [A(1), TXT("p1.example.", 200), A(2), TXT("p2.example.", 10)] });
-		// first-seen order: the ns.example set, then p1, then p2
-		const grouped = [A(1), A(2), TXT("p1.example.", 200), TXT("p2.example.", 10)];
 		for (let limit = 270; limit <= 400; limit++) {
 			const { bytes, truncated } = encodeCapped(m, { limit });
 			const d = decodeMessage(bytes);
 			// only optional data is cut here: TC stays clear and no truncation is reported
 			expect(d.flags.tc, `limit ${limit}`).toBe(false);
 			expect(truncated, `limit ${limit}`).toBe(false);
-			// whole sets only, in first-seen order
-			expect(isGroupedPrefix(d.additionals, m.additionals), `limit ${limit}`).toBe(true);
+			// whole sets only, at their original positions
+			expect(wholeSetPrefix(d.additionals, m.additionals), `limit ${limit}`).toBe(true);
 			const ns = d.additionals.filter((r) => r.type === TYPE.A);
 			expect(ns.length % 2, `limit ${limit}: the ns.example set went out partly`).toBe(0);
 		}
 		// the issue's window: the later piece of the split set is the one that does not fit, so the whole set goes and the
-		// small trailing TXT with it. Owner-name compression shrinks this packet (the p1/p2 owners share ns.example.'s
-		// suffix): grouped it is 294 octets (12 header + 26 + 16 A records + 215 + 25 TXT records), so the window where
-		// [ns/A, p1, ns/A] fits but p2 does not is caps 269..293 — 280 sits in it
+		// small trailing TXT with it — while the records that survive keep their positions. Owner-name compression shrinks
+		// this packet (the p1/p2 owners share ns.example.'s suffix): [A, TXT p1, A] is 272 octets, the whole packet 300, so
+		// the window where the first three fit but p2 does not is caps 272..299 — 280 sits in it
 		const { bytes } = encodeCapped(m, { limit: 280 });
-		expect(decodeMessage(bytes).additionals).toEqual([A(1), A(2), TXT("p1.example.", 200)]);
+		expect(decodeMessage(bytes).additionals).toEqual([A(1), TXT("p1.example.", 200), A(2)]);
 	});
 
-	it.each(SECTIONS)("rejoins a set split across the %s and keeps first-seen order", (section) => {
+	it.each(SECTIONS)("keeps the %s's record order through a full encode", (section) => {
 		const m = message({ [section]: [A(1), TXT("p1.example.", 400), A(2)] });
 		const d = decodeMessage(encodeMessage(m));
-		// the interleaved ns.example records travel together, ahead of the set first seen after them
-		expect(d[section]).toEqual([A(1), A(2), TXT("p1.example.", 400)]);
+		// the interleaved ns.example records stay where they are: an encode never regroups (record order is meaning)
+		expect(d[section]).toEqual([A(1), TXT("p1.example.", 400), A(2)]);
+	});
+
+	it("keeps an AXFR's record order: the SOA bookends stay at the ends", () => {
+		const answers = [SOA(3), NS, A(1), SOA(3)];
+		// the two SOAs share one RRset key, so regrouping would send [SOA, SOA, NS, A] and end the transfer after the first
+		// record
+		expect(decodeMessage(encodeMessage(message({ answers })))).toEqual(message({ answers }));
+	});
+
+	it("keeps an IXFR's SOA-diff structure", () => {
+		const answers = [SOA(3), SOA(1), A(7), SOA(2), A(8), SOA(2), SOA(3)];
+		// the five SOAs share one RRset key, so regrouping sends every SOA first and destroys the diff
+		expect(decodeMessage(encodeMessage(message({ answers })))).toEqual(message({ answers }));
+	});
+
+	it.each([CLASS.ANY, CLASS.NONE])("keeps an UPDATE's record order: add, delete-RRset (class %s), add", (cls) => {
+		const additionals = [A(1), DEL(cls), A(2)];
+		// the two adds share one RRset key, so regrouping sends [add, add, delete] and the update's end state comes out empty
+		expect(decodeMessage(encodeMessage(message({ additionals })))).toEqual(message({ additionals }));
 	});
 
 	it.each(SECTIONS)("drops the whole split set under a cap in the %s, keeping first-seen order", (section) => {
@@ -75,5 +96,16 @@ describe("RRsets group across a whole section (CLDMV/digby#36)", () => {
 		expect(d.flags.tc).toBe(section !== "additionals");
 		// and nothing after the truncation point survives into the later sections
 		for (const later of SECTIONS.slice(SECTIONS.indexOf(section) + 1)) expect(d[later]).toEqual([]);
+	});
+
+	it("drops an interleaved RRset whole and keeps the other records at their positions", () => {
+		const m = message({ additionals: [A(1), TXT("p1.example.", 10), A(2), TXT("p2.example.", 400)] });
+		// [A, small TXT, A] is 82 octets, the big TXT set 419 more: at 100 the p2 set goes whole and the rest keep order
+		const { bytes, truncated } = encodeCapped(m, { limit: 100 });
+		const d = decodeMessage(bytes);
+		expect(d.additionals).toEqual([A(1), TXT("p1.example.", 10), A(2)]);
+		// only optional data was cut
+		expect(truncated).toBe(false);
+		expect(d.flags.tc).toBe(false);
 	});
 });

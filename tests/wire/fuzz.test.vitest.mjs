@@ -19,7 +19,7 @@ import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
 import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { TYPED, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
-import { genMessage, genRdata, genRecord, hex, prng, regroupMessage, seedFromEnv } from "../helpers/wire-gen.mjs";
+import { genMessage, genRdata, genRecord, hex, prng, seedFromEnv } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_FUZZ_SEED");
 const ITERATIONS = Number(process.env.DIGBY_FUZZ_ITERATIONS || 20000);
@@ -99,9 +99,9 @@ function checkInput(input) {
 		throw report("the re-encoding did not decode", input, err);
 	}
 	try {
-		// the encoder emits each section regrouped — whole RRsets in first-seen order — so a mutated input whose RRsets
-		// interleave re-encodes to the grouped order, not the decoded order (CLDMV/digby#36)
-		expect(back).toEqual(regroupMessage(m));
+		// the encoder keeps record order — record order is meaning, even when a section's RRsets interleave
+		// (CLDMV/digby#36) — so the re-encoding decodes to exactly what was decoded
+		expect(back).toEqual(m);
 	} catch (err) {
 		throw report("the re-encoding decoded differently", input, err);
 	}

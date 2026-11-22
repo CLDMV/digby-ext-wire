@@ -17,24 +17,12 @@ import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/m
 import { parseName, formatName, readName, writeName } from "../../src/lib/wire/names.mjs";
 import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
-import { genMessage, genName, genRdata, genRecord, prng, regroup, regroupMessage, rrsetKey, seedFromEnv } from "../helpers/wire-gen.mjs";
+import { genMessage, genName, genRdata, genRecord, prng, seedFromEnv, wholeSetPrefix } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_PROPERTY_SEED");
 const MESSAGES = Number(process.env.DIGBY_PROPERTY_MESSAGES || 400);
 const PER_TYPE = Number(process.env.DIGBY_PROPERTY_PER_TYPE || 60);
 console.log(`wire property tests: DIGBY_PROPERTY_SEED=${SEED} messages=${MESSAGES} perType=${PER_TYPE}`);
-
-/**
- * Whether `kept` is a prefix of `regroup(all)` that ends on an RRset boundary. The encoder emits a section in canonical
- * (grouped) order — a set's records travel together even when the message interleaved them (CLDMV/digby#36) — so what
- * survives truncation is a whole-set prefix of the grouped section, not of the input order.
- */
-function isGroupedPrefix(kept, all) {
-	const grouped = regroup(all);
-	if (kept.length > grouped.length) return false;
-	for (let i = 0; i < kept.length; i++) expect(kept[i]).toEqual(grouped[i]);
-	return kept.length === 0 || kept.length === grouped.length || rrsetKey(grouped[kept.length]) !== rrsetKey(grouped[kept.length - 1]);
-}
 
 describe(`wire properties (seed ${SEED})`, () => {
 	it("decode(encode(message)) deep-equals the message, compressed or not, and stays within 65535 octets", () => {
@@ -43,14 +31,13 @@ describe(`wire properties (seed ${SEED})`, () => {
 			const m = genMessage(g);
 			const bytes = encodeMessage(m);
 			expect(bytes.length).toBeLessThanOrEqual(65535);
-			// genMessage emits up to two questions; the decode default is one (the server path), so say so. genMessage may
-			// interleave a section's RRsets, and the encoder emits them regrouped (whole sets, first-seen order), so the
-			// round-trip target is the regrouped message (CLDMV/digby#36).
-			const canonical = regroupMessage(m);
-			expect(decodeMessage(bytes, { maxQuestions: 2 })).toEqual(canonical);
+			// genMessage emits up to two questions; the decode default is one (the server path), so say so. The encoder keeps
+			// record order — record order is meaning, even when a section's RRsets interleave (CLDMV/digby#36) — so the
+			// round-trip target is the message itself.
+			expect(decodeMessage(bytes, { maxQuestions: 2 })).toEqual(m);
 			const plain = encodeMessage(m, { compress: false });
 			expect(plain.length).toBeGreaterThanOrEqual(bytes.length);
-			expect(decodeMessage(plain, { maxQuestions: 2 })).toEqual(canonical);
+			expect(decodeMessage(plain, { maxQuestions: 2 })).toEqual(m);
 		}
 	});
 
@@ -74,9 +61,9 @@ describe(`wire properties (seed ${SEED})`, () => {
 			const d = decodeMessage(bytes, { maxQuestions: 2 });
 			expect(d.flags.tc).toBe(unsigned.flags.tc || truncated);
 			expect(d.edns).toEqual(unsigned.edns);
-			expect(isGroupedPrefix(d.answers, unsigned.answers)).toBe(true);
-			expect(isGroupedPrefix(d.authorities, unsigned.authorities)).toBe(true);
-			expect(isGroupedPrefix(d.additionals, unsigned.additionals)).toBe(true);
+			expect(wholeSetPrefix(d.answers, unsigned.answers)).toBe(true);
+			expect(wholeSetPrefix(d.authorities, unsigned.authorities)).toBe(true);
+			expect(wholeSetPrefix(d.additionals, unsigned.additionals)).toBe(true);
 			// TC exactly when an answer or authority RRset was dropped
 			const droppedPrimary = d.answers.length < unsigned.answers.length || d.authorities.length < unsigned.authorities.length;
 			expect(truncated).toBe(droppedPrimary);

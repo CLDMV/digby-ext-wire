@@ -9,6 +9,7 @@
  * decoder produces, so `decode(encode(x))` must deep-equal `x`.
  */
 
+import { expect } from "vitest";
 import { formatIPv4, formatIPv6 } from "../../src/lib/wire/text.mjs";
 import { formatName, nameKey } from "../../src/lib/wire/names.mjs";
 import { CLASS, EDNS_OPTION, SVC_KEY, TYPE } from "../../src/lib/wire/constants.mjs";
@@ -345,8 +346,9 @@ export function genMessage(g, { maxRecords = 4 } = {}) {
 				}
 			}
 		}
-		// half the time, shuffle the section so RRsets interleave: the encoder must regroup them (CLDMV/digby#36), so callers
-		// compare against regroupMessage rather than the input order
+		// half the time, shuffle the section so RRsets interleave: the encoder must keep record order — record order is
+		// meaning (CLDMV/digby#36) — so the round-trip target is the input itself, and a truncating encode must still never
+		// send part of an interleaved RRset
 		return g.chance(0.5) ? shuffled(out, g) : out;
 	};
 	const additionals = section(Math.max(1, maxRecords - 1));
@@ -385,7 +387,7 @@ export function shuffled(list, g) {
 
 /**
  * The codec's RRset key: same owner (case-insensitive), type and class; an RRSIG also by the type it covers. Mirrors
- * `rrsets` in src/lib/wire/message.mjs so tests can state the encoder's canonical section order (CLDMV/digby#36).
+ * `rrsets` in src/lib/wire/message.mjs so tests can state which records form one RRset (CLDMV/digby#36).
  * @param {object} rec
  * @returns {string}
  */
@@ -394,41 +396,45 @@ export function rrsetKey(rec) {
 }
 
 /**
- * A section regrouped the way the encoder emits it: records with the same RRset key travel together even when the input
- * interleaved them, sets in first-seen order, records within a set in section order (RFC 2181 9: a partial RRset is never
- * sent).
- * @param {object[]} list
- * @returns {object[]}
+ * Whether `kept` is what a truncating encode may leave of `all` (CLDMV/digby#36, RFC 2181 9): the kept records sit at their
+ * original positions (a subsequence of `all` in its order), they are exactly some whole RRsets — each set wholly present or
+ * wholly absent — and the surviving sets come in first-seen order, so nothing was dropped ahead of something kept. Records
+ * are compared with `expect(...).toEqual`, so a mismatch asserts with a diff rather than returning false quietly.
+ * @param {object[]} kept - the decoded survivors
+ * @param {object[]} all - the section's records as they went in
+ * @returns {boolean}
  */
-export function regroup(list) {
-	const sets = [];
-	const byKey = new Map();
-	for (const rec of list) {
+export function wholeSetPrefix(kept, all) {
+	const firstSeen = [];
+	const seen = new Map();
+	for (const rec of all) {
 		const k = rrsetKey(rec);
-		let set = byKey.get(k);
-		if (set === undefined) {
-			set = [];
-			byKey.set(k, set);
-			sets.push(set);
+		if (!seen.has(k)) {
+			seen.set(k, true);
+			firstSeen.push(k);
 		}
-		set.push(rec);
 	}
-	return sets.flat();
-}
-
-/**
- * A message with each section in the encoder's canonical order: sections regrouped, a TSIG record kept last in the
- * additionals (it is split off before grouping and always written last).
- * @param {object} m
- */
-export function regroupMessage(m) {
-	const tsig = m.additionals.filter((r) => r.type === TYPE.TSIG);
-	return {
-		...m,
-		answers: regroup(m.answers),
-		authorities: regroup(m.authorities),
-		additionals: [...regroup(m.additionals.filter((r) => r.type !== TYPE.TSIG)), ...tsig]
-	};
+	const keptKeys = [];
+	const keptSeen = new Map();
+	for (const rec of kept) {
+		const k = rrsetKey(rec);
+		if (!keptSeen.has(k)) {
+			keptSeen.set(k, true);
+			keptKeys.push(k);
+		}
+	}
+	if (keptKeys.length > firstSeen.length) return false;
+	for (let i = 0; i < keptKeys.length; i++) if (keptKeys[i] !== firstSeen[i]) return false;
+	const counts = new Map();
+	for (const rec of all) counts.set(rrsetKey(rec), (counts.get(rrsetKey(rec)) ?? 0) + 1);
+	const keptCounts = new Map();
+	for (const rec of kept) keptCounts.set(rrsetKey(rec), (keptCounts.get(rrsetKey(rec)) ?? 0) + 1);
+	for (const [k, n] of keptCounts) if (counts.get(k) !== n) return false;
+	// the survivors, in order, must be exactly the kept sets' records at their original positions
+	const expected = all.filter((rec) => keptCounts.has(rrsetKey(rec)));
+	if (expected.length !== kept.length) return false;
+	for (let i = 0; i < kept.length; i++) expect(kept[i]).toEqual(expected[i]);
+	return true;
 }
 
 /** Hex helpers for fixtures and regression bytes. */
