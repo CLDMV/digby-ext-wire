@@ -14,6 +14,7 @@
 
 import { CLASS, classFromString, classToString, isClassToken, typeFromString, typeToString } from "./constants.mjs";
 import { WireErrorCode, fail } from "./errors.mjs";
+import { RDATA_REQUIRED } from "./message.mjs";
 import { canonicalName } from "./names.mjs";
 import { formatRdata, parseRdataTokens } from "./rdata/index.mjs";
 import { Tokens, tokenize } from "./text.mjs";
@@ -24,6 +25,9 @@ const UNIT = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
 
 /** The largest TTL the codec accepts (RFC 2181 8); encode's wire writer uses the same bound. */
 const MAX_TTL = 0x7fffffff;
+
+/** The top of the type range is reserved (RFC 6895); no record may use it (CLDMV/digby#38). */
+const RESERVED_TYPE = 0xffff;
 
 /**
  * Parse a TTL: seconds, or BIND-style units (`1w2d3h4m5s`, case-insensitive). At most 2^31 - 1 (RFC 2181 8).
@@ -83,6 +87,7 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
  * @param {{ name: string, ttl: number, class?: number, type: number, data: object | null }} rec
  * @returns {string}
  * @throws {import("./errors.mjs").WireError} VALUE_OUT_OF_RANGE, BAD_PRESENTATION, or whatever the rdata encoding raises
+ *   (including MESSAGE_TOO_LARGE for rdata past a record's 65,535-octet limit)
  */
 export function formatRecord(rec) {
 	if (rec === null || typeof rec !== "object" || Array.isArray(rec)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a record must be an object");
@@ -91,11 +96,15 @@ export function formatRecord(rec) {
 	const cls = rec.class ?? CLASS.IN;
 	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${String(cls)}`);
 	if (!Number.isInteger(rec.type) || rec.type < 0 || rec.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(rec.type)}`);
+	// the record-layer rules parseRecord and writeRecord apply (CLDMV/digby#38): the top of the type range is reserved, and
+	// empty rdata is only the RFC 2136 update form — a type that must carry rdata (RDATA_REQUIRED) never takes it
+	if (rec.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "record type 65535 is reserved");
 	const head = `${name} ${rec.ttl} ${classToString(cls)} ${typeToString(rec.type)}`;
 	if (rec.data === null) {
 		// the RFC 2136 empty-rdata update form, same rule as writeRecord: empty rdata is only a class ANY or NONE record, so
 		// anything else would print a line parseRecord refuses (CLDMV/digby#37)
 		if (cls !== CLASS.ANY && cls !== CLASS.NONE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "empty rdata (data: null) is only for class ANY or NONE");
+		if (RDATA_REQUIRED.has(rec.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(rec.type)} rdata must be present; the empty-rdata update form does not apply to it`);
 		return head;
 	}
 	return `${head} ${formatRdata(rec.type, rec.data)}`;

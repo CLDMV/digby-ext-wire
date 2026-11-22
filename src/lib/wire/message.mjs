@@ -38,8 +38,10 @@ const MAX_TTL = 0x7fffffff;
  * them and their rdata must be present (CLDMV/digby#38). TSIG and TKEY are transaction records whose rdata is mandatory; the
  * transfer and meta-query types are not records at all. OPT never reaches the empty-rdata branch (it is read as EDNS), and
  * type ANY must stay allowed — type ANY with class ANY is the "delete every RRset" update form.
+ *
+ * Exported so the presentation formatter applies the same rule to `data: null` (CLDMV/digby#37).
  */
-const RDATA_REQUIRED = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
+export const RDATA_REQUIRED = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
 /** The top of the type range is reserved (RFC 6895); no record may use it. */
 const RESERVED_TYPE = 0xffff;
 
