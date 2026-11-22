@@ -411,136 +411,205 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	);
 	if (tsig) sections[2] = sections[2].slice(0, -1);
 
-	const w = new Writer({ max: truncate ? MAX_MESSAGE : limit, compress });
-	const writeTail = () => {
-		if (edns) writeOpt(w, edns, rcode >>> 4);
-		if (tsig) writeRecord(w, tsig);
+	// The header and questions, written into whichever writer the caller passes: the plain attempt, the
+	// non-truncating encode and the trial path all write the same head. Returns where the section counts start.
+	const writeHead = (wr) => {
+		wr.u16(checkedId(message.id));
+		wr.u16(packFlags(message.flags ?? {}, rcode & 0xf));
+		wr.u16(questions.length);
+		const countAt = wr.length;
+		wr.u16(0);
+		wr.u16(0);
+		wr.u16(0);
+		for (const q of questions) {
+			writeName(wr, q.name, true);
+			wr.u16(q.type);
+			wr.u16(q.class);
+		}
+		return countAt;
+	};
+	const writeTail = (wr) => {
+		if (edns) writeOpt(wr, edns, rcode >>> 4);
+		if (tsig) writeRecord(wr, tsig);
 	};
 	// An upper bound on the tail's size: written uncompressed into a scratch writer, once.
 	const scratch = new Writer({ compress: false });
 	if (edns) writeOpt(scratch, edns, rcode >>> 4);
 	if (tsig) writeRecord(scratch, tsig);
 	const tailBound = scratch.length;
-	// Whether the tail (OPT, TSIG) still fits after what is written now. The bound settles it almost always; near the limit,
-	// write the tail for real, measure and roll it back, since the TSIG owner may compress against names written so far.
-	const tailFits = () => {
-		if (w.length + tailBound <= limit) return true;
-		const mark = w.checkpoint();
+	// Whether the tail (OPT, TSIG) still fits on `wr` after what is written now. The bound settles it almost always;
+	// near the limit, write the tail for real, measure and roll it back, since the TSIG owner may compress against
+	// names written so far.
+	const tailFitsOn = (wr) => {
+		if (wr.length + tailBound <= limit) return true;
+		const mark = wr.checkpoint();
 		try {
-			writeTail();
-			return w.length <= limit;
+			writeTail(wr);
+			return wr.length <= limit;
 		} catch (err) {
 			if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE) return false;
 			throw err;
 		} finally {
-			w.rollback(mark);
+			wr.rollback(mark);
 		}
 	};
-	w.u16(checkedId(message.id));
-	w.u16(packFlags(message.flags ?? {}, rcode & 0xf));
-	w.u16(questions.length);
-	const countAt = w.length;
-	w.u16(0);
-	w.u16(0);
-	w.u16(0);
-	for (const q of questions) {
-		writeName(w, q.name, true);
-		w.u16(q.type);
-		w.u16(q.class);
-	}
-	if (!tailFits()) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the header, questions and tail records alone exceed ${limit} octets`);
+	// The header, questions and tail records alone must fit on `wr`: they are never dropped, so no RRset can make
+	// room for them.
+	const headAndTail = (wr) => {
+		const countAt = writeHead(wr);
+		if (!tailFitsOn(wr)) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the header, questions and tail records alone exceed ${limit} octets`);
+		return countAt;
+	};
+	// The plain encode of the whole message: header, questions, every record of every section, then the tail, with
+	// the section counts patched.
+	const writeAll = (wr, countAt, written) => {
+		for (let s = 0; s < 3; s++)
+			for (let i = 0; i < sections[s].length; i++) {
+				writeRecord(wr, sections[s][i]);
+				written[s]++;
+			}
+		writeTail(wr);
+		if (edns) written[2]++;
+		if (tsig) written[2]++;
+		written.forEach((n, i) => wr.patch16(countAt + i * 2, n));
+	};
 
 	const written = [0, 0, 0];
-	let truncated = false;
-	let dropped = false; // any RRset dropped from any section — an additionals-only drop never sets TC, but it is still a drop (CLDMV/digby#43)
 	if (!truncate) {
 		// a non-truncating encode writes the records exactly as they are: record order is meaning (a transfer's SOA bookends,
 		// an IXFR's SOA-diff structure, an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36)
-		for (let s = 0; s < 3; s++)
-			for (let i = 0; i < sections[s].length; i++) {
-				writeRecord(w, sections[s][i]);
-				written[s]++;
-			}
-	} else {
-		// a truncating encode consults the RRset grouping only to decide what it keeps — whole sets, in first-seen order; a
-		// partial RRset is never sent (RFC 2181 9). The survivors are then written at their original positions, so record
-		// order is kept: only whole sets leave it (CLDMV/digby#36).
-		//
-		// The trials are measured incrementally (CLDMV/digby#43), so a trial costs O(the new set) and not O(the kept
-		// tail): each set's octet contribution is measured once, in a probe writer seeded with the targets known so far
-		// (the writer's own — the section's records are not in it yet) and positioned past an upper bound of the kept
-		// records' octets. Both seedings can only make the measurement larger than the contribution the set really adds
-		// to the final stream: the probe's target set is a subset of the final one (a record encodes no shorter against
-		// fewer targets), and the probe's offsets sit at or past the final ones (fewer suffixes clear the 0x4000
-		// registration bound), so a running total that includes the measurement is an upper bound on the real stream
-		// length. When the bound plus the tail bound fits the limit, the set fits — no trial write. Only when the bound
-		// is over the limit is the trial written out for real (all kept sets plus this one, at their original positions —
-		// exactly the stream that would be sent), which decides it exactly and, on a keep, replaces the running bound
-		// with the exact length. The output is the last trial that fits, whole sets at their original positions, nothing
-		// dangles — the round-2 design's exactness, preserved.
-		outer: for (let s = 0; s < 3; s++) {
-			const list = sections[s];
-			const { sets, owner } = rrsets(list);
-			let keptSets = sets.length;
-			if (sets.length > 0) {
-				// the probe: the writer's compression targets copied once (they do not change while the section's fate is
-				// undecided — every trial write is rolled back), a length seeded per measurement past the kept records'
-				// upper bound. A measurement that runs past MAX_MESSAGE throws MESSAGE_TOO_LARGE, which reads as a
-				// bound that is over the limit and falls through to the exact trial.
-				const probe = new Writer({ max: MAX_MESSAGE, compress });
-				for (const [key, at] of w.names) probe.names.set(key, at);
-				let keptBound = 0; // upper bound on the octets the kept sets add to the stream (exact after an exact trial)
-				for (let k = 0; k < sets.length; k++) {
-					// measure this set's contribution: write its records into the probe past the seeded offset, then roll
-					// the probe back (its registered targets with them)
-					probe.length = w.length + keptBound;
-					const probeMark = probe.checkpoint();
-					let contribution;
-					try {
-						for (const at of sets[k]) writeRecord(probe, list[at]);
-						contribution = probe.length - (w.length + keptBound);
-					} catch (err) {
-						if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
-						contribution = Infinity;
-					} finally {
-						probe.rollback(probeMark);
-					}
-					if (w.length + keptBound + contribution + tailBound <= limit) {
-						keptBound += contribution; // an upper bound plus an upper bound stays an upper bound
-						continue;
-					}
-					// the bound is over the limit: decide exactly, by writing the stream that would be sent (all kept sets
-					// plus this one, at their original positions) and rolling it back
-					const mark = w.checkpoint();
-					let fits = true;
-					try {
-						for (let i = 0; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i]);
-						fits = w.length <= limit && tailFits();
-					} catch (err) {
-						if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
-						fits = false;
-					}
-					if (fits) {
-						keptBound = w.length - mark.length; // exact, so later trials bound tightly again
-						w.rollback(mark);
-						continue;
-					}
-					w.rollback(mark);
-					keptSets = k;
-					dropped = true;
-					if (s < 2) truncated = true;
-					break; // the truncation point: this set and everything after it, in every section, is dropped
-				}
-			}
-			// the surviving records: all of them, or — after a drop — only the records of the sets kept so far, at their
-			// original positions, written for good once
-			for (let i = 0; i < list.length; i++)
-				if (owner[i] < keptSets) {
+		const w = new Writer({ max: limit, compress });
+		writeAll(w, headAndTail(w), written);
+		return { bytes: w.finish(), truncated: false };
+	}
+
+	// A truncating encode first tries the message as it stands (CLDMV/digby#43): when it fits, the capped encode
+	// costs exactly what a plain encode costs — one write per record, one pass — and nothing below runs. When it
+	// does not fit (MESSAGE_TOO_LARGE from a record or the tail), whole RRsets drop to make room: the trials below
+	// decide which. Outside the try: a header, questions and tail that alone exceed the limit are a hard
+	// MESSAGE_TOO_LARGE — nothing droppable remains.
+	const attempt = new Writer({ max: limit, compress });
+	const attemptCountAt = headAndTail(attempt);
+	let fitted = null;
+	try {
+		writeAll(attempt, attemptCountAt, written);
+		fitted = attempt.finish();
+	} catch (err) {
+		if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+	}
+	if (fitted) return { bytes: fitted, truncated: false };
+	written.fill(0);
+
+	// The message does not fit as it stands: whole RRsets drop, never part of one (RFC 2181 9), and the survivors
+	// stay at their original positions, so the surviving sets keep the order they were first seen in and nothing ever
+	// travels regrouped (CLDMV/digby#36). A truncating encode consults the RRset grouping only to decide what it
+	// keeps.
+	//
+	// The trials are measured incrementally (CLDMV/digby#43), so a trial costs O(the new set) and not O(the kept
+	// tail): each set's octet contribution is measured once, in a probe writer positioned past an upper bound of the
+	// kept records' octets and seeded with the compression targets that are FINAL — everything written before the
+	// section, plus the kept records already written for good. Records before a set's first position belong to sets
+	// already decided as kept; they are written for good as the loop reaches them, and their targets fold into the
+	// probe from then on. That keeps the bound tight on shared-suffix shapes: a suffix a kept record registered is a
+	// target for every later measurement, instead of every measurement paying the suffix in full.
+	//
+	// Why the bound is an upper bound on the stream that would be sent (the soundness of the fast path,
+	// CLDMV/digby#43): take any kept record q of set k. The probe writes q at offset w.length + keptBound + (its
+	// set's measured records before it), with the final targets available. The real stream writes q at its original
+	// position: the kept records before it measure no more than the bound (earlier sets — their contributions bound
+	// their real bytes — and set k's own — the measurements write the records once, in position order, against the
+	// same targets the real stream holds before them), so q's real offset never passes its probe offset. And a
+	// suffix registers as a compression target exactly when it is written below 0x4000, so every target the probe
+	// held, the real stream holds too — while the real stream also holds the other kept records' registrations,
+	// which the probe lacks. A record can therefore only compress better in the real stream than in its measurement,
+	// never worse: real octets per record ≤ measured octets per record, and the running bound is the sum of the
+	// measurements. When the bound plus the tail bound fits the limit, the set fits — no trial write. Only when the
+	// bound is over the limit is the trial written out for real (all kept sets plus this one, at their original
+	// positions from the set's first record on — records before it are final), which decides it exactly and, on a
+	// keep, replaces the running bound with the exact length. The output is the last trial that fits, whole sets at
+	// their original positions, nothing dangles — the round-2 design's exactness, preserved.
+	const w = new Writer({ max: MAX_MESSAGE, compress });
+	const countAt = writeHead(w);
+	// the head-and-tail check already passed on the attempt writer, whose head is identical
+	let truncated = false;
+	let dropped = false; // any RRset dropped from any section — an additionals-only drop never sets TC, but it is still a drop (CLDMV/digby#43)
+	outer: for (let s = 0; s < 3; s++) {
+		const list = sections[s];
+		const { sets, owner } = rrsets(list);
+		let pos = 0; // section positions below this are decided and finally written
+		let keptSets = sets.length;
+		if (sets.length > 0) {
+			// the probe: the writer's compression targets copied once (they do not change while the section's fate
+			// is undecided — every trial write is rolled back), and the targets of records written for good folded
+			// in as the loop reaches them. A measurement that runs past MAX_MESSAGE throws MESSAGE_TOO_LARGE, which
+			// reads as a bound that is over the limit and falls through to the exact trial.
+			const probe = new Writer({ max: MAX_MESSAGE, compress });
+			for (const [key, at] of w.names) probe.names.set(key, at);
+			let synced = w.added.length; // entries of w.added copied into probe.names so far
+			let keptBound = 0; // upper bound on the octets the kept sets add from `pos` on (exact after an exact trial)
+			for (let k = 0; k < sets.length; k++) {
+				const first = sets[k][0];
+				// records before this set's first record belong to sets already decided as kept: write them for
+				// good, so their compression targets are final and the next measurement is seeded with them
+				for (let i = pos; i < first; i++) {
 					writeRecord(w, list[i]);
 					written[s]++;
 				}
-			if (keptSets < sets.length) break outer;
+				pos = first;
+				while (synced < w.added.length) {
+					probe.names.set(w.added[synced], w.names.get(w.added[synced]));
+					synced++;
+				}
+				// measure this set's contribution: write its records into the probe past the seeded offset, then
+				// roll the probe back (its registered targets with them)
+				probe.length = w.length + keptBound;
+				const probeMark = probe.checkpoint();
+				let contribution;
+				try {
+					for (const at of sets[k]) writeRecord(probe, list[at]);
+					contribution = probe.length - (w.length + keptBound);
+				} catch (err) {
+					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+					contribution = Infinity;
+				} finally {
+					probe.rollback(probeMark);
+				}
+				if (w.length + keptBound + contribution + tailBound <= limit) {
+					keptBound += contribution; // an upper bound plus an upper bound stays an upper bound
+					continue;
+				}
+				// the bound is over the limit: decide exactly, by writing the stream that would be sent (all kept
+				// sets plus this one, at their original positions, from `first` on — records before it are final)
+				// and rolling it back
+				const mark = w.checkpoint();
+				let fits = true;
+				try {
+					for (let i = first; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i]);
+					fits = w.length <= limit && tailFitsOn(w);
+				} catch (err) {
+					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+					fits = false;
+				}
+				if (fits) {
+					keptBound = w.length - mark.length; // exact, so later trials bound tightly again
+					w.rollback(mark);
+					continue;
+				}
+				w.rollback(mark);
+				keptSets = k;
+				dropped = true;
+				if (s < 2) truncated = true;
+				break; // the truncation point: this set and everything after it, in every section, is dropped
+			}
 		}
+		// the surviving records from `pos` on: all of them, or — after a drop — only the records of the sets kept
+		// so far, at their original positions, written for good once
+		for (let i = pos; i < list.length; i++)
+			if (owner[i] < keptSets) {
+				writeRecord(w, list[i]);
+				written[s]++;
+			}
+		if (keptSets < sets.length) break outer;
 	}
 	if (dropped) {
 		// Truncating must not corrupt a message whose meaning lives in its record structure (CLDMV/digby#43): whole
@@ -553,7 +622,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		if (questions.some((q) => q.type === TYPE.AXFR || q.type === TYPE.IXFR))
 			fail(WireErrorCode.TRUNCATION_REFUSED, "a transfer cannot be truncated: dropping RRsets would break the SOA bookends (AXFR) or the SOA-diff structure (IXFR)");
 	}
-	writeTail();
+	writeTail(w);
 	if (edns) written[2]++;
 	if (tsig) written[2]++;
 	written.forEach((n, i) => w.patch16(countAt + i * 2, n));
