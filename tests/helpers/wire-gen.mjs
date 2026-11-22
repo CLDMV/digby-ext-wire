@@ -299,8 +299,8 @@ export function genType(g) {
 	const typed = TYPED.filter((t) => t !== TYPE.OPT && t !== TYPE.TSIG);
 	if (g.chance(0.8)) return g.pick(typed);
 	for (;;) {
-		// 65535 is reserved and no record may use it (CLDMV/digby#38)
-		const t = g.int(0, 65534);
+		// 0 and 65535 are reserved and no record may use them (RFC 6895, CLDMV/digby#38)
+		const t = g.int(1, 65534);
 		if (!TYPED.includes(t)) return t;
 	}
 }
