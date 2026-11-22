@@ -10,7 +10,7 @@
  */
 
 import { formatIPv4, formatIPv6 } from "../../src/lib/wire/text.mjs";
-import { formatName } from "../../src/lib/wire/names.mjs";
+import { formatName, nameKey } from "../../src/lib/wire/names.mjs";
 import { CLASS, EDNS_OPTION, SVC_KEY, TYPE } from "../../src/lib/wire/constants.mjs";
 import { TYPED } from "../../src/lib/wire/rdata/index.mjs";
 
@@ -338,7 +338,9 @@ export function genMessage(g, { maxRecords = 4 } = {}) {
 				}
 			}
 		}
-		return out;
+		// half the time, shuffle the section so RRsets interleave: the encoder must regroup them (CLDMV/digby#36), so callers
+		// compare against regroupMessage rather than the input order
+		return g.chance(0.5) ? shuffled(out, g) : out;
 	};
 	const additionals = section(Math.max(1, maxRecords - 1));
 	if (g.chance(0.15)) additionals.push({ name: genName(g, pool), type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: genRdata(g, TYPE.TSIG, pool) });
@@ -361,6 +363,64 @@ export function genMessage(g, { maxRecords = 4 } = {}) {
 		authorities: section(Math.max(1, maxRecords - 1)),
 		additionals,
 		edns
+	};
+}
+
+/** Fisher-Yates with the generator, so a section's records end up in any order and multi-record RRsets can be split apart. */
+export function shuffled(list, g) {
+	const out = [...list];
+	for (let i = out.length - 1; i > 0; i--) {
+		const j = g.int(0, i);
+		[out[i], out[j]] = [out[j], out[i]];
+	}
+	return out;
+}
+
+/**
+ * The codec's RRset key: same owner (case-insensitive), type and class; an RRSIG also by the type it covers. Mirrors
+ * `rrsets` in src/lib/wire/message.mjs so tests can state the encoder's canonical section order (CLDMV/digby#36).
+ * @param {object} rec
+ * @returns {string}
+ */
+export function rrsetKey(rec) {
+	return `${nameKey(rec.name)}|${rec.type}|${rec.class ?? CLASS.IN}|${rec.type === TYPE.RRSIG ? rec.data?.typeCovered : ""}`;
+}
+
+/**
+ * A section regrouped the way the encoder emits it: records with the same RRset key travel together even when the input
+ * interleaved them, sets in first-seen order, records within a set in section order (RFC 2181 9: a partial RRset is never
+ * sent).
+ * @param {object[]} list
+ * @returns {object[]}
+ */
+export function regroup(list) {
+	const sets = [];
+	const byKey = new Map();
+	for (const rec of list) {
+		const k = rrsetKey(rec);
+		let set = byKey.get(k);
+		if (set === undefined) {
+			set = [];
+			byKey.set(k, set);
+			sets.push(set);
+		}
+		set.push(rec);
+	}
+	return sets.flat();
+}
+
+/**
+ * A message with each section in the encoder's canonical order: sections regrouped, a TSIG record kept last in the
+ * additionals (it is split off before grouping and always written last).
+ * @param {object} m
+ */
+export function regroupMessage(m) {
+	const tsig = m.additionals.filter((r) => r.type === TYPE.TSIG);
+	return {
+		...m,
+		answers: regroup(m.answers),
+		authorities: regroup(m.authorities),
+		additionals: [...regroup(m.additionals.filter((r) => r.type !== TYPE.TSIG)), ...tsig]
 	};
 }
 

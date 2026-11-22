@@ -14,23 +14,26 @@ import { Reader, Writer } from "../../src/lib/wire/buffer.mjs";
 import { TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
-import { nameKey, parseName, formatName, readName, writeName } from "../../src/lib/wire/names.mjs";
+import { parseName, formatName, readName, writeName } from "../../src/lib/wire/names.mjs";
 import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
-import { genMessage, genName, genRdata, genRecord, prng, seedFromEnv } from "../helpers/wire-gen.mjs";
+import { genMessage, genName, genRdata, genRecord, prng, regroup, regroupMessage, rrsetKey, seedFromEnv } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_PROPERTY_SEED");
 const MESSAGES = Number(process.env.DIGBY_PROPERTY_MESSAGES || 400);
 const PER_TYPE = Number(process.env.DIGBY_PROPERTY_PER_TYPE || 60);
 console.log(`wire property tests: DIGBY_PROPERTY_SEED=${SEED} messages=${MESSAGES} perType=${PER_TYPE}`);
 
-const keyOf = (r) => `${nameKey(r.name)}|${r.type}|${r.class}|${r.type === TYPE.RRSIG ? r.data?.typeCovered : ""}`;
-
-/** Whether `kept` is a prefix of `all` that ends on an RRset boundary. */
-function isRrsetPrefix(kept, all) {
-	if (kept.length > all.length) return false;
-	for (let i = 0; i < kept.length; i++) expect(kept[i]).toEqual(all[i]);
-	return kept.length === 0 || kept.length === all.length || keyOf(all[kept.length]) !== keyOf(all[kept.length - 1]);
+/**
+ * Whether `kept` is a prefix of `regroup(all)` that ends on an RRset boundary. The encoder emits a section in canonical
+ * (grouped) order — a set's records travel together even when the message interleaved them (CLDMV/digby#36) — so what
+ * survives truncation is a whole-set prefix of the grouped section, not of the input order.
+ */
+function isGroupedPrefix(kept, all) {
+	const grouped = regroup(all);
+	if (kept.length > grouped.length) return false;
+	for (let i = 0; i < kept.length; i++) expect(kept[i]).toEqual(grouped[i]);
+	return kept.length === 0 || kept.length === grouped.length || rrsetKey(grouped[kept.length]) !== rrsetKey(grouped[kept.length - 1]);
 }
 
 describe(`wire properties (seed ${SEED})`, () => {
@@ -40,11 +43,14 @@ describe(`wire properties (seed ${SEED})`, () => {
 			const m = genMessage(g);
 			const bytes = encodeMessage(m);
 			expect(bytes.length).toBeLessThanOrEqual(65535);
-			// genMessage emits up to two questions; the decode default is one (the server path), so say so
-			expect(decodeMessage(bytes, { maxQuestions: 2 })).toEqual(m);
+			// genMessage emits up to two questions; the decode default is one (the server path), so say so. genMessage may
+			// interleave a section's RRsets, and the encoder emits them regrouped (whole sets, first-seen order), so the
+			// round-trip target is the regrouped message (CLDMV/digby#36).
+			const canonical = regroupMessage(m);
+			expect(decodeMessage(bytes, { maxQuestions: 2 })).toEqual(canonical);
 			const plain = encodeMessage(m, { compress: false });
 			expect(plain.length).toBeGreaterThanOrEqual(bytes.length);
-			expect(decodeMessage(plain, { maxQuestions: 2 })).toEqual(m);
+			expect(decodeMessage(plain, { maxQuestions: 2 })).toEqual(canonical);
 		}
 	});
 
@@ -65,11 +71,11 @@ describe(`wire properties (seed ${SEED})`, () => {
 			const d = decodeMessage(bytes, { maxQuestions: 2 });
 			expect(d.flags.tc).toBe(m.flags.tc || truncated);
 			expect(d.edns).toEqual(m.edns);
-			expect(isRrsetPrefix(d.answers, m.answers)).toBe(true);
-			expect(isRrsetPrefix(d.authorities, m.authorities)).toBe(true);
+			expect(isGroupedPrefix(d.answers, m.answers)).toBe(true);
+			expect(isGroupedPrefix(d.authorities, m.authorities)).toBe(true);
 			const addKept = d.additionals.filter((r) => r.type !== TYPE.TSIG);
 			const addAll = m.additionals.filter((r) => r.type !== TYPE.TSIG);
-			expect(isRrsetPrefix(addKept, addAll)).toBe(true);
+			expect(isGroupedPrefix(addKept, addAll)).toBe(true);
 			expect(d.additionals.filter((r) => r.type === TYPE.TSIG)).toEqual(tsig);
 			// TC exactly when an answer or authority RRset was dropped
 			const droppedPrimary = d.answers.length < m.answers.length || d.authorities.length < m.authorities.length;
