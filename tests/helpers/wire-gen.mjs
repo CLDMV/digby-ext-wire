@@ -106,13 +106,14 @@ function wireLength(name) {
 	return n;
 }
 
-const someTypes = [1, 2, 5, 6, 12, 15, 16, 28, 33, 43, 46, 47, 48, 50, 51, 52, 64, 65, 99, 257, 1234, 32768, 65000, 65535];
+// 65535 is reserved, so no generated bitmap or RRSIG type covered may include it (CLDMV/digby#38)
+const someTypes = [1, 2, 5, 6, 12, 15, 16, 28, 33, 43, 46, 47, 48, 50, 51, 52, 64, 65, 99, 257, 1234, 32768, 65000];
 
 /** @param {ReturnType<typeof prng>} g */
 function genTypes(g) {
 	const set = new Set();
 	const n = g.int(0, 6);
-	for (let i = 0; i < n; i++) set.add(g.chance(0.7) ? g.pick(someTypes) : g.int(1, 65535));
+	for (let i = 0; i < n; i++) set.add(g.chance(0.7) ? g.pick(someTypes) : g.int(1, 65534));
 	return [...set].sort((a, b) => a - b);
 }
 
@@ -306,9 +307,9 @@ export function genType(g) {
 
 /**
  * The types the codec refuses the RFC 2136 empty-rdata update form for (mirrors `RDATA_REQUIRED` in message.mjs,
- * CLDMV/digby#38).
+ * CLDMV/digby#38 — SIG(0) is class ANY with mandatory rdata).
  */
-const NO_EMPTY_RDATA = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
+const NO_EMPTY_RDATA = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.SIG, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
 
 /**
  * A record, sometimes of an update form (class ANY / NONE with empty rdata).
@@ -367,7 +368,8 @@ export function genMessage(g, { maxRecords = 4 } = {}) {
 			cd: g.chance(0.2)
 		},
 		rcode: edns ? g.int(0, 4095) : g.int(0, 15),
-		questions: Array.from({ length: g.int(0, 2) }, () => ({ name: genName(g, pool), type: g.int(0, 65535), class: g.chance(0.9) ? 1 : g.int(0, 65535) })),
+		// the question type is 1..65534: 0 and 65535 are reserved and the codec refuses them (CLDMV/digby#38)
+		questions: Array.from({ length: g.int(0, 2) }, () => ({ name: genName(g, pool), type: g.int(1, 65534), class: g.chance(0.9) ? 1 : g.int(0, 65535) })),
 		answers: section(maxRecords),
 		authorities: section(Math.max(1, maxRecords - 1)),
 		additionals,

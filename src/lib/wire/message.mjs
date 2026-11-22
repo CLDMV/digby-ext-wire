@@ -35,13 +35,14 @@ const SECTIONS = ["answers", "authorities", "additionals"];
 const MAX_TTL = 0x7fffffff;
 /**
  * Types that never carry zone data, so the RFC 2136 empty-rdata update form (class ANY or NONE, rdlength 0) never applies to
- * them and their rdata must be present (CLDMV/digby#38). TSIG and TKEY are transaction records whose rdata is mandatory; the
- * transfer and meta-query types are not records at all. OPT never reaches the empty-rdata branch (it is read as EDNS), and
- * type ANY must stay allowed — type ANY with class ANY is the "delete every RRset" update form.
+ * them and their rdata must be present (CLDMV/digby#38). TSIG and TKEY are transaction records whose rdata is mandatory; SIG
+ * is the SIG(0) transaction signature, which travels as class ANY with mandatory rdata; the transfer and meta-query types are
+ * not records at all. OPT never reaches the empty-rdata branch (it is read as EDNS), and type ANY must stay allowed — type ANY
+ * with class ANY is the "delete every RRset" update form.
  *
  * Exported so the presentation formatter applies the same rule to `data: null` (CLDMV/digby#37).
  */
-export const RDATA_REQUIRED = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
+export const RDATA_REQUIRED = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.SIG, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
 /** The top of the type range is reserved (RFC 6895); no record may use it. */
 const RESERVED_TYPE = 0xffff;
 
@@ -84,7 +85,10 @@ export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, 
 	const questions = [];
 	for (let i = 0; i < qd; i++) {
 		if (i >= maxQuestions) fail(WireErrorCode.QUESTION_LIMIT, `the message declares ${qd} questions, more than the ${maxQuestions} the decode allows`, r.pos);
-		questions.push({ name: readName(r), type: r.u16(), class: r.u16() });
+		const name = readName(r);
+		const type = r.u16();
+		if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.BAD_RDATA, `question type ${type} is reserved`, r.pos - 2); // 0 and 65535 are reserved (CLDMV/digby#38)
+		questions.push({ name, type, class: r.u16() });
 	}
 
 	const message = { id, flags, rcode: rcodeLow, questions, answers: [], authorities: [], additionals: [], edns: null };
@@ -318,6 +322,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	for (const q of questions) {
 		obj(q, "a question");
 		writeName(w, string(q.name, "question name"), true);
+		if (q.type === 0 || q.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `question type ${String(q.type)} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
 		w.u16(q.type);
 		w.u16(q.class ?? CLASS.IN);
 	}

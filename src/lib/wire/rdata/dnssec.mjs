@@ -35,6 +35,7 @@ export function readTypeBitmap(r) {
 		const map = r.take(len);
 		if (map[len - 1] === 0) badRdata("a type bitmap window has a trailing zero octet", at);
 		if (win === 0 && map[0] & 0x80) badRdata("a type bitmap must not include type 0", at); // type 0 is reserved (CLDMV/digby#38)
+		if (win === 255 && map[len - 1] & 1) badRdata("a type bitmap must not include type 65535", at); // 65535 is reserved (CLDMV/digby#38)
 		for (let i = 0; i < len; i++) for (let bit = 0; bit < 8; bit++) if (map[i] & (0x80 >> bit)) types.push(win * 256 + i * 8 + bit);
 		last = win;
 	}
@@ -50,6 +51,7 @@ export function writeTypeBitmap(w, types) {
 	for (const t of array(types, "the type list")) {
 		if (!Number.isInteger(t) || t < 0 || t > 0xffff) badRdata(`type ${String(t)} is out of range`);
 		if (t === 0) badRdata("a type bitmap must not include type 0"); // type 0 is reserved (CLDMV/digby#38)
+		if (t === 0xffff) badRdata("a type bitmap must not include type 65535"); // 65535 is reserved (CLDMV/digby#38)
 	}
 	const sorted = [...new Set(types)].sort((a, b) => a - b);
 	let i = 0;
@@ -74,6 +76,7 @@ const parseTypes = (t) => {
 	while (!t.done) {
 		const type = typeFromString(t.word("type"));
 		if (type === 0) fail(WireErrorCode.BAD_PRESENTATION, "a type bitmap must not include TYPE0"); // type 0 is reserved (CLDMV/digby#38)
+		if (type === 0xffff) fail(WireErrorCode.BAD_PRESENTATION, "a type bitmap must not include TYPE65535"); // 65535 is reserved (CLDMV/digby#38)
 		out.push(type);
 	}
 	return [...new Set(out)].sort((a, b) => a - b);
@@ -162,8 +165,10 @@ export const CDNSKEY = keyLike("CDNSKEY");
 export const RRSIG = {
 	name: "RRSIG",
 	decode(r) {
+		const typeCovered = r.u16();
+		if (typeCovered === 0 || typeCovered === 0xffff) badRdata(`RRSIG type covered ${typeCovered} is reserved`, r.pos - 2); // 0 and 65535 are reserved (CLDMV/digby#38)
 		const out = {
-			typeCovered: r.u16(),
+			typeCovered,
 			algorithm: r.u8(),
 			labels: r.u8(),
 			originalTtl: r.u32(),
@@ -178,6 +183,7 @@ export const RRSIG = {
 	},
 	encode(w, data) {
 		obj(data, "RRSIG");
+		if (data.typeCovered === 0 || data.typeCovered === 0xffff) badRdata(`RRSIG type covered ${String(data.typeCovered)} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
 		w.u16(data.typeCovered);
 		w.u8(data.algorithm);
 		w.u8(data.labels);
@@ -192,6 +198,7 @@ export const RRSIG = {
 	},
 	parse(t, origin) {
 		const typeCovered = typeFromString(t.word("type covered"));
+		if (typeCovered === 0 || typeCovered === 0xffff) fail(WireErrorCode.BAD_PRESENTATION, `RRSIG type covered ${typeCovered} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
 		const algorithm = t.int("algorithm", 0xff);
 		const labels = t.int("labels", 0xff);
 		const originalTtl = t.int("original TTL", 0xffffffff);
