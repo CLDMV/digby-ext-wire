@@ -56,6 +56,14 @@ describe("the tokenizer", () => {
 		]);
 		expect(unescapeBytes(tokenize('k="a b"')[0].value)).toEqual(ascii("k=a b"));
 	});
+
+	it("joins a quote after an escaped backslash before = (CLDMV/digby#38)", () => {
+		// `x\\=` is a literal backslash, then `=`: the `=` is not escaped, so the quote joins the token
+		expect(tokenize('x\\\\="v"')).toEqual([{ value: "x\\\\=v", quoted: false }]);
+		expect(unescapeBytes("x\\\\=v")).toEqual(ascii("x\\=v"));
+		// a single backslash escapes the `=` itself: no quote may follow
+		expect(code(() => tokenize('x\\="v"'))).toBe("BAD_PRESENTATION");
+	});
 });
 
 describe("RFC 1035 escapes in character-strings", () => {
@@ -68,6 +76,13 @@ describe("RFC 1035 escapes in character-strings", () => {
 		expect(code(() => unescapeBytes("\\25"))).toBe("BAD_PRESENTATION");
 		expect(code(() => unescapeBytes("\\300"))).toBe("BAD_PRESENTATION");
 		expect(code(() => unescapeBytes("a\\"))).toBe("BAD_PRESENTATION");
+	});
+
+	it("refuses lone surrogates (CLDMV/digby#38)", () => {
+		expect(code(() => unescapeBytes("\uD800"))).toBe("BAD_PRESENTATION");
+		expect(code(() => unescapeBytes("a\uD800b"))).toBe("BAD_PRESENTATION");
+		expect(code(() => unescapeBytes("\uDFFF"))).toBe("BAD_PRESENTATION");
+		expect(code(() => unescapeBytes("\\\uD800"))).toBe("BAD_PRESENTATION"); // an escape whose character is a lone surrogate
 	});
 });
 

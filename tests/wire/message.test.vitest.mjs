@@ -8,6 +8,7 @@ import { CLASS, OPCODE, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { packFlags, unpackFlags } from "../../src/lib/wire/header.mjs";
 import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {
@@ -94,6 +95,23 @@ describe("messages", () => {
 		// the same in class IN is malformed A rdata
 		expect(code(() => decodeMessage(hex.from(`0000 2800 0000 0000 0001 0000 00 0001 0001 00000000 0000`)))).toBe("BAD_RDATA");
 		expect(code(() => encodeMessage({ id: 0, answers: [{ name: ".", type: 1, ttl: 0, data: null }] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("refuses the empty-rdata update form for types that never carry zone data (CLDMV/digby#38)", () => {
+		const empty = (type) => `00 ${type.toString(16).padStart(4, "0")} 00ff 00000000 0000`; // root owner, class ANY, no rdata
+		// TSIG, TKEY, IXFR, AXFR, MAILA, MAILB: a TSIG verifier reading data.mac on a data: null record would throw a TypeError
+		for (const type of [TYPE.TSIG, 249, 251, 252, 253, 254]) {
+			expect(code(() => decodeMessage(hex.from(`0000 2800 0000 0000 0000 0001 ${empty(type)}`)))).toBe("BAD_RDATA");
+		}
+		// a real RR type keeps the RFC 2136 form
+		const b = hex.from(`0000 2800 0000 0000 0001 0000 00 0001 00ff 00000000 0000`);
+		expect(decodeMessage(b).authorities[0]).toEqual({ name: ".", type: 1, class: CLASS.ANY, ttl: 0, data: null });
+	});
+
+	it("refuses records of the reserved type 65535 (CLDMV/digby#38)", () => {
+		expect(code(() => decodeMessage(hex.from(`0000 0000 0000 0001 0000 0000 00 ffff 0001 00000000 0000`)))).toBe("BAD_RDATA");
+		expect(code(() => encodeMessage({ id: 0, answers: [{ name: ".", type: 65535, ttl: 0, data: { data: new Uint8Array(0) } }] }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => parseRecord("a. 3600 IN TYPE65535 \\# 0"))).toBe("BAD_PRESENTATION");
 	});
 
 	it("keeps unknown types and classes as RFC 3597 octets", () => {

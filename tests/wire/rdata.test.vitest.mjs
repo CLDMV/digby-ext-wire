@@ -211,6 +211,11 @@ describe("malformed wire rdata", () => {
 		expect(decodeRdataBytes(TYPE.NSEC, hex.from("00 ff 01 80"))).toEqual({ next: ".", types: [65280] });
 	});
 
+	it("refuses a type bitmap that sets type 0 (CLDMV/digby#38)", () => {
+		expect(bad("NSEC", "00 00 01 80")).toBe("BAD_RDATA"); // window 0, bit 0 = type 0
+		expect(bad("NSEC3", "01 00 000c 04 aabbccdd 14 174eb2409fe28bcb4887a1836f957f0a8425e27b 00 00 01 80")).toBe("BAD_RDATA");
+	});
+
 	it("TSIG fields are bounded by the rdata", () => {
 		expect(bad("TSIG", "00 000000000000 0000 0005 0102")).toBe("TRUNCATED");
 		expect(bad("TSIG", "00 000000000000 0000 0000 0000 0000 0003 01")).toBe("TRUNCATED");
@@ -244,6 +249,10 @@ describe("encoding refuses malformed values with WireError", () => {
 		);
 		expect(enc("TYPE999", { data: "x" })).toBe("VALUE_OUT_OF_RANGE");
 		expect(enc("TYPE999", null)).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("refuses a bitmap value that sets type 0 (CLDMV/digby#38)", () => {
+		expect(enc("NSEC", { next: "a.", types: [0] })).toBe("BAD_RDATA");
 	});
 
 	it("sorts and de-duplicates a bitmap's types", () => {
@@ -292,6 +301,28 @@ describe("malformed presentation rdata", () => {
 		expect(p("TYPE99", "\\# 2 abcdef")).toBe("BAD_RDATA");
 		expect(p("TYPE99", "\\# x ab")).toBe("BAD_PRESENTATION");
 		expect(p("TYPE99", "\\# 1 a")).toBe("BAD_PRESENTATION");
+	});
+
+	it("refuses rdata that encodes past a record's 65535-octet limit (CLDMV/digby#38)", () => {
+		// a 70,000-octet CAA value or a 750 KB DNSKEY used to parse and fail only at encode
+		expect(p("CAA", `0 issue "${"a".repeat(70000)}"`)).toBe("BAD_PRESENTATION");
+		expect(p("DNSKEY", `257 3 8 ${Buffer.from(new Uint8Array(750 * 1024)).toString("base64")}`)).toBe("BAD_PRESENTATION");
+		// exactly 65535 octets still parses; one octet more does not (flags + tag length + "issue" + value)
+		expect(parseRdata(TYPE.CAA, `0 issue "${"a".repeat(65528)}"`).value).toHaveLength(65528);
+		expect(p("CAA", `0 issue "${"a".repeat(65529)}"`)).toBe("BAD_PRESENTATION");
+	});
+
+	it("refuses lone surrogates in character-strings and escapes (CLDMV/digby#38)", () => {
+		expect(p("TXT", '"\uD800"')).toBe("BAD_PRESENTATION");
+		expect(p("TXT", '"a\uD800b"')).toBe("BAD_PRESENTATION");
+		expect(p("CAA", '0 issue "\uD800"')).toBe("BAD_PRESENTATION");
+		expect(p("CAA", '0 issue "\\\uD800"')).toBe("BAD_PRESENTATION"); // an escape whose character is a lone surrogate
+	});
+
+	it("refuses TYPE0 in a type bitmap (CLDMV/digby#38)", () => {
+		expect(p("NSEC", "a. TYPE0")).toBe("BAD_PRESENTATION");
+		expect(p("NSEC", "a. A TYPE0")).toBe("BAD_PRESENTATION");
+		expect(p("NSEC3", "1 1 12 aabbccdd 2T7B4G4VSA5SMI47K61MV5BV1A22BOJR TYPE0")).toBe("BAD_PRESENTATION");
 	});
 
 	it("accepts RRSIG times as decimal seconds", () => {
