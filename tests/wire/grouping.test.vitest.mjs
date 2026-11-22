@@ -14,6 +14,7 @@ import { TYPE } from "../../src/lib/wire/constants.mjs";
 import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
 import { regroup, rrsetKey } from "../helpers/wire-gen.mjs";
 
+const SECTIONS = ["answers", "authorities", "additionals"];
 const A = (i) => ({ name: "ns.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: `10.0.0.${i}` } });
 // n octets of TXT rdata, split into character-strings of at most 255 octets each
 const TXT = (name, n) => ({
@@ -57,14 +58,14 @@ describe("RRsets group across a whole section (CLDMV/digby#36)", () => {
 		expect(decodeMessage(bytes).additionals).toEqual([A(1), A(2), TXT("p1.example.", 200)]);
 	});
 
-	it.each(["answers", "authorities", "additionals"])("rejoins a set split across the %s and keeps first-seen order", (section) => {
+	it.each(SECTIONS)("rejoins a set split across the %s and keeps first-seen order", (section) => {
 		const m = message({ [section]: [A(1), TXT("p1.example.", 400), A(2)] });
 		const d = decodeMessage(encodeMessage(m));
 		// the interleaved ns.example records travel together, ahead of the set first seen after them
 		expect(d[section]).toEqual([A(1), A(2), TXT("p1.example.", 400)]);
 	});
 
-	it.each(["answers", "authorities", "additionals"])("drops the whole split set under a cap in the %s, keeping first-seen order", (section) => {
+	it.each(SECTIONS)("drops the whole split set under a cap in the %s, keeping first-seen order", (section) => {
 		const m = message({ [section]: [A(1), TXT("p1.example.", 400), A(2)] });
 		const { bytes, truncated } = encodeCapped(m, { limit: 100 });
 		const d = decodeMessage(bytes);
@@ -72,9 +73,7 @@ describe("RRsets group across a whole section (CLDMV/digby#36)", () => {
 		expect(d[section]).toEqual([A(1), A(2)]);
 		expect(truncated).toBe(section !== "additionals");
 		expect(d.flags.tc).toBe(section !== "additionals");
-		if (section !== "additionals") {
-			expect(d.authorities).toEqual([]);
-			expect(d.additionals).toEqual([]);
-		}
+		// and nothing after the truncation point survives into the later sections
+		for (const later of SECTIONS.slice(SECTIONS.indexOf(section) + 1)) expect(d[later]).toEqual([]);
 	});
 });
