@@ -142,14 +142,19 @@ export function parseRdataTokens(type, t, origin) {
 }
 
 /**
- * Format rdata in presentation form: the type's own form, or `\# <length> <hex>` for types without one.
+ * Format rdata in presentation form: the type's own form, or `\# <length> <hex>` for types without one. The data is validated
+ * by encoding it first, and the formatted text is produced from what the wire round-trip decoded — the canonical presentation
+ * of rdata that actually encodes — so a malformed shape raises the encode's `WireError` and no unvalidated field is ever
+ * echoed into zone text (CLDMV/digby#37).
  * @param {number} type
  * @param {object} data
  * @returns {string}
+ * @throws {import("../errors.mjs").WireError} whatever the type's encoding or decoding raises (VALUE_OUT_OF_RANGE, BAD_RDATA,
+ *   BAD_SVCPARAM, BAD_PRESENTATION, ...)
  */
 export function formatRdata(type, data) {
 	const codec = CODECS.get(type);
-	if (codec?.format) return codec.format(data);
+	if (codec?.format) return codec.format(decodeRdataBytes(type, encodeRdataBytes(type, data)));
 	if (codec) {
 		// typed on the wire but generic in text (OPT): encode, then print the octets
 		return formatGeneric(encodeRdataBytes(type, data));

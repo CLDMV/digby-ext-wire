@@ -22,6 +22,9 @@ export { formatRdata, parseRdata, formatGeneric } from "./rdata/index.mjs";
 
 const UNIT = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
 
+/** The largest TTL the codec accepts (RFC 2181 8); encode's wire writer uses the same bound. */
+const MAX_TTL = 0x7fffffff;
+
 /**
  * Parse a TTL: seconds, or BIND-style units (`1w2d3h4m5s`, case-insensitive). At most 2^31 - 1 (RFC 2181 8).
  * @param {string} text
@@ -74,12 +77,20 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
 }
 
 /**
- * Format one record on one line: `name ttl class type rdata`.
+ * Format one record on one line: `name ttl class type rdata`. Every field is validated first, so a bad shape raises a
+ * {@link WireError} — the line can never carry injected record text (CLDMV/digby#37).
  * @param {{ name: string, ttl: number, class?: number, type: number, data: object | null }} rec
  * @returns {string}
+ * @throws {import("./errors.mjs").WireError} VALUE_OUT_OF_RANGE, BAD_PRESENTATION, or whatever the rdata encoding raises
  */
 export function formatRecord(rec) {
-	const head = `${canonicalName(rec.name)} ${rec.ttl} ${classToString(rec.class ?? CLASS.IN)} ${typeToString(rec.type)}`;
+	if (rec === null || typeof rec !== "object" || Array.isArray(rec)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a record must be an object");
+	const name = canonicalName(rec.name); // parses, so no unvalidated name text reaches the line
+	if (!Number.isInteger(rec.ttl) || rec.ttl < 0 || rec.ttl > MAX_TTL) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `TTL out of range: ${String(rec.ttl)}`);
+	const cls = rec.class ?? CLASS.IN;
+	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${String(cls)}`);
+	if (!Number.isInteger(rec.type) || rec.type < 0 || rec.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(rec.type)}`);
+	const head = `${name} ${rec.ttl} ${classToString(cls)} ${typeToString(rec.type)}`;
 	if (rec.data === null) return head;
 	return `${head} ${formatRdata(rec.type, rec.data)}`;
 }
