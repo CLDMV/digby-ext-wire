@@ -180,6 +180,27 @@ describe("records", () => {
 		];
 		for (const r of recs) expect(parseRecord(formatRecord(r))).toEqual(r);
 	});
+
+	it("parses the RFC 2136 update form: class ANY or NONE with no rdata text is data: null (CLDMV/digby#37)", () => {
+		expect(parseRecord("a.example. 0 ANY A")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.ANY, type: 1, data: null });
+		expect(parseRecord("a.example. 0 NONE A")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.NONE, type: 1, data: null });
+		// the generic zero-length form is the update form too, the way the wire reader maps rdlength 0 under ANY / NONE
+		expect(parseRecord("a.example. 0 ANY TYPE999 \\# 0")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.ANY, type: 999, data: null });
+		expect(parseRecord("a.example. 0 NONE TYPE999 \\# 0")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.NONE, type: 999, data: null });
+		expect(parseRecord("a.example. 0 ANY ANY \\# 0")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.ANY, type: 255, data: null });
+		// every other class with no rdata stays refused, with or without a class token
+		expect(code(() => parseRecord("a.example. 0 IN A"))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseRecord("a.example. 0 A"))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseRecord("a.example. 0 CH A"))).toBe("BAD_PRESENTATION");
+		// a type that must carry rdata never takes the update form
+		expect(code(() => parseRecord("a.example. 0 ANY TSIG"))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseRecord("a.example. 0 NONE TSIG \\# 0"))).toBe("BAD_PRESENTATION");
+		// class IN keeps the zero-length generic form as ordinary zero-length octets
+		expect(parseRecord("a.example. 0 IN TYPE999 \\# 0")).toEqual({ name: "a.example.", ttl: 0, class: 1, type: 999, data: { data: new Uint8Array(0) } });
+		// an update that does carry rdata still parses normally
+		expect(parseRecord("a.example. 0 ANY A 1.2.3.4")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.ANY, type: 1, data: { address: "1.2.3.4" } });
+		expect(parseRecord("a.example. 0 NONE TYPE999 \\# 4 01020304")).toEqual({ name: "a.example.", ttl: 0, class: CLASS.NONE, type: 999, data: { data: hex.from("01020304") } });
+	});
 });
 
 describe("formatRecord validates its input (CLDMV/digby#37)", () => {
@@ -217,6 +238,14 @@ describe("formatRecord validates its input (CLDMV/digby#37)", () => {
 		// the update form itself stays allowed
 		expect(formatRecord({ name: "a.", ttl: 0, class: 255, type: 1, data: null })).toBe("a. 0 ANY A");
 		expect(formatRecord({ name: "a.", ttl: 0, class: 254, type: 1, data: null })).toBe("a. 0 NONE A");
+	});
+
+	it("refuses zero-length generic rdata under class ANY or NONE: that is the update form, so give data: null (CLDMV/digby#37)", () => {
+		// the line such a value would print (`\# 0`) parses back as data: null, so no line represents it
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: 255, type: 999, data: { data: new Uint8Array(0) } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: 254, type: 999, data: { data: new Uint8Array(0) } }))).toBe("VALUE_OUT_OF_RANGE");
+		// class IN keeps it: there `\# 0` is ordinary zero-length octets and re-parses to itself
+		expect(formatRecord({ name: "a.", ttl: 0, type: 999, data: { data: new Uint8Array(0) } })).toBe("a. 0 IN TYPE999 \\# 0");
 	});
 
 	it("refuses what parseRecord refuses: record type 65535, and empty rdata for a type that must carry rdata (CLDMV/digby#38)", () => {

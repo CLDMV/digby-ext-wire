@@ -17,7 +17,7 @@ import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize 
 import { parseName, formatName, readName, writeName } from "../../src/lib/wire/names.mjs";
 import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
-import { genMessage, genName, genRdata, genRecord, prng, seedFromEnv, wholeSetPrefix } from "../helpers/wire-gen.mjs";
+import { fitData, genMessage, genName, genRdata, genRecord, prng, seedFromEnv, wholeSetPrefix } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_PROPERTY_SEED");
 const MESSAGES = Number(process.env.DIGBY_PROPERTY_MESSAGES || 400);
@@ -119,16 +119,18 @@ describe(`wire properties (seed ${SEED})`, () => {
 			const data = genRdata(g, type, []);
 			expect(decodeRdataBytes(type, encodeRdataBytes(type, data))).toEqual(data);
 			expect(parseRdata(type, formatRdata(type, data))).toEqual(data);
-			const rec = { ...genRecord(g, [], type), data };
+			const base = genRecord(g, [], type);
+			// fitData, because in class ANY / NONE a zero-length generic rdata IS the update form (CLDMV/digby#37)
+			const rec = { ...base, data: fitData(base.class, data) };
 			expect(parseRecord(formatRecord(rec))).toEqual(rec);
 		}
 	});
 
-	it("whole records round-trip through the presentation form", () => {
+	it("whole records round-trip through the presentation form, including the update form's data: null", () => {
 		const g = prng(SEED ^ 0xe6546b64);
 		for (let i = 0; i < PER_TYPE * 10; i++) {
 			const rec = genRecord(g, []);
-			if (rec.data === null || rec.type === TYPE.OPT) continue;
+			if (rec.type === TYPE.OPT) continue;
 			expect(parseRecord(formatRecord(rec))).toEqual(rec);
 		}
 	});

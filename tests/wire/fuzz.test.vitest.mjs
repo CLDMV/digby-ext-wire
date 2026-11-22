@@ -108,9 +108,14 @@ function checkInput(input) {
 		throw report("the re-encoding decoded differently", input, err);
 	}
 	for (const rec of [...m.answers, ...m.authorities, ...m.additionals]) {
-		if (rec.data === null) continue;
 		let text;
 		try {
+			if (rec.data === null) {
+				// the RFC 2136 update form: the line is the bare head, and it must re-parse to the same data: null record
+				// (CLDMV/digby#37)
+				expect(parseRecord(formatRecord(rec))).toEqual(rec);
+				continue;
+			}
 			text = formatRdata(rec.type, rec.data);
 			expect(parseRdata(rec.type, text)).toEqual(rec.data);
 			expect(parseRecord(formatRecord(rec))).toEqual(rec);
@@ -197,26 +202,24 @@ describe(`wire fuzz (seed ${SEED}, ${ITERATIONS} iterations)`, () => {
 			try {
 				const text = formatRdata(type, data);
 				if (typeof text !== "string") throw reportShape("formatRdata returned a non-string", { type, data }, text);
+				// formatRdata ACCEPTED the shape, so its output must re-parse to exactly the input's wire round-trip: a formatted
+				// text that fails to re-parse, or parses to anything else, is a divergence too (CLDMV/digby#37)
+				let canonical;
+				try {
+					canonical = decodeRdataBytes(type, encodeRdataBytes(type, data));
+				} catch (err) {
+					throw reportShape("formatRdata accepted the shape but the input does not survive a wire round-trip", { type, data }, err);
+				}
 				let parsed;
 				try {
 					parsed = parseRdata(type, text);
 				} catch (err) {
-					if (!(err instanceof WireError)) throw reportShape("the formatted text did not re-parse as WireError-or-value", { type, data }, err);
+					throw reportShape("the formatted text did not re-parse", { type, data }, err);
 				}
-				// when the text does re-parse, it must be exactly the presentation of the input's wire round-trip — text that parses
-				// to anything else is a divergence too (CLDMV/digby#37)
-				if (parsed !== undefined) {
-					let canonical;
-					try {
-						canonical = decodeRdataBytes(type, encodeRdataBytes(type, data));
-					} catch (err) {
-						throw reportShape("the formatted text re-parsed but the input does not survive a wire round-trip", { type, data }, err);
-					}
-					try {
-						expect(parsed).toEqual(canonical);
-					} catch (err) {
-						throw reportShape("the formatted text re-parsed to a different value than the input's canonical form", { type, data }, err);
-					}
+				try {
+					expect(parsed).toEqual(canonical);
+				} catch (err) {
+					throw reportShape("the formatted text re-parsed to a different value than the input's canonical form", { type, data }, err);
 				}
 			} catch (err) {
 				if (!(err instanceof WireError) || !codes.includes(err.code)) throw reportShape("formatRdata threw a non-WireError", { type, data }, err);
@@ -232,28 +235,19 @@ describe(`wire fuzz (seed ${SEED}, ${ITERATIONS} iterations)`, () => {
 			try {
 				const text = formatRecord(bad);
 				if (typeof text !== "string") throw reportShape("formatRecord returned a non-string", bad, text);
+				// formatRecord ACCEPTED the record, so its line must re-parse to exactly the record's canonical form: a formatted
+				// line that fails to re-parse, or parses to anything else, is a divergence too (CLDMV/digby#37)
+				const canonicalData = bad.data === null ? null : decodeRdataBytes(bad.type, encodeRdataBytes(bad.type, bad.data));
 				let parsed;
 				try {
 					parsed = parseRecord(text);
 				} catch (err) {
-					if (!(err instanceof WireError)) throw reportShape("the formatted record did not re-parse as WireError-or-value", bad, err);
+					throw reportShape("the formatted record did not re-parse", bad, err);
 				}
-				// the same rule for the whole record line: a line that re-parses must re-parse to the record's canonical form
-				// (CLDMV/digby#37)
-				if (parsed !== undefined) {
-					let canonicalData = null;
-					if (bad.data !== null) {
-						try {
-							canonicalData = decodeRdataBytes(bad.type, encodeRdataBytes(bad.type, bad.data));
-						} catch (err) {
-							throw reportShape("the formatted record re-parsed but its rdata does not survive a wire round-trip", bad, err);
-						}
-					}
-					try {
-						expect(parsed).toEqual({ name: canonicalName(bad.name), ttl: bad.ttl, class: bad.class ?? CLASS.IN, type: bad.type, data: canonicalData });
-					} catch (err) {
-						throw reportShape("the formatted record re-parsed to a different record than the input's canonical form", bad, err);
-					}
+				try {
+					expect(parsed).toEqual({ name: canonicalName(bad.name), ttl: bad.ttl, class: bad.class ?? CLASS.IN, type: bad.type, data: canonicalData });
+				} catch (err) {
+					throw reportShape("the formatted record re-parsed to a different record than the input's canonical form", bad, err);
 				}
 			} catch (err) {
 				if (!(err instanceof WireError) || !codes.includes(err.code)) throw reportShape("formatRecord threw a non-WireError", bad, err);

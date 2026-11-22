@@ -322,9 +322,9 @@ export function genRecord(g, pool, type = genType(g)) {
 	return { name: genName(g, pool), type, class: cls, ttl: g.int(0, 0x7fffffff), data };
 }
 
-/** An empty generic rdata in class ANY / NONE reads back as `data: null`, so give it one octet. */
+/** In class ANY / NONE a zero-length generic rdata IS the RFC 2136 update form: it reads back as `data: null` (CLDMV/digby#37). */
 export function fitData(cls, data) {
-	if ((cls === CLASS.ANY || cls === CLASS.NONE) && data?.data?.length === 0) return { data: Uint8Array.of(0) };
+	if ((cls === CLASS.ANY || cls === CLASS.NONE) && data?.data instanceof Uint8Array && data.data.length === 0) return null;
 	return data;
 }
 
