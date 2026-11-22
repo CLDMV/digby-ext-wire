@@ -140,7 +140,9 @@ export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true 
  * Encode a message into at most `limit` octets, truncating when it does not fit (RFC 2181 9): whole RRsets are dropped, never
  * part of one. An answer or authority RRset that does not fit sets TC and drops it and everything after it; an additional
  * RRset that does not fit is dropped with the rest of the additional section, without TC (it is optional data). The OPT and
- * TSIG records are always kept: each RRset is only kept when they still fit after it.
+ * TSIG records are always kept: each RRset is only kept when they still fit after it. Each section's records of one RRset
+ * travel together even when the message interleaved them with other sets: they come out grouped, in first-seen set order
+ * (CLDMV/digby#36), so the surviving sets keep the order they were first seen in.
  *
  * @param {object} message
  * @param {object} options
@@ -250,20 +252,25 @@ function checkedId(id) {
 }
 
 /**
- * Group consecutive records into RRsets: same owner (case-insensitive), type and class; an RRSIG also by the type it covers.
+ * Group a section's records into RRsets: same owner (case-insensitive), type and class; an RRSIG also by the type it covers.
+ * Records with the same key form one RRset wherever they sit in the section (RFC 2181 9: a partial RRset is never sent), so
+ * the sets come out in first-seen order, each with its records in section order — a section whose RRsets interleave comes
+ * out regrouped.
  * @param {object[]} list
  * @returns {object[][]}
  */
 function rrsets(list) {
 	const sets = [];
-	let key = null;
+	const byKey = new Map();
 	for (const rec of list) {
 		const k = `${nameKey(string(rec.name, "record name"))}|${rec.type}|${rec.class ?? CLASS.IN}|${rec.type === TYPE.RRSIG ? rec.data?.typeCovered : ""}`;
-		if (k === key) sets[sets.length - 1].push(rec);
-		else {
-			sets.push([rec]);
-			key = k;
+		let set = byKey.get(k);
+		if (set === undefined) {
+			set = [];
+			byKey.set(k, set);
+			sets.push(set);
 		}
+		set.push(rec);
 	}
 	return sets;
 }
