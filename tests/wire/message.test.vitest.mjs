@@ -349,3 +349,222 @@ describe("truncation refuses messages whose meaning it would destroy (CLDMV/digb
 		expect(decodeMessage(capped.bytes).additionals).toHaveLength(60);
 	});
 });
+
+/**
+ * The exact-trial reference (CLDMV/digby#43): the round-2/3 truncation algorithm, captured from commit 11347f0
+ * (`encodeCappedRaw`'s truncation branch) and re-implemented here on the exported primitives — {@link Writer},
+ * {@link writeName}, {@link nameKey}, {@link packFlags} — plus local rdata writers for the record types the
+ * differential shapes carry (A, NS, CNAME, PTR, MX, TXT). Per set it writes the stream that would actually go out
+ * (all kept sets plus this one, at their original positions, with real compression) and keeps it when it fits, so
+ * its keep/drop decisions and its bytes are exact by construction. The differential below pins `encodeCapped` to
+ * it byte for byte: a fast probe path may only skip the trial when it cannot change what is kept.
+ *
+ * No EDNS and no TSIG: the differential shapes carry neither, so the reference's `fits` check is
+ * `w.length <= limit` (the tail's own fit check is vacuous without one).
+ *
+ * @param {object} message
+ * @param {{ limit: number, truncate?: boolean, compress?: boolean }} options
+ * @returns {{ bytes: Uint8Array, truncated: boolean }}
+ */
+function oracleCapped(message, { limit, truncate = true, compress = true }) {
+	/** Local mirrors of the codecs basic.mjs uses for the types the differential shapes carry. */
+	const writeRdata = (w, rec) => {
+		const d = rec.data;
+		if (d === null) return; // the empty-rdata update form: not used by the differential shapes
+		switch (rec.type) {
+			case TYPE.A: {
+				const o = d.address.split(".").map(Number);
+				w.u8(o[0]);
+				w.u8(o[1]);
+				w.u8(o[2]);
+				w.u8(o[3]);
+				return;
+			}
+			case TYPE.NS:
+			case TYPE.CNAME:
+			case TYPE.PTR:
+				writeName(w, d.target, true);
+				return;
+			case TYPE.MX:
+				w.u16(d.preference);
+				writeName(w, d.exchange, true);
+				return;
+			case TYPE.TXT:
+				for (const s of d.strings) {
+					w.u8(s.length);
+					w.raw(s);
+				}
+				return;
+			default:
+				throw new Error(`the differential reference has no encoder for type ${rec.type}`);
+		}
+	};
+	const writeRecord = (w, rec) => {
+		writeName(w, rec.name, true);
+		w.u16(rec.type);
+		w.u16(rec.class ?? CLASS.IN);
+		w.u32(rec.ttl);
+		const lenAt = w.length;
+		w.u16(0);
+		writeRdata(w, rec);
+		w.patch16(lenAt, w.length - lenAt - 2);
+	};
+	const rrsets = (list) => {
+		const sets = [];
+		const owner = new Array(list.length);
+		const byKey = new Map();
+		for (let i = 0; i < list.length; i++) {
+			const rec = list[i];
+			const k = `${nameKey(rec.name)}|${rec.type}|${rec.class ?? CLASS.IN}|${rec.type === TYPE.RRSIG ? rec.data?.typeCovered : ""}`;
+			let ix = byKey.get(k);
+			if (ix === undefined) {
+				ix = sets.length;
+				byKey.set(k, ix);
+				sets.push([]);
+			}
+			sets[ix].push(i);
+			owner[i] = ix;
+		}
+		return { sets, owner };
+	};
+
+	const w = new Writer({ max: truncate ? 65535 : limit, compress });
+	const questions = message.questions ?? [];
+	w.u16(message.id ?? 0);
+	w.u16(packFlags(message.flags ?? {}, 0));
+	w.u16(questions.length);
+	const countAt = w.length;
+	w.u16(0);
+	w.u16(0);
+	w.u16(0);
+	for (const q of questions) {
+		writeName(w, q.name, true);
+		w.u16(q.type);
+		w.u16(q.class ?? CLASS.IN);
+	}
+	const sections = [message.answers ?? [], message.authorities ?? [], message.additionals ?? []];
+	const written = [0, 0, 0];
+	let truncated = false;
+	outer: for (let s = 0; s < 3; s++) {
+		const list = sections[s];
+		const { sets, owner } = rrsets(list);
+		let pos = 0; // section positions below this are decided and finally written
+		let keptSets = sets.length;
+		for (let k = 0; k < sets.length; k++) {
+			const first = sets[k][0];
+			// records before this set's first record belong to sets already decided as kept: write them for good
+			for (let i = pos; i < first; i++) {
+				writeRecord(w, list[i]);
+				written[s]++;
+			}
+			pos = first;
+			const mark = w.checkpoint();
+			let fits = true;
+			try {
+				// the section from `first` on with this set slotted in at its positions: the final write order
+				for (let i = first; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i]);
+				fits = w.length <= limit;
+			} catch (err) {
+				if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+				fits = false;
+			}
+			w.rollback(mark);
+			if (!fits) {
+				keptSets = k;
+				if (s < 2) truncated = true;
+				break; // the truncation point: this set and everything after it, in every section, is dropped
+			}
+		}
+		for (let i = pos; i < list.length; i++)
+			if (owner[i] < keptSets) {
+				writeRecord(w, list[i]);
+				written[s]++;
+			}
+		if (keptSets < sets.length) break outer;
+	}
+	written.forEach((n, i) => w.patch16(countAt + i * 2, n));
+	if (truncated) w.patch16(2, ((w.bytes[2] << 8) | w.bytes[3]) | TC_BIT);
+	return { bytes: w.finish(), truncated };
+}
+
+describe("encodeCapped matches the exact-trial reference on 0x4000-straddling interleavings (CLDMV/digby#43)", () => {
+	// 63 strings of 255 `x` plus a remainder: a TXT record holding n octets of filler
+	const txtFiller = (n) => {
+		const strings = [];
+		let left = n;
+		while (left > 255) {
+			strings.push(new Uint8Array(255).fill(0x78));
+			left -= 255;
+		}
+		if (left > 0) strings.push(new Uint8Array(left).fill(0x78));
+		return { strings };
+	};
+	const bigTxt = (name, n) => ({ name, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: txtFiller(n) });
+	const ns = (name, target) => ({ name, type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target } });
+	const txt = (name, n) => ({ name, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: txtFiller(n) });
+	const x63 = "x".repeat(63);
+
+	it("never outputs more than the limit when an insertion pushes a kept registration past 0x4000", () => {
+		// The round-3 probe's bound covers only the set being measured: keeping set k shifts every kept record
+		// after set k's first position by set k's size, and a name that registered a suffix below 0x4000 can land
+		// at or past it — a later record that compressed against it then writes out in full, past the bound. The
+		// repro: answers t.test. TXT(filler), z.test. NS n1, b.test. TXT 200, z.test. NS n2.<63x>, z.test. NS
+		// n3.<63x> — answers 2, 4 and 5 are ONE RRset (z.test. NS), so keeping it inserts two records between
+		// b.test. and the registrations it made.
+		for (const filler of [16100, 16107, 16114]) {
+			const m = {
+				id: 1,
+				flags: { qr: true },
+				questions: [],
+				answers: [bigTxt("t.test.", filler), ns("z.test.", "n1.aaaa.example."), txt("b.test.", 200), ns("z.test.", `n2.${x63}.example.`), ns("z.test.", `n3.${x63}.example.`)]
+			};
+			const capped = encodeCapped(m, { limit: 16546 });
+			const reference = oracleCapped(m, { limit: 16546 });
+			expect(capped.bytes.length, `filler ${filler}: the capped encode stays within the limit`).toBeLessThanOrEqual(16546);
+			expect(capped.truncated, `filler ${filler}: the truncation flag matches the exact-trial reference`).toBe(reference.truncated);
+			expect(hex.to(capped.bytes), `filler ${filler}: the bytes match the exact-trial reference`).toBe(hex.to(reference.bytes));
+		}
+	});
+
+	it("matches the exact-trial reference at every limit around every decision boundary", () => {
+		// The repro family, swept: a big first TXT record parks the stream just below the registration bound and
+		// the same-owner NS set interleaves its records around the distinct owner, so a set's probe measurement
+		// (its records written consecutively) registers suffixes at offsets the real stream never reaches. Every
+		// filler (step 8) × every limit around the full length, with and without a question sharing the section's
+		// suffix, compared byte for byte against the exact-trial reference.
+		const answers = (F) => [bigTxt("t.test.", F), ns("z.test.", "n1.aaaa.example."), txt("b.test.", 200), ns("z.test.", `n2.${x63}.example.`), ns("z.test.", `n3.${x63}.example.`)];
+		for (let F = 15400; F <= 16400; F += 32) {
+			for (const q of [null, "z.test."]) {
+				const m = { id: 1, flags: { qr: true }, questions: q ? [{ name: q, type: TYPE.A, class: CLASS.IN }] : [], answers: answers(F) };
+				const full = encodeMessage(m).length;
+				for (let limit = full - 700; limit <= full; limit++) {
+					const capped = encodeCapped(m, { limit });
+					const reference = oracleCapped(m, { limit });
+					expect(capped.truncated, `F=${F} q=${q} limit=${limit}`).toBe(reference.truncated);
+					expect(hex.to(capped.bytes), `F=${F} q=${q} limit=${limit}`).toBe(hex.to(reference.bytes));
+				}
+			}
+		}
+	}, 600_000);
+
+	it("matches the exact-trial reference on pseudo-random interleavings straddling 0x4000", () => {
+		for (let seed = 0; seed < 40; seed++) {
+			const rand = (n) => ((seed * 1103515245 + 12345 + n * 69069) >>> 8) % 997;
+			const F = 15300 + (rand(1) % 1100);
+			const recs = [bigTxt("big.test.", F)];
+			const names = ["z.test.", "b.test.", "c.test.", "d.test."];
+			for (let i = 0; i < 8; i++) {
+				const n = names[rand(2 + i) % names.length];
+				recs.push(rand(3 + i) % 2 ? txt(n, 40 + (rand(i) % 220)) : ns(n, `t${i}.${x63}.example.`));
+			}
+			const m = { id: 1, flags: { qr: true }, questions: [], answers: recs };
+			const full = encodeMessage(m).length;
+			for (let limit = full - 900; limit <= full; limit += 1) {
+				const capped = encodeCapped(m, { limit });
+				const reference = oracleCapped(m, { limit });
+				expect(capped.truncated, `seed=${seed} limit=${limit}`).toBe(reference.truncated);
+				expect(hex.to(capped.bytes), `seed=${seed} limit=${limit}`).toBe(hex.to(reference.bytes));
+			}
+		}
+	}, 600_000);
+});
