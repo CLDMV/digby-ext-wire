@@ -297,10 +297,17 @@ export function genType(g) {
 	const typed = TYPED.filter((t) => t !== TYPE.OPT && t !== TYPE.TSIG);
 	if (g.chance(0.8)) return g.pick(typed);
 	for (;;) {
-		const t = g.int(0, 65535);
+		// 65535 is reserved and no record may use it (CLDMV/digby#38)
+		const t = g.int(0, 65534);
 		if (!TYPED.includes(t)) return t;
 	}
 }
+
+/**
+ * The types the codec refuses the RFC 2136 empty-rdata update form for (mirrors `RDATA_REQUIRED` in message.mjs,
+ * CLDMV/digby#38).
+ */
+const NO_EMPTY_RDATA = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
 
 /**
  * A record, sometimes of an update form (class ANY / NONE with empty rdata).
@@ -309,7 +316,7 @@ export function genType(g) {
  */
 export function genRecord(g, pool, type = genType(g)) {
 	const cls = g.chance(0.85) ? CLASS.IN : g.pick([CLASS.CH, CLASS.HS, CLASS.NONE, CLASS.ANY, 1000]);
-	const data = (cls === CLASS.ANY || cls === CLASS.NONE) && g.chance(0.5) ? null : fitData(cls, genRdata(g, type, pool));
+	const data = (cls === CLASS.ANY || cls === CLASS.NONE) && g.chance(0.5) && !NO_EMPTY_RDATA.has(type) ? null : fitData(cls, genRdata(g, type, pool));
 	return { name: genName(g, pool), type, class: cls, ttl: g.int(0, 0x7fffffff), data };
 }
 

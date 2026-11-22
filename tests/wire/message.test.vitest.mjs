@@ -106,6 +106,8 @@ describe("messages", () => {
 		// a real RR type keeps the RFC 2136 form
 		const b = hex.from(`0000 2800 0000 0000 0001 0000 00 0001 00ff 00000000 0000`);
 		expect(decodeMessage(b).authorities[0]).toEqual({ name: ".", type: 1, class: CLASS.ANY, ttl: 0, data: null });
+		// and the encode side refuses the same types
+		expect(code(() => encodeMessage({ id: 0, additionals: [{ name: ".", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: null }] }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
 	it("refuses records of the reserved type 65535 (CLDMV/digby#38)", () => {

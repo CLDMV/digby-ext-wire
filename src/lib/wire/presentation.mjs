@@ -70,6 +70,7 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
 		} else break;
 	}
 	const type = typeFromString(t.word("type"));
+	if (type === 0xffff) fail(WireErrorCode.BAD_PRESENTATION, "record type 65535 is reserved");
 	ttl ??= defaultTtl;
 	if (ttl === undefined) fail(WireErrorCode.BAD_PRESENTATION, "the record has no TTL and no default was given");
 	const data = parseRdataTokens(type, t, origin);

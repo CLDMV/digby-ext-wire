@@ -71,8 +71,16 @@ export function tokenize(text) {
 				const c = text[i];
 				if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === ";" || c === "(" || c === ")") break;
 				if (c === '"') {
-					// SvcParams write `key="value"` (RFC 9460 2.1): a quoted part straight after `=` joins the token
-					if (!value.endsWith("=") || value.endsWith("\\=")) bad(`a quote inside an unquoted token near "${value}"`);
+					// SvcParams write `key="value"` (RFC 9460 2.1): a quoted part straight after `=` joins the token. The `=` counts
+					// only when it is not itself escaped: `x\\="v"` is a literal backslash, then `=`, so count the backslash run
+					// before it — an odd run escapes the `=` (CLDMV/digby#38).
+					let escapedEquals = false;
+					if (value.endsWith("=")) {
+						let backslashes = 0;
+						for (let k = value.length - 2; k >= 0 && value[k] === "\\"; k--) backslashes++;
+						escapedEquals = backslashes % 2 === 1;
+					}
+					if (!value.endsWith("=") || escapedEquals) bad(`a quote inside an unquoted token near "${value}"`);
 					i++;
 					for (;;) {
 						if (i >= n) bad("unterminated quoted string");
@@ -176,6 +184,7 @@ const utf8 = new TextEncoder();
  */
 export function unescapeBytes(text) {
 	const out = [];
+	const surrogate = (cp) => cp >= 0xd800 && cp <= 0xdfff;
 	for (let i = 0; i < text.length; i++) {
 		const ch = text.charCodeAt(i);
 		if (ch === 0x5c) {
@@ -190,6 +199,7 @@ export function unescapeBytes(text) {
 				i += 3;
 			} else {
 				const cp = text.codePointAt(i + 1);
+				if (surrogate(cp)) bad("a lone surrogate is not valid text; escape its UTF-8 octets as \\DDD");
 				if (cp > 0x7f) {
 					for (const b of utf8.encode(String.fromCodePoint(cp))) out.push(b);
 					i += cp > 0xffff ? 2 : 1;
@@ -200,6 +210,8 @@ export function unescapeBytes(text) {
 			}
 		} else if (ch > 0x7f) {
 			const cp = text.codePointAt(i);
+			// a lone surrogate (unpaired high or any low) would silently become U+FFFD in the UTF-8 encode below
+			if (surrogate(cp)) bad("a lone surrogate is not valid text; escape its UTF-8 octets as \\DDD");
 			for (const b of utf8.encode(String.fromCodePoint(cp))) out.push(b);
 			if (cp > 0xffff) i++;
 		} else {

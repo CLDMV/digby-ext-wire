@@ -23,7 +23,7 @@
  */
 
 import { MAX_MESSAGE, Reader, Writer, asBytes, checkInt } from "./buffer.mjs";
-import { CLASS, TYPE } from "./constants.mjs";
+import { CLASS, TYPE, typeToString } from "./constants.mjs";
 import { joinOptTtl, readOptions, splitOptTtl, writeOptions } from "./edns.mjs";
 import { WireError, WireErrorCode, fail } from "./errors.mjs";
 import { HEADER_SIZE, TC_BIT, packFlags, unpackFlags } from "./header.mjs";
@@ -33,6 +33,15 @@ import { decodeRdata, encodeRdata } from "./rdata/index.mjs";
 
 const SECTIONS = ["answers", "authorities", "additionals"];
 const MAX_TTL = 0x7fffffff;
+/**
+ * Types that never carry zone data, so the RFC 2136 empty-rdata update form (class ANY or NONE, rdlength 0) never applies to
+ * them and their rdata must be present (CLDMV/digby#38). TSIG and TKEY are transaction records whose rdata is mandatory; the
+ * transfer and meta-query types are not records at all. OPT never reaches the empty-rdata branch (it is read as EDNS), and
+ * type ANY must stay allowed — type ANY with class ANY is the "delete every RRset" update form.
+ */
+const RDATA_REQUIRED = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.IXFR, TYPE.AXFR, TYPE.MAILA, TYPE.MAILB]);
+/** The top of the type range is reserved (RFC 6895); no record may use it. */
+const RESERVED_TYPE = 0xffff;
 
 /**
  * Decode a message.
@@ -108,6 +117,7 @@ export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, 
 function readRecord(r) {
 	const name = readName(r);
 	const type = r.u16();
+	if (type === RESERVED_TYPE) fail(WireErrorCode.BAD_RDATA, "record type 65535 is reserved", r.pos - 2);
 	const cls = r.u16();
 	const ttl = r.u32();
 	const rdlength = r.u16();
@@ -116,8 +126,10 @@ function readRecord(r) {
 		return { name, type, opt: { ...splitOptTtl(ttl), udpSize: cls, options } };
 	}
 	let data;
-	if (rdlength === 0 && (cls === CLASS.ANY || cls === CLASS.NONE)) data = null;
-	else data = r.limit(rdlength, () => decodeRdata(type, r));
+	if (rdlength === 0 && (cls === CLASS.ANY || cls === CLASS.NONE)) {
+		if (RDATA_REQUIRED.has(type)) fail(WireErrorCode.BAD_RDATA, `${typeToString(type)} rdata must be present; the empty-rdata update form does not apply to it`, r.pos);
+		data = null;
+	} else data = r.limit(rdlength, () => decodeRdata(type, r));
 	return { name, type, class: cls, ttl: ttl > MAX_TTL ? 0 : ttl, data };
 }
 
@@ -281,6 +293,7 @@ function rrsets(list) {
  * @param {object} rec
  */
 function writeRecord(w, rec) {
+	if (rec.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "record type 65535 is reserved");
 	const cls = rec.class ?? CLASS.IN;
 	writeName(w, string(rec.name, "record name"), true);
 	w.u16(rec.type);
@@ -291,6 +304,7 @@ function writeRecord(w, rec) {
 	w.u16(0);
 	if (rec.data === null) {
 		if (cls !== CLASS.ANY && cls !== CLASS.NONE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "empty rdata (data: null) is only for class ANY or NONE");
+		if (RDATA_REQUIRED.has(rec.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(rec.type)} rdata must be present; the empty-rdata update form does not apply to it`);
 	} else {
 		encodeRdata(w, rec.type, rec.data);
 	}

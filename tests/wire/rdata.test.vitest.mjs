@@ -158,8 +158,11 @@ describe("typed rdata: presentation and wire", () => {
 		expect(parseRdata(TYPE.MX, "\\# 3 000a00")).toEqual({ preference: 10, exchange: "." });
 		expect(code(() => parseRdata(TYPE.A, "\\# 3 C00002"))).toBe("BAD_RDATA");
 		expect(code(() => parseRdata(TYPE.A, "\\# 4 C00002"))).toBe("BAD_RDATA");
-		// a compression pointer cannot resolve in standalone rdata
+		// pointers resolve only against the standalone octets themselves: a backward pointer inside them does resolve, a
+		// forward or out-of-range one fails (CLDMV/digby#38 — the decodeRdataBytes doc was corrected to say so)
+		expect(parseRdata(TYPE.MX, "\\# 4 000ac000")).toEqual({ preference: 10, exchange: "." });
 		expect(code(() => parseRdata(TYPE.NS, "\\# 2 c000"))).toBe("POINTER_FORWARD");
+		expect(code(() => parseRdata(TYPE.NS, "\\# 2 c0ff"))).toBe("POINTER_OUT_OF_RANGE");
 	});
 
 	it("formats OPT rdata (no master-file form) generically", () => {

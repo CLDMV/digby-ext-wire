@@ -10,9 +10,10 @@
  * then decoded with the typed codec, so a malformed generic rdata is refused the same way as malformed wire.
  */
 
-import { Reader, Writer } from "../buffer.mjs";
+import { MAX_MESSAGE, Reader, Writer } from "../buffer.mjs";
 import { TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
+import { WireErrorCode, fail } from "../errors.mjs";
 import { Tokens, fromHex, toHex, tokenize } from "../text.mjs";
 import { A, AAAA, CAA, CNAME, MX, NAPTR, NS, PTR, SOA, SRV, SSHFP, TLSA, TXT } from "./basic.mjs";
 import { badRdata, bytes, obj } from "./common.mjs";
@@ -85,7 +86,9 @@ export function decodeRdata(type, r) {
 }
 
 /**
- * Decode standalone rdata octets (no message around them, so no compression pointers can resolve).
+ * Decode standalone rdata octets. There is no message around them, so a compression pointer can only resolve against these
+ * octets themselves: a backward pointer to an earlier position inside them resolves, and a forward or out-of-range one fails
+ * (CLDMV/digby#38).
  * @param {number} type
  * @param {Uint8Array} octets
  * @returns {object}
@@ -138,7 +141,14 @@ export function parseRdataTokens(type, t, origin) {
 	}
 	const codec = CODECS.get(type);
 	if (!codec?.parse) badRdata(`${typeToString(type)} rdata must be given in the generic form "\\# <length> <hex>"`);
-	return codec.parse(t, origin);
+	const data = codec.parse(t, origin);
+	// The parse must survive a round-trip: encode the result and require it to fit a record's 16-bit rdata length (a
+	// 70,000-octet CAA value or a 750 KB DNSKEY used to parse and fail only at encode; CLDMV/digby#38). An encode failure for
+	// any other reason surfaces here too. The writer is uncapped so the length check, not the writer's cap, reports it.
+	const w = new Writer({ max: Number.MAX_SAFE_INTEGER, compress: false });
+	encodeRdata(w, type, data);
+	if (w.length > MAX_MESSAGE) fail(WireErrorCode.BAD_PRESENTATION, `${typeToString(type)} rdata encodes to more than ${MAX_MESSAGE} octets`);
+	return data;
 }
 
 /**
