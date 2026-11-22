@@ -134,7 +134,9 @@ function readRecord(r) {
 }
 
 /**
- * Encode a message. Names are compressed (owner names, questions, and the rdata of NS, CNAME, SOA, PTR and MX).
+ * Encode a message. Names are compressed (owner names, questions, and the rdata of NS, CNAME, SOA, PTR and MX). The records
+ * are written exactly in the order given: record order is meaning (a transfer's SOA bookends, an IXFR's SOA-diff structure,
+ * an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36).
  *
  * @param {object} message - shape above; `flags`, the section arrays and `edns` may be omitted
  * @param {object} [options]
@@ -159,9 +161,9 @@ const reservedEncodes = new WeakMap();
 /**
  * Encode a message into at most `limit` octets, truncating when it does not fit (RFC 2181 9): whole RRsets are dropped, never
  * part of one. An answer or authority RRset that does not fit sets TC and drops it and everything after it; an additional
- * RRset that does not fit is dropped with the rest of the additional section, without TC (it is optional data). Each
- * section's records of one RRset travel together even when the message interleaved them with other sets: they come out
- * grouped, in first-seen set order (CLDMV/digby#36), so the surviving sets keep the order they were first seen in.
+ * RRset that does not fit is dropped with the rest of the additional section, without TC (it is optional data). The grouping
+ * decides only what a truncating encode keeps: the surviving records stay at their original positions, so the surviving sets
+ * keep the order they were first seen in and nothing ever travels regrouped (CLDMV/digby#36).
  *
  * A message that already carries a TSIG record is refused (CLDMV/digby#39): truncating a signed message invalidates the MAC
  * (RFC 8945 5), which must cover the message actually sent. To send a signed, truncated message, encode the unsigned message
@@ -321,24 +323,57 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 
 	const written = [0, 0, 0];
 	let truncated = false;
-	outer: for (let s = 0; s < 3; s++) {
-		for (const set of rrsets(sections[s])) {
-			const mark = w.checkpoint();
-			let fits = true;
-			try {
-				for (const rec of set) writeRecord(w, rec);
-				fits = w.length <= limit && tailFits();
-			} catch (err) {
-				if (!(truncate && err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
-				fits = false;
+	if (!truncate) {
+		// a non-truncating encode writes the records exactly as they are: record order is meaning (a transfer's SOA bookends,
+		// an IXFR's SOA-diff structure, an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36)
+		for (let s = 0; s < 3; s++)
+			for (const rec of sections[s]) {
+				writeRecord(w, rec);
+				written[s]++;
 			}
-			if (!fits) {
-				if (!truncate) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the encoding exceeds ${limit} octets`);
+	} else {
+		// a truncating encode consults the RRset grouping only to decide what it keeps — whole sets, in first-seen order; a
+		// partial RRset is never sent (RFC 2181 9). The survivors are then written at their original positions, so record
+		// order is kept: only whole sets leave it (CLDMV/digby#36)
+		outer: for (let s = 0; s < 3; s++) {
+			const list = sections[s];
+			const { sets, owner } = rrsets(list);
+			let pos = 0; // section positions below this are decided and finally written
+			let keptSets = sets.length;
+			for (let k = 0; k < sets.length; k++) {
+				const first = sets[k][0].at;
+				// records before this set's first record belong to sets already decided as kept: write them for good
+				for (let i = pos; i < first; i++) {
+					writeRecord(w, list[i]);
+					written[s]++;
+				}
+				pos = first;
+				const mark = w.checkpoint();
+				let fits = true;
+				try {
+					// the section from `first` on with this set slotted in at its positions: records of the sets kept so far
+					// (owner < k) and this set's own (owner === k), in position order — records of sets not decided yet stay
+					// out. This is the final write order, so the measurement is the bytes that would actually go out
+					for (let i = first; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i]);
+					fits = w.length <= limit && tailFits();
+				} catch (err) {
+					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+					fits = false;
+				}
 				w.rollback(mark);
-				if (s < 2) truncated = true;
-				break outer;
+				if (!fits) {
+					keptSets = k;
+					if (s < 2) truncated = true;
+					break; // the truncation point: this set and everything after it, in every section, is dropped
+				}
 			}
-			written[s] += set.length;
+			// the surviving records from `pos` on: all of them, or — after a drop — only the records of the sets kept so far
+			for (let i = pos; i < list.length; i++)
+				if (owner[i] < keptSets) {
+					writeRecord(w, list[i]);
+					written[s]++;
+				}
+			if (keptSets < sets.length) break outer;
 		}
 	}
 	writeTail();
@@ -355,27 +390,31 @@ function checkedId(id) {
 }
 
 /**
- * Group a section's records into RRsets: same owner (case-insensitive), type and class; an RRSIG also by the type it covers.
- * Records with the same key form one RRset wherever they sit in the section (RFC 2181 9: a partial RRset is never sent), so
- * the sets come out in first-seen order, each with its records in section order — a section whose RRsets interleave comes
- * out regrouped.
+ * Group a section's records into RRsets: same owner (case-insensitive), type and class; an RRSIG also by the type it covers
+ * (RFC 2181 9: a partial RRset is never sent). Returns the sets in first-seen order, each an array of `{ rec, at }` — the
+ * record and its position in the section — plus `owner`, which maps every position of the section to its set's index. Only a
+ * truncating encode consults this, to decide which whole sets survive and write them at their original positions; a
+ * non-truncating encode never regroups, because record order is meaning (CLDMV/digby#36).
  * @param {object[]} list
- * @returns {object[][]}
+ * @returns {{ sets: { rec: object, at: number }[][], owner: number[] }}
  */
 function rrsets(list) {
 	const sets = [];
+	const owner = new Array(list.length);
 	const byKey = new Map();
-	for (const rec of list) {
+	for (let i = 0; i < list.length; i++) {
+		const rec = list[i];
 		const k = `${nameKey(string(rec.name, "record name"))}|${rec.type}|${rec.class ?? CLASS.IN}|${rec.type === TYPE.RRSIG ? rec.data?.typeCovered : ""}`;
-		let set = byKey.get(k);
-		if (set === undefined) {
-			set = [];
-			byKey.set(k, set);
-			sets.push(set);
+		let ix = byKey.get(k);
+		if (ix === undefined) {
+			ix = sets.length;
+			byKey.set(k, ix);
+			sets.push([]);
 		}
-		set.push(rec);
+		sets[ix].push({ rec, at: i });
+		owner[i] = ix;
 	}
-	return sets;
+	return { sets, owner };
 }
 
 /**
