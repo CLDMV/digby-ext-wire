@@ -56,7 +56,18 @@ describe(`wire properties (seed ${SEED})`, () => {
 				expect(() => encodeCapped(unsigned, { limit })).toThrow(WireError);
 				continue;
 			}
-			const { bytes, truncated } = encodeCapped(unsigned, { limit });
+			let capped;
+			try {
+				capped = encodeCapped(unsigned, { limit });
+			} catch (err) {
+				// the capped encode refuses to truncate an UPDATE or a transfer — dropping RRsets would corrupt what the
+				// message means (CLDMV/digby#43) — and the generator emits those opcodes and question types at random, so
+				// a generated message that would truncate at this limit surfaces the refusal here
+				expect(err).toBeInstanceOf(WireError);
+				expect(err.code).toBe("TRUNCATION_REFUSED");
+				continue;
+			}
+			const { bytes, truncated } = capped;
 			expect(bytes.length).toBeLessThanOrEqual(limit);
 			const d = decodeMessage(bytes, { maxQuestions: 2 });
 			expect(d.flags.tc).toBe(unsigned.flags.tc || truncated);
