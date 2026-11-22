@@ -514,20 +514,39 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// target for every later measurement, instead of every measurement paying the suffix in full.
 	//
 	// Why the bound is an upper bound on the stream that would be sent (the soundness of the fast path,
-	// CLDMV/digby#43): take any kept record q of set k. The probe writes q at offset w.length + keptBound + (its
-	// set's measured records before it), with the final targets available. The real stream writes q at its original
-	// position: the kept records before it measure no more than the bound (earlier sets — their contributions bound
-	// their real bytes — and set k's own — the measurements write the records once, in position order, against the
-	// same targets the real stream holds before them), so q's real offset never passes its probe offset. And a
-	// suffix registers as a compression target exactly when it is written below 0x4000, so every target the probe
-	// held, the real stream holds too — while the real stream also holds the other kept records' registrations,
-	// which the probe lacks. A record can therefore only compress better in the real stream than in its measurement,
-	// never worse: real octets per record ≤ measured octets per record, and the running bound is the sum of the
-	// measurements. When the bound plus the tail bound fits the limit, the set fits — no trial write. Only when the
-	// bound is over the limit is the trial written out for real (all kept sets plus this one, at their original
-	// positions from the set's first record on — records before it are final), which decides it exactly and, on a
-	// keep, replaces the running bound with the exact length. The output is the last trial that fits, whole sets at
-	// their original positions, nothing dangles — the round-2 design's exactness, preserved.
+	// CLDMV/digby#43): take any kept record q of set k whose measurement passes the shift gate below. The probe
+	// writes q at offset w.length + keptBound + (its set's measured records before it), with the final targets
+	// available; the gate guarantees every target the probe held during the measurement also exists in the real
+	// stream (the seeded ones are final; the ones the measurement registered land below 0x4000 in the real stream
+	// too), and the real stream holds the other kept records' registrations on top. A record can therefore only
+	// compress better in the real stream than in its measurement, never worse: real octets per record ≤ measured
+	// octets per record, and the running bound is the sum of the measurements. When the bound plus the tail bound
+	// fits the limit, the set fits — no trial write. Otherwise the trial is written out for real (all kept sets
+	// plus this one, at their original positions from the set's first record on — records before it are final),
+	// which decides it exactly and, on a keep, replaces the running bound with the exact length. The output is the
+	// last trial that fits, whole sets at their original positions, nothing dangles — the round-2 design's
+	// exactness, preserved.
+	//
+	// The shift gate (CLDMV/digby#43). The probe writes set k's records consecutively, but the real stream
+	// interleaves other kept records between them, so a record q of set k sits at a real offset of up to its probe
+	// offset plus the octets of the other sets' records positioned between set k's first record and q — octets the
+	// probe does not charge. A suffix the probe registers below 0x4000 can therefore land at or past 0x4000 in the
+	// real stream, and a later record of set k that compressed against it writes out in full, past the measured
+	// bound. (Observed: a 16,100-octet TXT, then a three-record NS set whose second record's rdata name registered
+	// at probe offset 16,244 while the interleaved b.test. record pushed the real registration to 16,463 — the
+	// third record then wrote the shared label in full, and the encode went out 56 octets over its limit with
+	// truncated false.) The gate takes the fast path only when no measurement registration can be lost that way:
+	// for each record the measurement writes, every suffix it registers at probe offset o must satisfy
+	// o + shift < 0x4000, where shift bounds the octets of the other sets' records that can sit between set k's
+	// first record and q — their uncompressed wire sizes, summed by position. Why that bounds the real shift: the
+	// real registration offset minus its probe offset is the real octets of the kept records positioned before q,
+	// minus the running bound (which covers the earlier sets' real octets — their measurements were sound — and the
+	// exact trials are exact), minus set k's own measured octets before q (their real octets never pass their
+	// measured ones — no registration of theirs was lost, or the gate would already have fired). What is left is
+	// the other sets' octets in the window, which the uncompressed bounds cover. An uncompressed bound needs no
+	// measurement to be sound, and it over-counts only records that turn out dropped or better compressed, so the
+	// gate errs towards the exact trial, which decides exactly. Sets of one record have nothing between their
+	// records — no shift, no gate; the shift table is built only when some set spans several records.
 	const w = new Writer({ max: MAX_MESSAGE, compress });
 	const countAt = writeHead(w);
 	// the head-and-tail check already passed on the attempt writer, whose head is identical
@@ -543,6 +562,40 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			// is undecided — every trial write is rolled back), and the targets of records written for good folded
 			// in as the loop reaches them. A measurement that runs past MAX_MESSAGE throws MESSAGE_TOO_LARGE, which
 			// reads as a bound that is over the limit and falls through to the exact trial.
+			// Uncompressed wire-size bounds and their position prefix sums, built once per section and only when a
+			// set spans several records (the shift gate's only user). A record whose rdata cannot be measured
+			// (malformed values throw) bounds at MAX_MESSAGE: the real encode refuses it when it is written, and a
+			// dropped one never is — the gate just runs the exact trial more often meanwhile.
+			let ub = null; // ub[i]: an upper bound on record i's wire octets
+			let prefub = null; // prefub[i]: ub[0..i)
+			const shiftBound = (from, to) => {
+				if (ub === null) {
+					ub = new Array(list.length);
+					prefub = new Array(list.length + 1);
+					prefub[0] = 0;
+					const scratch = new Writer({ max: MAX_MESSAGE, compress: false });
+					for (let i = 0; i < list.length; i++) {
+						const rec = list[i];
+						try {
+							writeName(scratch, rec.name, false);
+							scratch.u16(rec.type);
+							scratch.u16(rec.class ?? CLASS.IN);
+							scratch.u32(rec.ttl);
+							scratch.u16(0);
+							if (rec.data !== null) encodeRdata(scratch, rec.type, rec.data);
+							ub[i] = scratch.length;
+						} catch (err) {
+							if (!(err instanceof WireError)) throw err;
+							ub[i] = MAX_MESSAGE;
+						}
+						scratch.length = 0;
+						scratch.names.clear();
+						scratch.added.length = 0;
+						prefub[i + 1] = prefub[i] + ub[i];
+					}
+				}
+				return prefub[to] - prefub[from];
+			};
 			const probe = new Writer({ max: MAX_MESSAGE, compress });
 			for (const [key, at] of w.names) probe.names.set(key, at);
 			let synced = w.added.length; // entries of w.added copied into probe.names so far
@@ -565,8 +618,19 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				probe.length = w.length + keptBound;
 				const probeMark = probe.checkpoint();
 				let contribution;
+				let shiftUnsafe = false;
 				try {
-					for (const at of sets[k]) writeRecord(probe, list[at]);
+					let ownUb = 0; // the set's own records' bounds — already inside the probe's offset, not part of the shift
+					for (const at of sets[k]) {
+						const bound = shiftBound(first, at) - ownUb;
+						ownUb += ub[at];
+						const registered = probe.added.length;
+						writeRecord(probe, list[at]);
+						for (let a = registered; a < probe.added.length && !shiftUnsafe; a++) {
+							const o = probe.names.get(probe.added[a]);
+							if (o !== undefined && o + bound >= 0x4000) shiftUnsafe = true;
+						}
+					}
 					contribution = probe.length - (w.length + keptBound);
 				} catch (err) {
 					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
@@ -574,13 +638,13 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				} finally {
 					probe.rollback(probeMark);
 				}
-				if (w.length + keptBound + contribution + tailBound <= limit) {
+				if (!shiftUnsafe && w.length + keptBound + contribution + tailBound <= limit) {
 					keptBound += contribution; // an upper bound plus an upper bound stays an upper bound
 					continue;
 				}
-				// the bound is over the limit: decide exactly, by writing the stream that would be sent (all kept
-				// sets plus this one, at their original positions, from `first` on — records before it are final)
-				// and rolling it back
+				// the bound is over the limit, or a registration shift could lose a target: decide exactly, by
+				// writing the stream that would be sent (all kept sets plus this one, at their original positions,
+				// from `first` on — records before it are final) and rolling it back
 				const mark = w.checkpoint();
 				let fits = true;
 				try {
