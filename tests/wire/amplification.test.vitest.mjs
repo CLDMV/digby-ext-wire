@@ -281,7 +281,8 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		b.push(0xc0, 0x0c); // a pointer to 12 at offset 21, never walked
 		b.push(1, 0x78, 0xc0, 0x15, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 0x7f, 0, 0, 1); // owner "x" + pointer to 21
 		const m = decodeMessage(Uint8Array.from(b));
-		expect(m.answers[0].name).toBe("x.");
+		// the owner is "x" plus a pointer to offset 21, whose name is "abc." (itself a pointer to the question)
+		expect(m.answers[0].name).toBe("x.abc.");
 	});
 
 	it("readName with a cap but no counter initialises it from zero", () => {
