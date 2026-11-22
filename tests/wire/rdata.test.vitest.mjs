@@ -312,7 +312,8 @@ describe("formatRdata validates its input (CLDMV/digby#37)", () => {
 		expect(code(() => formatRdata(TYPE.SVCB, { priority: 1, target: ".", params: [{}] }))).toBe("BAD_SVCPARAM");
 		expect(code(() => formatRdata(TYPE.A, null))).toBe("VALUE_OUT_OF_RANGE");
 		expect(code(() => formatRdata(TYPE.A, { address: 1.2 }))).toBe("VALUE_OUT_OF_RANGE");
-		expect(code(() => formatRdata(TYPE.MX, { preference: 1, exchange: "a. b" }))).toBe("BAD_PRESENTATION");
+		// a relative name has no origin to complete it on the encode path
+		expect(code(() => formatRdata(TYPE.MX, { preference: 1, exchange: "a. b" }))).toBe("RELATIVE_NAME");
 		expect(code(() => formatRdata(TYPE.MX, { preference: 70000, exchange: "a." }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
