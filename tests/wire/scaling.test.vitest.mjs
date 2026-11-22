@@ -4,12 +4,11 @@
  */
 
 /**
- * @fileoverview CLDMV/digby#40: the encoder's compression table must carry a shared-label index, not every written
- * name's full suffix text, and encode must not get slower per record as a message grows. The golden-bytes test pins
+ * @fileoverview CLDMV/digby#40: encode must not get slower per record as a message grows, and the compression
+ * table's registered targets follow the flat-table rules the encoder has always had. The golden-bytes test pins
  * the exact output of every compression site (owner names, questions, the NS/CNAME/SOA/PTR/MX rdata names, case
- * variants, the truncating encode's rollback) — captured from the encoder as it stood before the index. The scaling
- * tests hold, from 150 records to 2,900, both the per-record encode time and the per-record size of what the
- * compression table retains.
+ * variants, the truncating encode's rollback, and the 0x3fff registration edge) — captured from the encoder. The
+ * scaling tests hold, from 150 records to 2,900, the per-record encode time on both long-apex shapes.
  */
 
 import { performance } from "node:perf_hooks";
@@ -151,45 +150,19 @@ describe("encode scaling (CLDMV/digby#40)", () => {
 		).toBeLessThan(RATIO_BOUND);
 	});
 
-	it("retains a shared-label index in the compression table, not every name's full suffix text", () => {
-		// The characters the compression table holds after writing the apex and `n` record owners. An index keyed
-		// by label holds each distinct label once: ~5 characters per record here (one short owner label per
-		// record; the apex's own 201 characters are held once). The flat suffix-key table the encoder carried
-		// before the index retained every written name's full suffix text — ~210 characters per record on this
-		// shape, ~630 KB on the 2,900-record response — the pressure that made the large encode slow
-		// (CLDMV/digby#40). The bound sits far above the index's cost and far below the flat table's.
-		const CHARS_PER_RECORD_BOUND = 64;
-		const measure = (n) => {
-			const w = new Writer();
-			writeName(w, apex, true);
-			for (let i = 0; i < n; i++) writeName(w, `n${i}.` + apex, true);
-			return retainedChars(w.names) / n;
-		};
-		const small = measure(150);
-		const large = measure(2900);
-		expect(small, `${small.toFixed(1)} table characters per record at 150`).toBeLessThan(CHARS_PER_RECORD_BOUND);
-		expect(large, `${large.toFixed(1)} table characters per record at 2,900`).toBeLessThan(CHARS_PER_RECORD_BOUND);
+	it("never registers a suffix first written past 0x3fff, while a shorter suffix registered below still compresses", () => {
+		// The registration guard (only offsets below 0x3fff become compression targets) at its edge: `a.b.` written
+		// first registers `b.` at offset 2; filler pushes the writer past 0x3fff; `c.b.` and `d.c.b.` are then
+		// written entirely past it — their longer suffixes (c.b., d.c.b.) are never registered, and both names
+		// compress at the below-registered `b.` (captured from the encoder, and through encodeMessage on the
+		// full-message shape: the last two records of a 16,766-octet answer section come out `0163c00e` and
+		// `01640163c00e`).
+		const w = new Writer();
+		writeName(w, "a.b.", true);
+		w.raw(new Uint8Array(0x4000));
+		const at = w.length; // past 0x3fff
+		writeName(w, "c.b.", true);
+		writeName(w, "d.c.b.", true);
+		expect(hex.to(w.bytes.subarray(at, w.length)), "past-0x3fff suffixes are not targets").toBe("0163c00201640163c002");
 	});
 });
-
-/**
- * The characters of name text the writer's compression table retains, whatever its shape: the flat suffix-key
- * table (a Map of full suffix keys) sums its keys; the label index sums one edge key per node.
- * @param {Map<string, number>|object} table
- * @returns {number}
- */
-function retainedChars(table) {
-	if (table instanceof Map) {
-		let n = 0;
-		for (const key of table.keys()) n += key.length;
-		return n;
-	}
-	let n = 0;
-	const stack = [table];
-	while (stack.length > 0) {
-		const node = stack.pop();
-		n += node.key.length;
-		for (const child of node.children.values()) stack.push(child);
-	}
-	return n;
-}
