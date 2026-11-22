@@ -123,7 +123,9 @@ export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, 
 function readRecord(r) {
 	const name = readName(r);
 	const type = r.u16();
-	if (type === RESERVED_TYPE) fail(WireErrorCode.BAD_RDATA, "record type 65535 is reserved", r.pos - 2);
+	// 0 and 65535 are reserved (RFC 6895), matching the questions, the type bitmaps and RRSIG's typeCovered (CLDMV/digby#38);
+	// SIG's typeCovered stays unchecked on purpose — SIG(0) needs typeCovered 0 (RFC 2931)
+	if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.BAD_RDATA, `record type ${type} is reserved`, r.pos - 2);
 	const cls = r.u16();
 	const ttl = r.u32();
 	const rdlength = r.u16();
@@ -462,7 +464,8 @@ function rrsets(list) {
  */
 function writeRecord(w, rec, type) {
 	const t = type ?? rec.type;
-	if (t === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "record type 65535 is reserved");
+	// 0 and 65535 are reserved (RFC 6895), matching the questions and the decode (CLDMV/digby#38)
+	if (t === 0 || t === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `record type ${t} is reserved`);
 	const cls = rec.class ?? CLASS.IN;
 	writeName(w, string(rec.name, "record name"), true);
 	w.u16(t);
