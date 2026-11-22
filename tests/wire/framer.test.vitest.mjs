@@ -97,6 +97,25 @@ describe("TcpFramer buffering", () => {
 		expect(first).toEqual(payload(50, 5));
 	});
 
+	it("does not hand out state a later push would overwrite, for a frame filled across pushes", () => {
+		const f = new TcpFramer();
+		const body = payload(5000, 5);
+		const frame = frameTcp(body);
+		f.push(frame.subarray(0, 1000));
+		f.push(frame.subarray(1000, 4000));
+		const first = f.push(frame.subarray(4000))[0];
+		expect(first).toEqual(body);
+		// a second frame delivered whole in one chunk
+		f.push(frameTcp(payload(5000, 6)));
+		expect(first).toEqual(body);
+		// and a second frame filled across pushes too
+		const body2 = payload(7000, 7);
+		const frame2 = frameTcp(body2);
+		f.push(frame2.subarray(0, 3000));
+		f.push(frame2.subarray(3000));
+		expect(first).toEqual(body);
+	});
+
 	it("treats an empty chunk as a no-op, mid-frame or not", () => {
 		const f = new TcpFramer();
 		expect(f.push(new Uint8Array(0))).toEqual([]);
@@ -127,31 +146,81 @@ describe("TcpFramer buffering", () => {
 	});
 });
 
-describe("TcpFramer one-octet segments (CLDMV/digby#35)", () => {
-	it("delivers a 64 KB frame pushed one octet at a time, byte-identical, well within the time bound", () => {
-		// warm the JIT first, so the bound measures the framer and not first-call interpreter time
-		byteByByte(new TcpFramer(), frameTcp(payload(1024, 10)));
-		const body = payload(65535, 11);
+describe("TcpFramer buffer growth (review of CLDMV/digby#35)", () => {
+	it("holds only a small buffer while a declared 64 KB frame stalls after its prefix", () => {
+		const f = new TcpFramer();
+		f.push(Uint8Array.of(0xff, 0xff));
+		// a 65535-octet frame is declared but only the 2 prefix octets arrived: capacity stays at the small floor, not 65535
+		// — segment sizes are client-controlled, and 2,000 stalled connections must not pin ~131 MB
+		expect(f.capacity).toBe(4096);
+		f.push(new Uint8Array(100));
+		expect(f.capacity).toBe(4096);
+		expect(f.buffered).toBe(102);
+	});
+
+	it("doubles capacity as payload arrives and delivers the frame byte-identical", () => {
+		const f = new TcpFramer();
+		const body = payload(65535, 31);
 		const frame = frameTcp(body);
-		let out = [];
-		let elapsed = Infinity;
-		// best of three: a single sample on a shared runner picks up scheduling noise, the fastest of three does not
-		for (let run = 0; run < 3; run++) {
-			const f = new TcpFramer();
-			out = [];
-			const start = performance.now();
-			for (let i = 0; i < frame.length; i++) out.push(...f.push(frame.subarray(i, i + 1)));
-			elapsed = Math.min(elapsed, performance.now() - start);
-		}
-		expect(out).toHaveLength(1);
-		expect(out[0]).toEqual(body);
-		// Bound justification: the pre-fix framer re-concatenated `pending + chunk` on every push, which is quadratic in the
-		// frame size — measured ~21 ms for one 8 KB frame, ~54 ms at 16 KB and ~371 ms at 64 KB fed one octet per push (and
-		// ~707 ms for this exact sequence on the test runner pod). The fixed framer is linear in the frame size — one
-		// preallocation, one copy per octet — measuring ~13 ms steady-state on a dev box and 55 ms worst-case (cold, contended
-		// runner pod, single sample). Best-of-three plus a 100 ms bound leaves roughly 2x headroom over that worst observed
-		// run and about 7x below the quadratic behaviour, so the assertion fails only when the regression is real.
-		expect(elapsed).toBeLessThan(100);
+		f.push(frame.subarray(0, 2));
+		expect(f.capacity).toBe(4096);
+		f.push(frame.subarray(2, 4098));
+		// the buffer filled to capacity but the chunk ended with it: no growth until more octets need room
+		expect(f.capacity).toBe(4096);
+		const out = f.push(frame.subarray(4098, 4099));
+		expect(out).toEqual([]);
+		expect(f.capacity).toBe(8192);
+		// the rest of the frame walks the doubling ladder up to the declared length and completes
+		expect(f.push(frame.subarray(4099))).toEqual([body]);
+		// handed out and nothing held: no capacity pinned
+		expect(f.capacity).toBe(0);
+		expect(f.buffered).toBe(0);
+	});
+
+	it("sizes capacity to the octets actually received when one chunk carries most of a frame", () => {
+		const f = new TcpFramer();
+		const body = payload(60000, 32);
+		const frame = frameTcp(body);
+		expect(f.push(frame.subarray(0, 50002))).toEqual([]);
+		// prefix + 50000 payload received: capacity matches what arrived, no floor-padding and not the full 60000
+		expect(f.capacity).toBe(50002);
+		expect(f.push(frame.subarray(50002))).toEqual([body]);
+	});
+});
+
+describe("TcpFramer one-octet segments (CLDMV/digby#35)", () => {
+	it("delivers a 64 KB frame pushed one octet at a time, byte-identical, with linear scaling", () => {
+		// warm the JIT first, so the bounds measure the framer and not first-call interpreter time
+		byteByByte(new TcpFramer(), frameTcp(payload(1024, 10)));
+		const runOnce = (n, seed) => {
+			const body = payload(n, seed);
+			const frame = frameTcp(body);
+			let out = [];
+			let best = Infinity;
+			// best of three: a single sample on a shared runner picks up scheduling noise, the fastest of three does not
+			for (let run = 0; run < 3; run++) {
+				const f = new TcpFramer();
+				out = [];
+				const start = performance.now();
+				for (let i = 0; i < frame.length; i++) out.push(...f.push(frame.subarray(i, i + 1)));
+				best = Math.min(best, performance.now() - start);
+			}
+			expect(out).toHaveLength(1);
+			expect(out[0]).toEqual(body);
+			return best;
+		};
+		const t16 = runOnce(16383, 11);
+		const t64 = runOnce(65535, 12);
+		// Scaling bound (machine-independent; chosen over a bare absolute bound so the test cannot flake on a slow or loaded
+		// runner): the pre-fix framer re-concatenated `pending + chunk` on every push — quadratic in the frame size, so
+		// quadrupling 16 KB → 64 KB multiplies the time by ~16 (measured ~592 ms vs ~55 ms here). The fixed framer is linear —
+		// one buffer grown by doubling, one copy per octet — so the ratio is ~4. 8 sits 2x above linear and 2x below quadratic,
+		// failing only when the re-concatenation returns, regardless of machine speed.
+		expect(t64 / t16).toBeLessThan(8);
+		// Absolute backstop with real headroom: 64 KB measured ~592 ms best-of-3 on the pre-fix framer and 55.6 ms worst on the
+		// fixed one (cold, contended runner pod, single sample; ~13 ms steady-state on a dev box). 150 ms keeps ~2.7x headroom
+		// over that worst observed run while the quadratic behaviour sits ~4x above it.
+		expect(t64).toBeLessThan(150);
 	});
 
 	it("delivers several frames back to back, all one octet at a time", () => {
