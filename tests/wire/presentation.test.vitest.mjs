@@ -208,4 +208,14 @@ describe("formatRecord validates its input (CLDMV/digby#37)", () => {
 		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: 16, data: {} }))).toBe("VALUE_OUT_OF_RANGE");
 		expect(code(() => formatRecord({ name: "a.", ttl: 0, type: 64, data: {} }))).toBe("VALUE_OUT_OF_RANGE");
 	});
+
+	it("prints empty rdata only for the RFC 2136 update form: class ANY or NONE (CLDMV/digby#37)", () => {
+		// the reproducing case: an IN record with no rdata printed as "a. 1 IN A"
+		expect(code(() => formatRecord({ name: "a.", ttl: 1, type: 1, data: null }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 1, class: 1, type: 1, data: null }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.", ttl: 1, class: 3, type: 1, data: null }))).toBe("VALUE_OUT_OF_RANGE");
+		// the update form itself stays allowed
+		expect(formatRecord({ name: "a.", ttl: 0, class: 255, type: 1, data: null })).toBe("a. 0 ANY A");
+		expect(formatRecord({ name: "a.", ttl: 0, class: 254, type: 1, data: null })).toBe("a. 0 NONE A");
+	});
 });

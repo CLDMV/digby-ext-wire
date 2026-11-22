@@ -15,10 +15,12 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { CLASS } from "../../src/lib/wire/constants.mjs";
 import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { canonicalName } from "../../src/lib/wire/names.mjs";
 import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
-import { TYPED, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
 import { genMessage, genRdata, genRecord, hex, prng, seedFromEnv } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_FUZZ_SEED");
@@ -195,10 +197,26 @@ describe(`wire fuzz (seed ${SEED}, ${ITERATIONS} iterations)`, () => {
 			try {
 				const text = formatRdata(type, data);
 				if (typeof text !== "string") throw reportShape("formatRdata returned a non-string", { type, data }, text);
+				let parsed;
 				try {
-					parseRdata(type, text);
+					parsed = parseRdata(type, text);
 				} catch (err) {
 					if (!(err instanceof WireError)) throw reportShape("the formatted text did not re-parse as WireError-or-value", { type, data }, err);
+				}
+				// when the text does re-parse, it must be exactly the presentation of the input's wire round-trip — text that parses
+				// to anything else is a divergence too (CLDMV/digby#37)
+				if (parsed !== undefined) {
+					let canonical;
+					try {
+						canonical = decodeRdataBytes(type, encodeRdataBytes(type, data));
+					} catch (err) {
+						throw reportShape("the formatted text re-parsed but the input does not survive a wire round-trip", { type, data }, err);
+					}
+					try {
+						expect(parsed).toEqual(canonical);
+					} catch (err) {
+						throw reportShape("the formatted text re-parsed to a different value than the input's canonical form", { type, data }, err);
+					}
 				}
 			} catch (err) {
 				if (!(err instanceof WireError) || !codes.includes(err.code)) throw reportShape("formatRdata threw a non-WireError", { type, data }, err);
@@ -214,10 +232,28 @@ describe(`wire fuzz (seed ${SEED}, ${ITERATIONS} iterations)`, () => {
 			try {
 				const text = formatRecord(bad);
 				if (typeof text !== "string") throw reportShape("formatRecord returned a non-string", bad, text);
+				let parsed;
 				try {
-					parseRecord(text);
+					parsed = parseRecord(text);
 				} catch (err) {
 					if (!(err instanceof WireError)) throw reportShape("the formatted record did not re-parse as WireError-or-value", bad, err);
+				}
+				// the same rule for the whole record line: a line that re-parses must re-parse to the record's canonical form
+				// (CLDMV/digby#37)
+				if (parsed !== undefined) {
+					let canonicalData = null;
+					if (bad.data !== null) {
+						try {
+							canonicalData = decodeRdataBytes(bad.type, encodeRdataBytes(bad.type, bad.data));
+						} catch (err) {
+							throw reportShape("the formatted record re-parsed but its rdata does not survive a wire round-trip", bad, err);
+						}
+					}
+					try {
+						expect(parsed).toEqual({ name: canonicalName(bad.name), ttl: bad.ttl, class: bad.class ?? CLASS.IN, type: bad.type, data: canonicalData });
+					} catch (err) {
+						throw reportShape("the formatted record re-parsed to a different record than the input's canonical form", bad, err);
+					}
 				}
 			} catch (err) {
 				if (!(err instanceof WireError) || !codes.includes(err.code)) throw reportShape("formatRecord threw a non-WireError", bad, err);
