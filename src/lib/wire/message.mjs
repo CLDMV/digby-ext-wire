@@ -23,7 +23,7 @@
  */
 
 import { MAX_MESSAGE, Reader, Writer, asBytes, checkInt } from "./buffer.mjs";
-import { CLASS, TYPE, typeToString } from "./constants.mjs";
+import { CLASS, TYPE, classToString, typeToString } from "./constants.mjs";
 import { joinOptTtl, readOptions, splitOptTtl, writeOptions } from "./edns.mjs";
 import { WireError, WireErrorCode, fail } from "./errors.mjs";
 import { HEADER_SIZE, TC_BIT, packFlags, unpackFlags } from "./header.mjs";
@@ -228,6 +228,10 @@ export function appendTsig(capped, tsigRecord) {
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
 	obj(tsigRecord, "TSIG record");
 	if (tsigRecord.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(tsigRecord.type)}`);
+	// a TSIG record carries class ANY and TTL 0 on the wire (RFC 8945 4.1.1) (CLDMV/digby#39)
+	if (tsigRecord.class !== CLASS.ANY)
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has class ANY (RFC 8945 4.1.1), got ${classToString(tsigRecord.class)}`);
+	if (tsigRecord.ttl !== 0) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has TTL 0 (RFC 8945 4.1.1), got ${String(tsigRecord.ttl)}`);
 	const id = (capped.bytes[0] << 8) | capped.bytes[1];
 	const originalId = tsigRecord.data?.originalId;
 	if (!Number.isInteger(originalId) || originalId !== id)
