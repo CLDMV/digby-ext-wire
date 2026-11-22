@@ -183,6 +183,10 @@ describe("typed rdata: presentation and wire", () => {
 		expect(code(() => encodeRdataBytes(TYPE.RRSIG, rrsigData(65535)))).toBe("BAD_RDATA");
 		expect(code(() => parseRdata(TYPE.RRSIG, "TYPE0 5 3 86400 20030322173103 20030220173103 2642 example.com. c2Ft"))).toBe("BAD_PRESENTATION");
 		expect(code(() => parseRdata(TYPE.RRSIG, "TYPE65535 5 3 86400 20030322173103 20030220173103 2642 example.com. c2Ft"))).toBe("BAD_PRESENTATION");
+		// a window's last byte holds other types' bits too: type 65287 is window 255, low 7 — only the full window's
+		// last bit is 65535, so this must decode, not trip the 65535 refusal
+		expect(decodeRdataBytes(TYPE.NSEC, hex.from("00 ff 01 01"))).toEqual({ next: ".", types: [65287] });
+		expect(parseRdata(TYPE.NSEC, ". TYPE65287")).toEqual({ next: ".", types: [65287] });
 	});
 
 	it("formats OPT rdata (no master-file form) generically", () => {
