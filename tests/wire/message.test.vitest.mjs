@@ -24,6 +24,8 @@ const code = (fn) => {
 const QUESTION = "07 6578616d706c65 03 636f6d 00 0001 0001"; // example.com. A IN
 // example.com. A 3600 93.184.216.34, owner compressed to the question at offset 12
 const ANSWER = "c00c 0001 0001 00000e10 0004 5db8d822";
+// a record with no rdata: root owner, type SIG (24), class ANY, ttl 0, rdlength 0
+const EMPTY_SIG = "00 0018 00ff 00000000 0000";
 const FLAGS = { qr: false, opcode: 0, aa: false, tc: false, rd: false, ra: false, z: false, ad: false, cd: false };
 
 describe("header", () => {
@@ -110,10 +112,24 @@ describe("messages", () => {
 		expect(code(() => encodeMessage({ id: 0, additionals: [{ name: ".", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: null }] }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
+	it("refuses an empty SIG record: SIG(0) is class ANY and its rdata is mandatory (CLDMV/digby#38)", () => {
+		// SIG is type 24 and SIG(0) travels as class ANY, so the empty-rdata update form reached it and data read back null
+		expect(code(() => decodeMessage(hex.from(`0000 2800 0000 0000 0000 0001 ${EMPTY_SIG}`)))).toBe("BAD_RDATA");
+		expect(code(() => encodeMessage({ id: 0, additionals: [{ name: ".", type: TYPE.SIG, class: CLASS.ANY, ttl: 0, data: null }] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
 	it("refuses records of the reserved type 65535 (CLDMV/digby#38)", () => {
 		expect(code(() => decodeMessage(hex.from(`0000 0000 0000 0001 0000 0000 00 ffff 0001 00000000 0000`)))).toBe("BAD_RDATA");
 		expect(code(() => encodeMessage({ id: 0, answers: [{ name: ".", type: 65535, ttl: 0, data: { data: new Uint8Array(0) } }] }))).toBe("VALUE_OUT_OF_RANGE");
 		expect(code(() => parseRecord("a. 3600 IN TYPE65535 \\# 0"))).toBe("BAD_PRESENTATION");
+	});
+
+	it("refuses a question of a reserved type: 0 and 65535 (CLDMV/digby#38)", () => {
+		// one question of type 0 / 65535, class IN
+		expect(code(() => decodeMessage(hex.from("0000 0000 0001 0000 0000 0000 00 0000 0001")))).toBe("BAD_RDATA");
+		expect(code(() => decodeMessage(hex.from("0000 0000 0001 0000 0000 0000 00 ffff 0001")))).toBe("BAD_RDATA");
+		expect(code(() => encodeMessage({ id: 0, questions: [{ name: ".", type: 0 }] }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeMessage({ id: 0, questions: [{ name: ".", type: 65535 }] }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
 	it("keeps unknown types and classes as RFC 3597 octets", () => {

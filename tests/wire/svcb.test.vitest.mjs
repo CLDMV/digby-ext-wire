@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { TYPE } from "../../src/lib/wire/constants.mjs";
+import { SVC_KEY, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
@@ -171,5 +171,11 @@ describe("SVCB failure cases", () => {
 		expect(e([{ key: 7, value: 5 }])).toBe("VALUE_OUT_OF_RANGE");
 		expect(e([{ key: 99, value: "x" }])).toBe("VALUE_OUT_OF_RANGE");
 		expect(e("x")).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("refuses a dohpath that is not well-formed Unicode: a lone surrogate would encode as U+FFFD (CLDMV/digby#38)", () => {
+		const data = { priority: 1, target: ".", params: [{ key: SVC_KEY.dohpath, value: "/dns-query{?dns}\uD800" }] };
+		expect(code(() => encodeRdataBytes(TYPE.SVCB, data))).toBe("BAD_SVCPARAM");
+		expect(code(() => formatRdata(TYPE.SVCB, data))).toBe("BAD_SVCPARAM");
 	});
 });

@@ -139,6 +139,10 @@ describe("EDNS(0)", () => {
 		expect(code(() => encodeMessage({ id: 0, additionals: [{ name: ".", type: 41, class: 512, ttl: 0, data: { options: [] } }] }))).toBe("OPT_MISPLACED");
 	});
 
+	it("refuses extended-error text that is not well-formed Unicode: a lone surrogate would encode as U+FFFD (CLDMV/digby#38)", () => {
+		expect(code(() => encodeMessage({ id: 0, edns: { udpSize: 1232, options: [{ code: EDNS_OPTION.EXTENDED_ERROR, infoCode: 18, extraText: "oops \uD800" }] } }))).toBe("BAD_OPTION");
+	});
+
 	it("exposes the option codes", () => {
 		expect(EDNS_OPTION).toEqual({ COOKIE: 10, TCP_KEEPALIVE: 11, PADDING: 12, EXTENDED_ERROR: 15 });
 	});

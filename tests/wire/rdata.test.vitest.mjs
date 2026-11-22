@@ -158,11 +158,31 @@ describe("typed rdata: presentation and wire", () => {
 		expect(parseRdata(TYPE.MX, "\\# 3 000a00")).toEqual({ preference: 10, exchange: "." });
 		expect(code(() => parseRdata(TYPE.A, "\\# 3 C00002"))).toBe("BAD_RDATA");
 		expect(code(() => parseRdata(TYPE.A, "\\# 4 C00002"))).toBe("BAD_RDATA");
-		// pointers resolve only against the standalone octets themselves: a backward pointer inside them does resolve, a
-		// forward or out-of-range one fails (CLDMV/digby#38 — the decodeRdataBytes doc was corrected to say so)
-		expect(parseRdata(TYPE.MX, "\\# 4 000ac000")).toEqual({ preference: 10, exchange: "." });
-		expect(code(() => parseRdata(TYPE.NS, "\\# 2 c000"))).toBe("POINTER_FORWARD");
-		expect(code(() => parseRdata(TYPE.NS, "\\# 2 c0ff"))).toBe("POINTER_OUT_OF_RANGE");
+		// standalone rdata carries no compression (CLDMV/digby#38): a pointer inside it is refused wherever the codec reads
+		// a name, resolving or not — the round-1 decision that made the resolving behaviour canonical is reversed
+		expect(code(() => parseRdata(TYPE.MX, "\\# 4 000ac000"))).toBe("BAD_RDATA");
+		expect(code(() => decodeRdataBytes(TYPE.MX, hex.from("000a c000")))).toBe("BAD_RDATA");
+		expect(code(() => parseRdata(TYPE.NS, "\\# 2 c000"))).toBe("BAD_RDATA");
+		expect(code(() => parseRdata(TYPE.NS, "\\# 2 c0ff"))).toBe("BAD_RDATA");
+	});
+
+	it("refuses the reserved types 0 and 65535 in type bitmaps and RRSIG type covered (CLDMV/digby#38)", () => {
+		// the type bitmap is shared by NSEC, NSEC3 and NSEC3PARAM; type 0 was already refused, 65535 is reserved too
+		expect(code(() => decodeRdataBytes(TYPE.NSEC, hex.from("00 00 01 80")))).toBe("BAD_RDATA"); // type 0
+		expect(code(() => decodeRdataBytes(TYPE.NSEC, hex.from(`00 ff 20 ${"00".repeat(31)} 01`)))).toBe("BAD_RDATA"); // type 65535
+		expect(code(() => encodeRdataBytes(TYPE.NSEC, { next: ".", types: [0] }))).toBe("BAD_RDATA");
+		expect(code(() => encodeRdataBytes(TYPE.NSEC, { next: ".", types: [65535] }))).toBe("BAD_RDATA");
+		expect(code(() => parseRdata(TYPE.NSEC, ". TYPE0"))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseRdata(TYPE.NSEC, ". TYPE65535"))).toBe("BAD_PRESENTATION");
+		// RRSIG's type covered: 0 and 65535 are reserved
+		const rrsig = (covered) => `${covered} 0d 02 00000e10 00000000 00000000 3039 00 0102`;
+		const rrsigData = (typeCovered) => ({ typeCovered, algorithm: 13, labels: 2, originalTtl: 3600, expiration: 1, inception: 0, keyTag: 12345, signerName: ".", signature: new Uint8Array(2) });
+		expect(code(() => decodeRdataBytes(TYPE.RRSIG, hex.from(rrsig("0000"))))).toBe("BAD_RDATA");
+		expect(code(() => decodeRdataBytes(TYPE.RRSIG, hex.from(rrsig("ffff"))))).toBe("BAD_RDATA");
+		expect(code(() => encodeRdataBytes(TYPE.RRSIG, rrsigData(0)))).toBe("BAD_RDATA");
+		expect(code(() => encodeRdataBytes(TYPE.RRSIG, rrsigData(65535)))).toBe("BAD_RDATA");
+		expect(code(() => parseRdata(TYPE.RRSIG, "TYPE0 5 3 86400 20030322173103 20030220173103 2642 example.com. c2Ft"))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseRdata(TYPE.RRSIG, "TYPE65535 5 3 86400 20030322173103 20030220173103 2642 example.com. c2Ft"))).toBe("BAD_PRESENTATION");
 	});
 
 	it("formats OPT rdata (no master-file form) generically", () => {
