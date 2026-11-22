@@ -74,7 +74,8 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
 		} else break;
 	}
 	const type = typeFromString(t.word("type"));
-	if (type === 0xffff) fail(WireErrorCode.BAD_PRESENTATION, "record type 65535 is reserved");
+	// type 0 and the top of the type range are reserved (RFC 6895); no record may use either (CLDMV/digby#38)
+	if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.BAD_PRESENTATION, `record type ${type} is reserved`);
 	ttl ??= defaultTtl;
 	if (ttl === undefined) fail(WireErrorCode.BAD_PRESENTATION, "the record has no TTL and no default was given");
 	const cls = clsTok ?? defaultClass;
@@ -108,9 +109,9 @@ export function formatRecord(rec) {
 	const cls = rec.class ?? CLASS.IN;
 	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${String(cls)}`);
 	if (!Number.isInteger(rec.type) || rec.type < 0 || rec.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(rec.type)}`);
-	// the record-layer rules parseRecord and writeRecord apply (CLDMV/digby#38): the top of the type range is reserved, and
-	// empty rdata is only the RFC 2136 update form — a type that must carry rdata (RDATA_REQUIRED) never takes it
-	if (rec.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "record type 65535 is reserved");
+	// the record-layer rules parseRecord and writeRecord apply (CLDMV/digby#38): types 0 and 65535 are reserved, and empty
+	// rdata is only the RFC 2136 update form — a type that must carry rdata (RDATA_REQUIRED) never takes it
+	if (rec.type === 0 || rec.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `record type ${rec.type} is reserved`);
 	const head = `${name} ${rec.ttl} ${classToString(cls)} ${typeToString(rec.type)}`;
 	if (rec.data === null) {
 		// the RFC 2136 empty-rdata update form, same rule as writeRecord: empty rdata is only a class ANY or NONE record, so
