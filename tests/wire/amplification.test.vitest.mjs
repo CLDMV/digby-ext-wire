@@ -262,6 +262,17 @@ describe("decode amplification (CLDMV/digby#34)", () => {
 		expect(r.nameOctets).toBeUndefined(); // chargeName returned at the cap guard
 	});
 
+	it("a pointer to an uncached root terminator memoises it as the root name", () => {
+		// The question is "abc."; the answer's owner is one label plus a pointer to the root byte at offset 16, which
+		// no earlier name was read at — an uncached jump target whose walk reaches the root with no labels of its own.
+		const b = [0, 0, 0x01, 0x00, 0, 1, 0, 1, 0, 0, 0, 0];
+		b.push(3, 0x61, 0x62, 0x63, 0, 0x00, 0x01, 0x00, 0x01); // question: "abc." A IN
+		b.push(1, 0x78, 0xc0, 0x10, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 0x7f, 0, 0, 1); // owner "x" + pointer to 16
+		const m = decodeMessage(Uint8Array.from(b));
+		expect(m.questions[0].name).toBe("abc.");
+		expect(m.answers[0].name).toBe("x.");
+	});
+
 	it("readName with a cap but no counter initialises it from zero", () => {
 		const r = new Reader(hex.from(`03 616263 00`));
 		r.nameMemo = new Map();
