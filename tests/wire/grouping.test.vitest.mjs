@@ -15,7 +15,14 @@ import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/m
 import { regroup, rrsetKey } from "../helpers/wire-gen.mjs";
 
 const A = (i) => ({ name: "ns.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: `10.0.0.${i}` } });
-const TXT = (name, n) => ({ name, type: TYPE.TXT, class: 1, ttl: 60, data: { strings: [Uint8Array.from({ length: n }, () => 0x78)] } });
+// n octets of TXT rdata, split into character-strings of at most 255 octets each
+const TXT = (name, n) => ({
+	name,
+	type: TYPE.TXT,
+	class: 1,
+	ttl: 60,
+	data: { strings: Array.from({ length: Math.ceil(n / 255) }, (_, i) => Uint8Array.from({ length: Math.min(255, n - i * 255) }, () => 0x78)) }
+});
 const message = (sections) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [], authorities: [], additionals: [], ...sections });
 
 /** Whether `kept` is a prefix of `regroup(all)` that ends on an RRset boundary (a whole number of sets). */
@@ -43,8 +50,10 @@ describe("RRsets group across a whole section (CLDMV/digby#36)", () => {
 			expect(ns.length % 2, `limit ${limit}: the ns.example set went out partly`).toBe(0);
 		}
 		// the issue's window: the later piece of the split set is the one that does not fit, so the whole set goes and the
-		// small trailing TXT with it
-		const { bytes } = encodeCapped(m, { limit: 300 });
+		// small trailing TXT with it. Owner-name compression shrinks this packet (the p1/p2 owners share ns.example.'s
+		// suffix): grouped it is 294 octets (12 header + 26 + 16 A records + 215 + 25 TXT records), so the window where
+		// [ns/A, p1, ns/A] fits but p2 does not is caps 269..293 — 280 sits in it
+		const { bytes } = encodeCapped(m, { limit: 280 });
 		expect(decodeMessage(bytes).additionals).toEqual([A(1), A(2), TXT("p1.example.", 200)]);
 	});
 
