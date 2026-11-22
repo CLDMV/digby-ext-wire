@@ -11,7 +11,8 @@
  * - cookie `{ code: 10, client: Uint8Array(8), server: Uint8Array(8..32) | null }`
  * - tcp-keepalive `{ code: 11, timeout: number | null }` (units of 100 ms; null when absent, as in a query)
  * - padding `{ code: 12, length }` (the content is not kept: padding octets are zero on encode and ignored on decode)
- * - extended-error `{ code: 15, infoCode, extraText }` (extraText decoded as UTF-8, invalid sequences replaced)
+ * - extended-error `{ code: 15, infoCode, extraText }` (extraText decoded as UTF-8, invalid sequences replaced; on encode
+ *   the text must be well-formed Unicode — a lone surrogate is refused rather than encoded as U+FFFD)
  * - anything else `{ code, data: Uint8Array }`; `data` also forces a raw encoding for a typed code
  */
 
@@ -104,10 +105,14 @@ function writeOption(w, o) {
 			checkInt(o.length, 0xffff, "padding length");
 			w.raw(new Uint8Array(o.length));
 			return;
-		case EDNS_OPTION.EXTENDED_ERROR:
+		case EDNS_OPTION.EXTENDED_ERROR: {
+			const text = string(o.extraText ?? "", "extended-error text");
+			// a lone surrogate would silently encode as U+FFFD (the decode side stays lossy by design, CLDMV/digby#38)
+			if (!text.isWellFormed()) badOption("extended-error text is not well-formed Unicode: a lone surrogate would encode as U+FFFD");
 			w.u16(o.infoCode);
-			w.raw(utf8.encode(string(o.extraText ?? "", "extended-error text")));
+			w.raw(utf8.encode(text));
 			return;
+		}
 		default:
 			return badOption(`option ${o.code} has no typed form; give it as { code, data }`);
 	}

@@ -122,9 +122,13 @@ function writeValue(w, key, value) {
 			if (bytes(value, name).length === 0) badParam("ech is not empty");
 			w.raw(value);
 			return;
-		case SVC_KEY.dohpath:
-			w.raw(utf8.encode(string(value, name)));
+		case SVC_KEY.dohpath: {
+			const text = string(value, name);
+			// a lone surrogate would silently encode as U+FFFD (CLDMV/digby#38)
+			if (!text.isWellFormed()) badParam("dohpath is not well-formed Unicode: a lone surrogate would encode as U+FFFD");
+			w.raw(utf8.encode(text));
 			return;
+		}
 		default:
 			w.raw(bytes(value, name));
 	}
@@ -264,8 +268,12 @@ function formatParam({ key, value }) {
 			return `${name}=${value.join(",")}`;
 		case SVC_KEY.ech:
 			return `${name}=${toBase64(value)}`;
-		case SVC_KEY.dohpath:
-			return `${name}="${escapeBytes(utf8.encode(value), true)}"`;
+		case SVC_KEY.dohpath: {
+			const text = string(value, name);
+			// a lone surrogate would silently encode as U+FFFD (CLDMV/digby#38)
+			if (!text.isWellFormed()) badParam("dohpath is not well-formed Unicode: a lone surrogate would encode as U+FFFD");
+			return `${name}="${escapeBytes(utf8.encode(text), true)}"`;
+		}
 		default:
 			return value.length ? `${name}="${escapeBytes(value, true)}"` : name;
 	}
