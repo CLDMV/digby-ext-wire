@@ -16,7 +16,7 @@ import { CLASS, classFromString, classToString, isClassToken, typeFromString, ty
 import { WireErrorCode, fail } from "./errors.mjs";
 import { RDATA_REQUIRED } from "./message.mjs";
 import { canonicalName } from "./names.mjs";
-import { formatRdata, parseRdataTokens } from "./rdata/index.mjs";
+import { formatRdata, isTyped, parseRdataTokens } from "./rdata/index.mjs";
 import { Tokens, tokenize } from "./text.mjs";
 
 export { formatRdata, parseRdata, formatGeneric } from "./rdata/index.mjs";
@@ -55,21 +55,21 @@ const isTtlToken = (text) => /^\d+$/.test(text) || /^(?:\d+[smhdwSMHDW])+$/.test
  * @param {string} [options.origin] - completes relative names (owner and rdata) and `@`
  * @param {number} [options.ttl] - the TTL when the record gives none (a zone's `$TTL`); without it a TTL is required
  * @param {number} [options.class=1] - the class when the record gives none
- * @returns {{ name: string, ttl: number, class: number, type: number, data: object }}
+ * @returns {{ name: string, ttl: number, class: number, type: number, data: object | null }}
  */
 export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass = CLASS.IN } = {}) {
 	const t = new Tokens(tokenize(text));
 	const name = canonicalName(t.word("owner name"), origin);
 	let ttl;
-	let cls;
+	let clsTok;
 	for (let k = 0; k < 2 && !t.done; k++) {
 		const tok = t.list[t.i];
 		if (tok.quoted) break;
 		if (ttl === undefined && isTtlToken(tok.value)) {
 			ttl = parseTtl(tok.value);
 			t.i++;
-		} else if (cls === undefined && isClassToken(tok.value)) {
-			cls = classFromString(tok.value);
+		} else if (clsTok === undefined && isClassToken(tok.value)) {
+			clsTok = classFromString(tok.value);
 			t.i++;
 		} else break;
 	}
@@ -77,8 +77,20 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
 	if (type === 0xffff) fail(WireErrorCode.BAD_PRESENTATION, "record type 65535 is reserved");
 	ttl ??= defaultTtl;
 	if (ttl === undefined) fail(WireErrorCode.BAD_PRESENTATION, "the record has no TTL and no default was given");
-	const data = parseRdataTokens(type, t, origin);
-	return { name, ttl, class: cls ?? defaultClass, type, data };
+	const cls = clsTok ?? defaultClass;
+	// No rdata text at all is the RFC 2136 update form, the same rule readRecord and writeRecord apply (CLDMV/digby#37):
+	// empty rdata is only a class ANY or NONE record — every other class with no rdata stays refused. The zero-length
+	// generic form (`\# 0`) is the update form too under ANY / NONE; parseRdataTokens maps it the way the wire reader
+	// maps rdlength 0.
+	let data;
+	if (t.done) {
+		if (cls !== CLASS.ANY && cls !== CLASS.NONE)
+			fail(WireErrorCode.BAD_PRESENTATION, "the record has no rdata; empty rdata is only the class ANY or NONE update form");
+		data = null;
+	} else data = parseRdataTokens(type, t, origin, cls);
+	if (data === null && RDATA_REQUIRED.has(type))
+		fail(WireErrorCode.BAD_PRESENTATION, `${typeToString(type)} rdata must be present; the empty-rdata update form does not apply to it`);
+	return { name, ttl, class: cls, type, data };
 }
 
 /**
@@ -107,5 +119,10 @@ export function formatRecord(rec) {
 		if (RDATA_REQUIRED.has(rec.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(rec.type)} rdata must be present; the empty-rdata update form does not apply to it`);
 		return head;
 	}
+	// under class ANY or NONE, zero-length rdata IS the update form — the wire reader maps rdlength 0 to data: null
+	// (CLDMV/digby#37) — so a zero-length generic rdata value has no line of its own: `\# 0` parses back as data: null.
+	// Refuse it and ask for the update form itself.
+	if ((cls === CLASS.ANY || cls === CLASS.NONE) && !isTyped(rec.type) && rec.data?.data instanceof Uint8Array && rec.data.data.length === 0)
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "zero-length rdata in class ANY or NONE is the empty-rdata update form; give data: null");
 	return `${head} ${formatRdata(rec.type, rec.data)}`;
 }

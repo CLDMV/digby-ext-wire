@@ -11,7 +11,7 @@
  */
 
 import { MAX_MESSAGE, Reader, Writer } from "../buffer.mjs";
-import { TYPE, typeToString } from "../constants.mjs";
+import { CLASS, TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
 import { WireErrorCode, fail } from "../errors.mjs";
 import { Tokens, fromHex, toHex, tokenize } from "../text.mjs";
@@ -129,13 +129,20 @@ export function parseRdata(type, text, origin) {
  * @param {number} type
  * @param {Tokens} t
  * @param {string} [origin]
- * @returns {object}
+ * @param {number} [cls] - the record's class when the caller knows it (the RR line parser passes it): the zero-length
+ *   generic form (`\# 0`) in class ANY or NONE is the RFC 2136 update form and reads back as `data: null`, the way the
+ *   wire reader maps rdlength 0 (CLDMV/digby#37); without a class, `\# 0` stays ordinary zero-length octets
+ * @returns {object | null}
  */
-export function parseRdataTokens(type, t, origin) {
+export function parseRdataTokens(type, t, origin, cls) {
 	const first = t.list[t.i];
 	if (first && !first.quoted && first.value === "\\#") {
 		t.i++;
 		const len = t.int("generic rdata length", 0xffff);
+		if (len === 0 && (cls === CLASS.ANY || cls === CLASS.NONE) && t.done) {
+			// the update form; the RDATA_REQUIRED refusal for it is the record layer's, so the error names the record parser
+			return null;
+		}
 		const octets = fromHex(t.joinRest(), "generic rdata");
 		if (octets.length !== len) badRdata(`generic rdata says ${len} octets but holds ${octets.length}`);
 		return decodeRdataBytes(type, octets);
