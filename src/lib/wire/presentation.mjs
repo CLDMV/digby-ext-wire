@@ -92,6 +92,11 @@ export function formatRecord(rec) {
 	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${String(cls)}`);
 	if (!Number.isInteger(rec.type) || rec.type < 0 || rec.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(rec.type)}`);
 	const head = `${name} ${rec.ttl} ${classToString(cls)} ${typeToString(rec.type)}`;
-	if (rec.data === null) return head;
+	if (rec.data === null) {
+		// the RFC 2136 empty-rdata update form, same rule as writeRecord: empty rdata is only a class ANY or NONE record, so
+		// anything else would print a line parseRecord refuses (CLDMV/digby#37)
+		if (cls !== CLASS.ANY && cls !== CLASS.NONE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "empty rdata (data: null) is only for class ANY or NONE");
+		return head;
+	}
 	return `${head} ${formatRdata(rec.type, rec.data)}`;
 }
