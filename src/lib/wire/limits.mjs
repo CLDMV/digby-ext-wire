@@ -49,7 +49,9 @@ export function udpLimit(query, { cap = DEFAULT_UDP_CAP } = {}) {
  * @param {boolean} [options.compress=true]
  * @returns {{ bytes: Uint8Array, truncated: boolean, limit: number }}
  * @throws {WireError} TSIG_PRESENT when the message already carries a TSIG record: truncating it would invalidate the MAC —
- *   encode unsigned (see {@link encodeCapped}'s `reserveTsig`), sign, then appendTsig (CLDMV/digby#39)
+ *   encode unsigned (see {@link encodeCapped}'s `reserveTsig`), sign, then appendTsig (CLDMV/digby#39);
+ *   TRUNCATION_REFUSED when truncating would corrupt the message's meaning (an UPDATE, or a question of type AXFR/IXFR —
+ *   CLDMV/digby#43)
  */
 export function encodeForTransport(message, { transport, query = null, cap = DEFAULT_UDP_CAP, limit, compress = true }) {
 	let max;
