@@ -4,21 +4,27 @@
  */
 
 /**
- * One snapshot of the caller's input (CLDMV/digby#39, codec fix round 3): the encode paths read caller objects more than
- * once, so a getter can show the checks one value and the writer another — a TSIG can get past the TSIG_PRESENT refusal, a
- * flipping type can split an RRset under truncation, appendTsig can write a record unlike the one it checked, and the
- * caller's bytes can be swapped after the comparison. Every public encode entry (encodeMessage, encodeCapped, appendTsig,
- * tsigRecordSize, formatRecord, formatRdata, encodeRdataBytes) therefore copies each question, record and data value into a
- * plain object once, validates the copy, and writes the copy; a type that is not an integer in 0..0xffff is refused at the
- * copy, so there is never a fallback read. The red form: a field whose getter counts its reads is read exactly once across
- * a full encode.
+ * One copy of the caller's input (CLDMV/digby#39): the encode paths read caller objects more than once, so a getter can show
+ * the checks one value and the writer another — a TSIG can get past the TSIG_PRESENT refusal, a flipping type can split an
+ * RRset under truncation, appendTsig can write a record unlike the one it checked, and the caller's bytes can be swapped
+ * after the comparison.
+ *
+ * Round 4 (CLDMV/digby#39): every public encode entry (encodeMessage, encodeCapped, appendTsig, tsigRecordSize, formatRecord,
+ * formatRdata, encodeRdataBytes) copies its input once with structuredClone and validates and writes only the clone. V8's
+ * serializer reads each own enumerable property exactly once, so the getter-count form still holds (a field whose getter
+ * counts its reads is read exactly once across a full encode); no caller method, iterator or `Symbol.species` runs; a
+ * typed-array subclass arrives as a plain Uint8Array of its real octets; a faked brand arrives as a plain object the field
+ * checks refuse. The round-3 hand-written snapshot (snapshotRdata and the per-field copy helpers) is gone. Anything the
+ * serializer refuses — a function, a Proxy, a symbol — is refused NOT_CLONEABLE, and so is a list longer than 65,535
+ * entries that is not dense, or a list with a hole; a self-referential value is walked once (visited set) and encodes as
+ * round 3's depth-bounded copy did.
  */
 
 import { describe, expect, it } from "vitest";
 import { Writer } from "../../src/lib/wire/buffer.mjs";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { writeTypeBitmap } from "../../src/lib/wire/rdata/dnssec.mjs";
-import { formatRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { encodeRdataBytes, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
 import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
 import { formatRecord } from "../../src/lib/wire/presentation.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
@@ -317,5 +323,139 @@ describe("one snapshot of the caller's input (CLDMV/digby#39)", () => {
 		Object.defineProperty(capped, "bytes", { value: lying });
 		// the comparison must not call a method the caller's array can override: the changed octet is caught element by element
 		expect(code(() => appendTsig(capped, tsigRecord(1)))).toBe("VALUE_OUT_OF_RANGE");
+	});
+});
+
+describe("one structuredClone of the caller's input (CLDMV/digby#39, round 4)", () => {
+	it("Symbol.species is never consulted: a section subclass with a broken species encodes its records (CLDMV/digby#39)", () => {
+		class Broken extends Array {
+			static get [Symbol.species]() {
+				return function () {
+					return {};
+				};
+			}
+		}
+		// round 3 copied each section with the caller's own .map(), whose ArraySpeciesCreate consulted the species: the
+		// species returned a plain object, the copies landed on it as keys, and the encode iterated a non-array — a raw
+		// TypeError escaped. The copy is a structuredClone: the subclass and its species do not survive it.
+		const additionals = Broken.from([A(1), A(2), A(3)]);
+		const d = decodeMessage(encodeMessage({ id: 1, additionals }));
+		expect(d.additionals).toEqual([A(1), A(2), A(3)]);
+	});
+
+	it("a faked Uint8Array brand is refused: the clone is a plain object, not octets (CLDMV/digby#39)", () => {
+		const fake = Object.setPrototypeOf({}, Uint8Array.prototype);
+		// today: the instance-of check passes the prototype chain, the writer reserves fake.length (undefined) and poisons
+		// its length with NaN — a raw RangeError out of the grow path
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: { data: fake } }] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("a Proxy is refused NOT_CLONEABLE: with a faked prototype, around real octets, or around a whole record (CLDMV/digby#39)", () => {
+		const fake = new Proxy(Object.setPrototypeOf({}, Uint8Array.prototype), {});
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: { data: fake } }] }))).toBe("NOT_CLONEABLE");
+		const wrapped = new Proxy(new Uint8Array([1, 2, 3]), {});
+		// today the instance-of check forwards through the proxy and the octets encode
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: { data: wrapped } }] }))).toBe("NOT_CLONEABLE");
+		const rec = new Proxy(A(1), {});
+		expect(code(() => encodeMessage({ id: 1, answers: [rec] }))).toBe("NOT_CLONEABLE");
+	});
+
+	it("a function is refused NOT_CLONEABLE and a self-referential value encodes without hanging (CLDMV/digby#39)", () => {
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: { data: () => {} } }] }))).toBe("NOT_CLONEABLE");
+		const cyclic = { data: new Uint8Array([1]) };
+		cyclic.self = cyclic;
+		// the copy preserves the cycle and both walks bound themselves with a visited set; the codecs read only the fields
+		// they know, so the value encodes exactly as round 3's depth-bounded copy did — never a hang, never an OOM
+		expect(encodeRdataBytes(999, cyclic)).toEqual(new Uint8Array([1]));
+	});
+
+	it("a MAC whose length lies is written from its real octets (CLDMV/digby#39)", () => {
+		class LyingMac extends Uint8Array {
+			get length() {
+				return 16;
+			}
+		}
+		const mac = new LyingMac(32); // 32 real octets, reports 16
+		const rec = { name: "key.example.", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: { ...tsigData(1), mac } };
+		// today: the length field says 16 octets, .set() copies all 32, and the record on the wire does not round-trip —
+		// the decode misreads everything after the MAC (its originalId is not the message's ID)
+		const d = decodeMessage(encodeMessage({ id: 1, additionals: [rec] }));
+		expect(d.additionals[0].data.mac).toEqual(new Uint8Array(32));
+		expect(d.additionals[0].data.originalId).toBe(1);
+	});
+
+	it("a MAC reporting length 0 on 2,000 octets does not escape a raw RangeError (CLDMV/digby#39)", () => {
+		class Zero extends Uint8Array {
+			get length() {
+				return 0;
+			}
+		}
+		const mac = new Zero(2000);
+		const rec = { name: "key.example.", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: { ...tsigData(1), mac } };
+		// today: the writer reserves 0 octets and .set() copies the 2,000 real ones — RangeError, out of bounds
+		const d = decodeMessage(encodeMessage({ id: 1, additionals: [rec] }));
+		expect(d.additionals[0].data.mac).toEqual(new Uint8Array(2000));
+	});
+
+	it("appendTsig indexes the copy: a length getter cannot pad the caller's bytes past the comparison (CLDMV/digby#39)", () => {
+		const need = tsigRecordSize(tsigRecord(1));
+		const capped = encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: need });
+		class Padded extends Uint8Array {
+			get length() {
+				return capped.bytes.length;
+			}
+		}
+		const padded = new Padded(capped.bytes.length + 50);
+		padded.set(capped.bytes);
+		Object.defineProperty(capped, "bytes", { value: padded });
+		// today: the comparison reads the length getter (the snapshot's length) and compares the first octets — the 50 extra
+		// octets the caller's array really holds are never compared, and the signed bytes are not the bytes verified
+		expect(code(() => appendTsig(capped, tsigRecord(1)))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("a 2**32-1 sparse list is refused in bounded time, wherever it sits (CLDMV/digby#39)", () => {
+		const sparse = new Array(2 ** 32 - 1);
+		sparse[0] = new Uint8Array([1]);
+		// today: the section copy walks the caller's list with .map(), which visits every index of a sparse array — the
+		// encode hangs for a minute or more before anything is refused
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: TYPE.TXT, class: 1, ttl: 60, data: { strings: sparse } }] }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeMessage({ id: 1, edns: { udpSize: 1232, options: sparse } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeMessage({ id: 1, answers: sparse }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("a hole in a list is a refusal, never a TypeError or a hang (CLDMV/digby#39)", () => {
+		// today: `[,]` survives the section copy (.map() preserves holes), and encodeCapped's TSIG-present scan reads
+		// rec.type of the hole — a raw TypeError
+		expect(code(() => encodeCapped(message({ answers: [,] }), { limit: 512 }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: TYPE.TXT, class: 1, ttl: 60, data: { strings: [new Uint8Array([1]), , new Uint8Array([2])] } }] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("an own __proto__ key is data, not the prototype (CLDMV/digby#39)", () => {
+		const sneaky = JSON.parse('{"__proto__":{"address":"10.0.0.7"}}');
+		// today: the hand-written copy's out[k] = v assignment hits the __proto__ setter — the copy's prototype becomes the
+		// injected object and the A record encodes 10.0.0.7
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: TYPE.A, class: 1, ttl: 60, data: sneaky }] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("error messages stringify only cloned values: a throwing toString cannot hijack a refusal (CLDMV/digby#39)", () => {
+		const evil = { toString() { throw new Error("boom"); } };
+		// today: checkType's message interpolates String(t) on the caller's object — the raw Error("boom") escapes
+		expect(code(() => encodeMessage({ id: 1, questions: [{ name: "q.example.", type: evil }] }))).toBe("NOT_CLONEABLE");
+		// a plain object's String() is inert — the refusal names the value without running caller code
+		expect(code(() => encodeMessage({ id: 1, questions: [{ name: "q.example.", type: {} }] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("prototype getters are not read: a class-built record encodes as plain data (CLDMV/digby#39)", () => {
+		class Rec {
+			get name() {
+				return "x.example.";
+			}
+			get type() {
+				return TYPE.A;
+			}
+		}
+		// the input contract: own enumerable properties only — prototype getters are not read, so this record has neither a
+		// name nor a type and is refused
+		expect(code(() => encodeMessage({ id: 1, answers: [new Rec()] }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 });

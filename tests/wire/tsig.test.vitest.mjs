@@ -103,33 +103,40 @@ describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 		expect(err.message).toMatch(/original ID of type string/);
 	});
 
-	it("reads each record's type once: the TSIG-present refusal names TSIG_PRESENT (CLDMV/digby#39)", () => {
+	it("an overridden map on a section list cannot resurrect the caller's records (CLDMV/digby#39)", () => {
+		class L extends Array {
+			map() {
+				return this;
+			}
+		}
 		let reads = 0;
 		const sneaky = {
-			get type() {
-				return ++reads === 1 ? TYPE.TSIG : TYPE.A;
-			},
 			name: "key.example.",
 			class: CLASS.ANY,
 			ttl: 0,
-			data: tsigRecord(1).data
-		};
-		// the TSIG-present check and the encode act on the same one read of rec.type: the TSIG is shown once and refused as
-		// TSIG_PRESENT — and the encode never gets a second read that could see an A record instead
-		expect(code(() => encodeCapped(message({ additionals: [A(1), sneaky] }), { limit: 400 }))).toBe("TSIG_PRESENT");
-		// a getter that hides the TSIG behind a valid type on that one read never sends the TSIG either: the record encodes
-		// as the type the one read produced, whose rdata cannot carry TSIG data
-		let flips = 0;
-		const flip = {
+			data: tsigRecord(1).data,
 			get type() {
-				return ++flips === 1 ? TYPE.A : TYPE.TSIG;
-			},
-			name: "key.example.",
-			class: CLASS.ANY,
-			ttl: 0,
-			data: tsigRecord(1).data
+				return ++reads === 1 ? TYPE.A : TYPE.TSIG;
+			}
 		};
-		expect(() => encodeCapped(message({ additionals: [A(1), flip] }), { limit: 400 })).toThrow(WireError);
+		// round 3 copied each section with the caller's own .map(), whose override returned the original array: the
+		// TSIG-present check read the A type and the encode read it again as TSIG — the record went out as a TSIG with no
+		// TSIG_PRESENT refusal, a regression against the one-copy rule. The copy is a structuredClone: the subclass and its
+		// map do not survive it, the type is read the once, and the TSIG never reaches the wire — the A rdata cannot carry
+		// TSIG data, so the encode refuses.
+		const additionals = L.from([A(1), sneaky]);
+		expect(code(() => encodeCapped(message({ additionals }), { limit: 400 }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("a reservation is single-use: appendTsig spends it (CLDMV/digby#39)", () => {
+		const tsig = tsigRecord(1);
+		const need = tsigRecordSize(tsig);
+		const capped = encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: need });
+		const signed = appendTsig(capped, tsig);
+		expect(signed.length).toBe(capped.bytes.length + need);
+		// a second append against the same encodeCapped result is refused: one reservation cannot carry two TSIG records
+		// (two records over the same unsigned bytes would each claim the MAC)
+		expect(code(() => appendTsig(capped, tsig))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
 	it("the property holds across generated messages and TSIG records", () => {

@@ -256,6 +256,15 @@ describe("formatRecord validates its input (CLDMV/digby#37)", () => {
 		expect(formatRecord({ name: "a.", ttl: 0, type: 999, data: { data: new Uint8Array(0) } })).toBe("a. 0 IN TYPE999 \\# 0");
 	});
 
+	it("refuses OPT with zero-length rdata under class ANY or NONE: typed on the wire, generic in text (CLDMV/digby#38)", () => {
+		// OPT's rdata is `{ options }`; with no options it encodes to zero octets and would print `\# 0`, which parses back
+		// as data: null — the same hole the untyped generic form had, which the old shape-only check did not see
+		expect(code(() => formatRecord({ name: "x.", ttl: 0, class: 255, type: TYPE.OPT, data: { options: [] } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "x.", ttl: 0, class: 254, type: TYPE.OPT, data: { options: [] } }))).toBe("VALUE_OUT_OF_RANGE");
+		// class IN keeps its line: there `\# 0` is ordinary zero-length octets and re-parses to itself
+		expect(formatRecord({ name: "x.", ttl: 0, type: TYPE.OPT, data: { options: [] } })).toBe("x. 0 IN OPT \\# 0");
+	});
+
 	it("refuses what parseRecord refuses: record type 65535, and empty rdata for a type that must carry rdata (CLDMV/digby#38)", () => {
 		// type 65535 is reserved at the record layer, yet formatRecord printed "a. 1 IN TYPE65535 \# 0"
 		expect(code(() => formatRecord({ name: "a.", ttl: 1, type: 65535, data: { data: new Uint8Array(0) } }))).toBe("VALUE_OUT_OF_RANGE");

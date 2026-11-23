@@ -127,7 +127,8 @@ const CASES = [
 		"0b 686d61632d736861323536 00 0000 6553f100 012c 0004 01020304 1234 0000 0000"
 	],
 	["TYPE1234", "\\# 3 abcdef", "\\# 3 ABCDEF", { data: hex.from("abcdef") }, "abcdef"],
-	["TYPE65535", "\\# 0", "\\# 0", { data: new Uint8Array(0) }, ""],
+	// no TYPE65535 row: the standalone entries refuse the reserved types 0 and 65535 (CLDMV/digby#38), so there is no
+	// generic rdata of type 65535 to characterize — see the refusal tests below
 	["HINFO", "\\# 4 01410142", "\\# 4 01410142", { data: hex.from("01410142") }, "01410142"]
 ];
 
@@ -386,5 +387,27 @@ describe("formatRdata validates its input (CLDMV/digby#37)", () => {
 		expect(code(() => formatRdata(999, { data: new Uint8Array(70000) }))).toBe("MESSAGE_TOO_LARGE");
 		// the boundary still formats: 65,535 octets is exactly the rdata length field's maximum
 		expect(formatRdata(999, { data: new Uint8Array(65535) })).toHaveLength(9 + 2 * 65535);
+	});
+});
+
+describe("the standalone entries refuse reserved and non-integer types (CLDMV/digby#38)", () => {
+	it("formatRdata and encodeRdataBytes refuse type 0, type 65535 and non-integer types", () => {
+		const data = { data: new Uint8Array([1, 2, 3]) };
+		// today: type 0 and 65535 fall through to the RFC 3597 generic form and encode, and a non-integer type stringifies
+		// into the mnemonic lookup
+		for (const entry of [formatRdata, encodeRdataBytes]) {
+			expect(code(() => entry(0, data))).toBe("VALUE_OUT_OF_RANGE");
+			expect(code(() => entry(65535, data))).toBe("VALUE_OUT_OF_RANGE");
+			expect(code(() => entry(1.5, data))).toBe("VALUE_OUT_OF_RANGE");
+			expect(code(() => entry("A", data))).toBe("VALUE_OUT_OF_RANGE");
+		}
+	});
+
+	it("parseRdata refuses type 0, type 65535 and non-integer types", () => {
+		// today: type 0 with the generic form decodes as opaque octets, the same value the record layer refuses
+		expect(code(() => parseRdata(0, "\\# 1 01"))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => parseRdata(65535, "\\# 1 01"))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => parseRdata(65535, "\\# 0"))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => parseRdata(1.5, "10.0.0.1"))).toBe("VALUE_OUT_OF_RANGE");
 	});
 });
