@@ -13,6 +13,7 @@
  */
 
 import { CLASS, classFromString, classToString, isClassToken, typeFromString, typeToString } from "./constants.mjs";
+import { cloneOptions } from "./buffer.mjs";
 import { WireError, WireErrorCode, cloneInput, describe, fail } from "./errors.mjs";
 import { RDATA_REQUIRED } from "./message.mjs";
 import { canonicalName } from "./names.mjs";
@@ -60,9 +61,12 @@ const isTtlToken = (text) => /^\d+$/.test(text) || /^(?:\d+[smhdwSMHDW])+$/.test
  * @param {number} [options.class=1] - the class when the record gives none
  * @returns {{ name: string, ttl: number, class: number, type: number, data: object | null }}
  */
-export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass = CLASS.IN } = {}) {
+export function parseRecord(text, options) {
+	// the options are guarded like every other argument (CLDMV/digby#39): null and undefined mean "no options", and the
+	// copy is read exactly once
+	const o = cloneOptions(options, "the parseRecord options");
 	const t = new Tokens(tokenize(text));
-	const name = canonicalName(t.word("owner name"), origin);
+	const name = canonicalName(t.word("owner name"), o.origin);
 	let ttl;
 	let clsTok;
 	for (let k = 0; k < 2 && !t.done; k++) {
@@ -79,9 +83,9 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
 	const type = typeFromString(t.word("type"));
 	// type 0 and the top of the type range are reserved (RFC 6895); no record may use either (CLDMV/digby#38)
 	if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.BAD_PRESENTATION, `record type ${type} is reserved`);
-	ttl ??= defaultTtl;
+	ttl ??= o.ttl;
 	if (ttl === undefined) fail(WireErrorCode.BAD_PRESENTATION, "the record has no TTL and no default was given");
-	const cls = clsTok ?? defaultClass;
+	const cls = clsTok ?? (o.class ?? CLASS.IN);
 	// No rdata text at all is the RFC 2136 update form, the same rule readRecord and writeRecord apply (CLDMV/digby#37):
 	// empty rdata is only a class ANY or NONE record — every other class with no rdata stays refused. The zero-length
 	// generic form (`\# 0`) is the update form too under ANY / NONE; parseRdataTokens maps it the way the wire reader

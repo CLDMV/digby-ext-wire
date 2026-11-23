@@ -29,7 +29,7 @@
  * with a hole.
  */
 
-import { MAX_MESSAGE, Reader, Writer, asBytes, checkInt } from "./buffer.mjs";
+import { MAX_MESSAGE, Reader, Writer, asBytes, checkInt, cloneOptions } from "./buffer.mjs";
 import { CLASS, OPCODE, TYPE, typeToString } from "./constants.mjs";
 import { joinOptTtl, readOptions, splitOptTtl, writeOptions } from "./edns.mjs";
 import { WireError, WireErrorCode, cloneInput, describe, fail } from "./errors.mjs";
@@ -86,11 +86,14 @@ export const wireCounters = { recordWrites: 0, scratchEncodes: 0, modelWork: 0 }
  * @returns {object} the message (shape above)
  * @throws {WireError} for any malformed input; nothing else
  */
-export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, maxNameOctets = MAX_NAME_OCTETS } = {}) {
+export function decodeMessage(input, options) {
+	// the options are guarded like every other argument (CLDMV/digby#39): null and undefined mean "no options", and the
+	// copy is read exactly once
+	const o = cloneOptions(options, "the decode options");
 	const bytes = asBytes(input);
 	if (bytes.length > MAX_MESSAGE) fail(WireErrorCode.INPUT_TOO_LARGE, `a message is at most ${MAX_MESSAGE} octets, got ${bytes.length}`);
-	checkInt(maxQuestions, 0xffff, "maxQuestions");
-	checkInt(maxNameOctets, Number.MAX_SAFE_INTEGER, "maxNameOctets");
+	checkInt(o.maxQuestions ?? 1, 0xffff, "maxQuestions");
+	checkInt(o.maxNameOctets ?? MAX_NAME_OCTETS, Number.MAX_SAFE_INTEGER, "maxNameOctets");
 	const r = new Reader(bytes);
 	if (bytes.length < HEADER_SIZE) fail(WireErrorCode.TRUNCATED, `a message is at least ${HEADER_SIZE} octets, got ${bytes.length}`, 0);
 	const id = r.u16();
@@ -102,7 +105,7 @@ export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, 
 	// count of newly materialised name octets against the cap.
 	r.nameMemo = new Map();
 	r.nameOctets = 0;
-	r.maxNameOctets = maxNameOctets;
+	r.maxNameOctets = o.maxNameOctets ?? MAX_NAME_OCTETS;
 
 	const questions = [];
 	for (let i = 0; i < qd; i++) {
@@ -133,7 +136,7 @@ export function decodeMessage(input, { allowTrailing = false, maxQuestions = 1, 
 			list.push(rec);
 		}
 	}
-	if (r.pos !== bytes.length && !allowTrailing) fail(WireErrorCode.TRAILING_DATA, `${bytes.length - r.pos} octet(s) after the last section`, r.pos);
+	if (r.pos !== bytes.length && !(o.allowTrailing ?? false)) fail(WireErrorCode.TRAILING_DATA, `${bytes.length - r.pos} octet(s) after the last section`, r.pos);
 	message.rcode = (extendedRcode << 4) | rcodeLow;
 	return message;
 }
@@ -181,8 +184,11 @@ function readRecord(r) {
  * @returns {Uint8Array}
  * @throws {WireError} TSIG_PRESENT when the message already carries a TSIG record (CLDMV/digby#39)
  */
-export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true } = {}) {
-	checkInt(maxSize, MAX_MESSAGE, "maxSize");
+export function encodeMessage(message, options) {
+	// the options are guarded like every other argument (CLDMV/digby#39): null and undefined mean "no options", and the
+	// copy is read exactly once
+	const o = cloneOptions(options, "the encodeMessage options");
+	checkInt(o.maxSize ?? MAX_MESSAGE, MAX_MESSAGE, "maxSize");
 	// a TSIG never passes through an encode (CLDMV/digby#39): re-encoding a signed message cannot keep the MAC
 	// valid (RFC 8945 5), so passing one through is never useful — signing happens only via appendTsig
 	const snap = snapshotMessage(cloneInput(message, "a message"));
@@ -190,7 +196,7 @@ export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true 
 		for (const rec of section)
 			if (rec.type === TYPE.TSIG)
 				fail(WireErrorCode.TSIG_PRESENT, "the message already carries a TSIG record: re-encoding it cannot keep the MAC valid — encode unsigned with reserveTsig, sign, then appendTsig (CLDMV/digby#39)");
-	return encodeCappedRaw(snap, { limit: maxSize, truncate: false, compress }).bytes;
+	return encodeCappedRaw(snap, { limit: o.maxSize ?? MAX_MESSAGE, truncate: false, compress: o.compress ?? true }).bytes;
 }
 
 /**
@@ -310,7 +316,14 @@ const reservedEncodes = new WeakMap();
  *   even the header, questions and tail exceed the limit; TRUNCATION_REFUSED when truncating would corrupt an UPDATE or a
  *   transfer, or when the message does not carry exactly one question (CLDMV/digby#43)
  */
-export function encodeCapped(message, { limit, truncate = true, compress = true, reserveTsig = 0 } = {}) {
+export function encodeCapped(message, options) {
+	// the options are guarded like every other argument (CLDMV/digby#39): null and undefined mean "no options", and the
+	// copy is read exactly once
+	const o = cloneOptions(options, "the encodeCapped options");
+	const limit = o.limit;
+	const truncate = o.truncate ?? true;
+	const compress = o.compress ?? true;
+	const reserveTsig = o.reserveTsig ?? 0;
 	checkInt(limit, MAX_MESSAGE, "limit");
 	checkInt(reserveTsig, MAX_MESSAGE, "reserveTsig");
 	if (reserveTsig > limit) fail(WireErrorCode.MESSAGE_TOO_LARGE, `reserving ${reserveTsig} octets of the ${limit}-octet limit leaves no room for a message`);

@@ -14,7 +14,7 @@
  * logic can roll back a record set that did not fit.
  */
 
-import { WireErrorCode, describe, fail } from "./errors.mjs";
+import { WireError, WireErrorCode, cloneInput, describe, fail } from "./errors.mjs";
 
 /** The largest DNS message: the TCP length prefix is 16 bits. */
 export const MAX_MESSAGE = 65535;
@@ -36,6 +36,46 @@ export function asBytes(bytes) {
 		// fall through to the refusal
 	}
 	return fail(WireErrorCode.VALUE_OUT_OF_RANGE, "expected a Uint8Array, an ArrayBuffer or an ArrayBufferView");
+}
+
+/**
+ * Guard a public entry's options argument (CLDMV/digby#39): `null` and `undefined` mean "no options"; any other
+ * non-object is refused VALUE_OUT_OF_RANGE; and the options are copied once with structuredClone — a getter that
+ * throws, a Proxy (a revoked one included) or a function option value is the NOT_CLONEABLE refusal, never a raw
+ * TypeError, and every option is read exactly once.
+ * @param {unknown} options
+ * @param {string} what
+ * @returns {object}
+ */
+export function cloneOptions(options, what) {
+	if (options === null || options === undefined) return {};
+	// `typeof` runs no caller code, but the walk and the copy below can (a revoked Proxy's Object.keys throws) — both
+	// sit inside the refusal they feed
+	let tag;
+	try {
+		tag = typeof options;
+	} catch {
+		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
+	}
+	if (tag !== "object") fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be an object, got ${describe(options)}`);
+	return cloneInput(options, what);
+}
+
+/**
+ * Read one field of a caller object without ever throwing (CLDMV/digby#39): a getter that throws, a Proxy whose traps
+ * throw, and a revoked Proxy are the NOT_CLONEABLE refusal; a missing property reads as undefined. Each call reads the
+ * field exactly once, so a getter cannot show the check one value and the use another.
+ * @param {unknown} o
+ * @param {string} key
+ * @returns {unknown}
+ */
+export function readField(o, key) {
+	try {
+		return o?.[key];
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		fail(WireErrorCode.NOT_CLONEABLE, "the input is not structured-clone data (CLDMV/digby#39)");
+	}
 }
 
 /** A forward-only reader over a message, bounded by `end`. */
