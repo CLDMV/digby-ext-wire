@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { decodeMessage, encodeCapped, wireCounters } from "../../src/lib/wire/message.mjs";
+import { decodeMessage, encodeCapped, encodeMessage, wireCounters } from "../../src/lib/wire/message.mjs";
 
 // A 100-label apex of one-octet labels: 201 wire octets, the "long apex" shape of CLDMV/digby#40.
 const apex = Array.from({ length: 100 }, (_, i) => String.fromCharCode(0x61 + (i % 26))).join(".") + ".";
@@ -149,5 +149,50 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 		// the work is bounded by the output (the kept records), not the input: past the limit, more input records
 		// cost grouping only, no record writes
 		expect(large, `${large} writes at 320k records vs ${small} at 5k`).toBeLessThanOrEqual(2 * small + 1000);
+	}, 120_000);
+
+	// The shape the round-4 exact trial goes quadratic on: M two-record NS sets whose first records all come first
+	// (rdata `x.example.`, compressing against the question) and whose second records all come last, sharing a long
+	// rdata suffix no other record carries. Every set's shift-gate measurement is flagged (the pending first records
+	// between each set's own two records bound the shift far past the registration boundary), so every set falls to
+	// the exact trial — and each trial re-encodes the kept second records sitting between the candidate's two, which
+	// grows with the set index: quadratic record writes on a linear message (CLDMV/digby#43).
+	const pairSuffix = "abc".repeat(20); // a 60-octet label only the second records' rdata carries
+	const paired = (M) => ({
+		id: 0x0201,
+		flags: { qr: true, ra: true },
+		questions: [{ name: "example.", type: TYPE.NS, class: CLASS.IN }],
+		answers: [
+			...Array.from({ length: M }, (_, j) => ({ name: `n${j}.example.`, type: TYPE.NS, class: CLASS.IN, ttl: 0, data: { target: "x.example." } })),
+			...Array.from({ length: M }, (_, j) => ({ name: `n${j}.example.`, type: TYPE.NS, class: CLASS.IN, ttl: 0, data: { target: `m${j}.${pairSuffix}.` } }))
+		]
+	});
+
+	it("bounds the trials' writes on interleaved pending sets whose second records share a suffix (CLDMV/digby#43)", () => {
+		for (const M of [100, 200, 400, 800]) {
+			const records = 2 * M;
+			const m = paired(M);
+			const full = encodeMessage(m).length;
+			for (const [tag, limit] of [
+				["full", full],
+				["one under full", full - 1],
+				["90%", Math.floor((full * 9) / 10)]
+			]) {
+				wireCounters.recordWrites = 0;
+				const r = encodeCapped(m, { limit });
+				const writes = wireCounters.recordWrites;
+				const d = decodeMessage(r.bytes);
+				expect(d.flags.tc, `M=${M} ${tag}: the truncation flag`).toBe(limit < full);
+				// the survivors are whole RRsets in first-seen order, each complete
+				const counts = new Map();
+				for (const rec of d.answers) counts.set(rec.name, (counts.get(rec.name) ?? 0) + 1);
+				for (const [name, c] of counts) expect(c, `M=${M} ${tag}: ${name} complete`).toBe(2);
+				expect(r.bytes.length, `M=${M} ${tag}: within the limit`).toBeLessThanOrEqual(limit);
+				// every record is written a small constant number of times: the round-4 trials wrote each record
+				// ~24-200 times on this shape (a fresh exact trial per set, each re-encoding the kept second
+				// records sitting between the candidate's two), growing with M
+				expect(writes, `M=${M} ${tag}: ${writes} record writes for ${records} records`).toBeLessThanOrEqual(6 * records);
+			}
+		}
 	}, 120_000);
 });
