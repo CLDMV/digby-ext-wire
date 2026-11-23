@@ -119,7 +119,16 @@ const MAX_LIST = 0xffff;
  *   {@link MAX_LIST} that is not dense, or a list with a hole
  */
 export function cloneInput(value, what) {
-	boundClone(value, what);
+	try {
+		boundClone(value, what);
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		// the walk reads the original through `typeof`, `Array.isArray`, `Object.getPrototypeOf`, `Object.keys` and
+		// `Object.getOwnPropertyDescriptor` — on a Proxy these fire the caller's traps, and on a revoked Proxy even
+		// `typeof` throws. Any such throw means the input is not structured-clone data either, so it is mapped to the
+		// documented refusal here, before it can escape as a raw TypeError or RangeError (CLDMV/digby#39)
+		fail(WireErrorCode.NOT_CLONEABLE, `${what} is not structured-clone data`);
+	}
 	let clone;
 	try {
 		clone = structuredClone(value);

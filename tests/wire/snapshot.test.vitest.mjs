@@ -459,3 +459,34 @@ describe("one structuredClone of the caller's input (CLDMV/digby#39, round 4)", 
 		expect(code(() => encodeMessage({ id: 1, answers: [new Rec()] }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 });
+
+describe("caller traps fire inside the NOT_CLONEABLE mapping, never before it (CLDMV/digby#39, round 5)", () => {
+	it("a revoked Proxy is refused wherever the pre-clone walk or a pre-check touches it", () => {
+		const { proxy, revoke } = Proxy.revocable({}, {});
+		revoke();
+		// today: boundClone's `typeof` on the revoked Proxy throws a raw TypeError, before NOT_CLONEABLE can map the failure
+		expect(code(() => encodeMessage(proxy))).toBe("NOT_CLONEABLE");
+		expect(code(() => encodeMessage({ id: 1, answers: [proxy] }))).toBe("NOT_CLONEABLE");
+		// today: formatRecord's shape check reads the caller's object before the clone can refuse it
+		expect(code(() => formatRecord(proxy))).toBe("NOT_CLONEABLE");
+		// today: appendTsig reads `typeof capped` before its refusal can map the failure
+		expect(code(() => appendTsig(proxy, tsigRecord(1)))).toBe("VALUE_OUT_OF_RANGE");
+		// a genuine result with a throwing `bytes` getter: today the raw RangeError escapes the read
+		const need = tsigRecordSize(tsigRecord(1));
+		const capped = encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: need });
+		Object.defineProperty(capped, "bytes", { get() { throw new RangeError("bytes"); } });
+		expect(code(() => appendTsig(capped, tsigRecord(1)))).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("a Proxy trap that throws is mapped to NOT_CLONEABLE", () => {
+		// today: the pre-clone walk calls Object.getPrototypeOf on the caller's object — the raw RangeError escapes
+		const proto = new Proxy({ id: 1 }, { getPrototypeOf() { throw new RangeError("getPrototypeOf"); } });
+		expect(code(() => encodeMessage(proto))).toBe("NOT_CLONEABLE");
+		// today: the walk reads property descriptors over the record's own keys — the raw RangeError escapes
+		const gopd = new Proxy(A(1), { getOwnPropertyDescriptor() { throw new RangeError("getOwnPropertyDescriptor"); } });
+		expect(code(() => encodeMessage({ id: 1, answers: [gopd] }))).toBe("NOT_CLONEABLE");
+		// today: the walk reads the section list's own keys — the raw RangeError escapes
+		const ownKeys = new Proxy([A(1)], { ownKeys() { throw new RangeError("ownKeys"); } });
+		expect(code(() => encodeMessage({ id: 1, answers: ownKeys }))).toBe("NOT_CLONEABLE");
+	});
+});

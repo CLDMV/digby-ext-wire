@@ -326,14 +326,28 @@ export function encodeCapped(message, { limit, truncate = true, compress = true,
  * @throws {WireError} VALUE_OUT_OF_RANGE for anything that is not a fresh, untouched, matching reservation
  */
 export function appendTsig(capped, tsigRecord) {
-	const state = typeof capped === "object" && capped !== null ? reservedEncodes.get(capped) : undefined;
+	// `typeof capped` and the `capped.bytes` read can fire caller traps — a revoked Proxy throws for `typeof`, a
+	// Proxy's `get` trap can throw — so both sit inside the refusal they feed: any throw means the object is not a
+	// genuine encodeCapped result (CLDMV/digby#39)
+	let state;
+	try {
+		state = capped !== null && typeof capped === "object" ? reservedEncodes.get(capped) : undefined;
+	} catch {
+		state = undefined; // a revoked Proxy: not a reserved encode either way
+	}
 	if (state === undefined) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "appendTsig takes the object encodeCapped returned with reserveTsig set (CLDMV/digby#39)");
 	const { snapshot: bytes, reserved } = state;
+	let givenBytes;
+	try {
+		givenBytes = capped.bytes;
+	} catch {
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "appendTsig takes the object encodeCapped returned with reserveTsig set (CLDMV/digby#39)");
+	}
 	// The caller's bytes are copied once and compared element by element against the codec's own snapshot — the copy's
 	// length is the real octet count (a Uint8Array subclass's length getter does not survive the copy), the comparison never
 	// goes through a method the array could override, and the message is written from the codec's snapshot, so the bytes
 	// written are exactly the bytes compared (CLDMV/digby#39).
-	const given = cloneInput(capped.bytes, "the unsigned bytes");
+	const given = cloneInput(givenBytes, "the unsigned bytes");
 	if (!(given instanceof Uint8Array) || given.length !== bytes.length) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
 	for (let i = 0; i < bytes.length; i++) if (given[i] !== bytes[i]) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
 	const rec = snapshotRecord(cloneInput(tsigRecord, "TSIG record"), "TSIG record");

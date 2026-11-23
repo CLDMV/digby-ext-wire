@@ -13,7 +13,7 @@
  */
 
 import { CLASS, classFromString, classToString, isClassToken, typeFromString, typeToString } from "./constants.mjs";
-import { WireErrorCode, cloneInput, fail } from "./errors.mjs";
+import { WireError, WireErrorCode, cloneInput, fail } from "./errors.mjs";
 import { RDATA_REQUIRED } from "./message.mjs";
 import { canonicalName } from "./names.mjs";
 import { encodeRdataBytes, formatGeneric, formatRdata, isGenericForm, parseRdataTokens } from "./rdata/index.mjs";
@@ -103,7 +103,17 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
  *   (including MESSAGE_TOO_LARGE for rdata past a record's 65,535-octet limit)
  */
 export function formatRecord(rec) {
-	if (rec === null || typeof rec !== "object" || Array.isArray(rec)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a record must be an object");
+	// the shape check reads the caller's object through `typeof` and `Array.isArray` — a revoked Proxy throws for
+	// `typeof` — so it sits inside the same mapping to NOT_CLONEABLE as the clone walk: any other throw from the
+	// caller's traps is the input not being structured-clone data (CLDMV/digby#39)
+	let shaped = true;
+	try {
+		if (rec === null || typeof rec !== "object" || Array.isArray(rec)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a record must be an object");
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		shaped = false;
+	}
+	if (!shaped) fail(WireErrorCode.NOT_CLONEABLE, "a record is not structured-clone data");
 	// one copy of the caller's record (CLDMV/digby#39): the input is copied once with structuredClone and every field is read
 	// exactly once from the copy, so the validation and the line see the same values — a getter cannot show the checks one
 	// value and the printed line another
