@@ -113,7 +113,8 @@ describe("one snapshot of the caller's input (CLDMV/digby#39)", () => {
 				flags: { qr: true },
 				rcode: 0,
 				// one question: a truncating encode of a message without exactly one question is refused (CLDMV/digby#43).
-				// q.test. shares no suffix with the records below, so it costs the packet exactly 11 octets
+				// q.test. shares no suffix with the records below, so it costs the packet exactly 12 octets and the kept
+				// set is 49 (12 head + 12 question + 25 for the first A record) — limit 60 still truncates at the TXT
 				questions: [{ name: "q.test.", type: TYPE.A, class: 1 }],
 				answers: [rec, TXT("big.example.", 400), A(2)],
 				authorities: [],
@@ -173,9 +174,9 @@ describe("one snapshot of the caller's input (CLDMV/digby#39)", () => {
 		// the grouping must see the type the one read produced: the two x. A records share one RRset and go out together —
 		// never the split pair a second read produces, where only the first record leaves and the set travels partly
 		// one question: a truncating encode of a message without exactly one question is refused (CLDMV/digby#43).
-		// q.test. shares no suffix with the records below, so it costs the packet exactly 11 octets and the kept set
-		// (12 head + 11 question + 24 flip + 16 for a5's compressed owner) is 63 — the window moves 60..483 to 63..486
-		const { bytes, truncated } = encodeCapped(message({ questions: [{ name: "q.test.", type: TYPE.A, class: 1 }], answers: [flip, TXT("big.example.", 400), a5] }), { limit: 63 });
+		// q.test. shares no suffix with the records below, so it costs the packet exactly 12 octets and the kept set
+		// (12 head + 12 question + 25 flip + 16 for a5's compressed owner) is 65 — the window moves 60..477 to 65..482
+		const { bytes, truncated } = encodeCapped(message({ questions: [{ name: "q.test.", type: TYPE.A, class: 1 }], answers: [flip, TXT("big.example.", 400), a5] }), { limit: 65 });
 		const d = decodeMessage(bytes);
 		expect(d.answers).toEqual([{ name: "x.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "1.2.3.4" } }, a5]);
 		expect(truncated).toBe(true);
