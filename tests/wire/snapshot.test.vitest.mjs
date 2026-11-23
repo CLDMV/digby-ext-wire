@@ -490,3 +490,20 @@ describe("caller traps fire inside the NOT_CLONEABLE mapping, never before it (C
 		expect(code(() => encodeMessage({ id: 1, answers: ownKeys }))).toBe("NOT_CLONEABLE");
 	});
 });
+
+describe("the NOT_CLONEABLE refusal never reads the thrown value (CLDMV/digby#39, round 5)", () => {
+	const rec = (data) => ({ name: "x.example.", type: 999, class: 1, ttl: 0, data });
+	it("a getter that throws null has no .message to read", () => {
+		// today: the catch interpolates `${err.message}` — err is the caller's thrown null, and reading .message off it
+		// throws a raw TypeError
+		expect(code(() => encodeMessage({ id: 1, answers: [rec({ get data() { throw null; } })] }))).toBe("NOT_CLONEABLE");
+	});
+	it("a getter that throws a Symbol cannot be stringified", () => {
+		// today: `${err.message}` on a Symbol throws "Cannot convert a Symbol value to a string"
+		expect(code(() => encodeMessage({ id: 1, answers: [rec({ get data() { throw Symbol("boom"); } })] }))).toBe("NOT_CLONEABLE");
+	});
+	it("a getter that throws an object with a hostile message is never stringified", () => {
+		// today: `${err.message}` invokes the thrown value's message's toString — the raw Error("boom") escapes
+		expect(code(() => encodeMessage({ id: 1, answers: [rec({ get data() { throw { message: { toString() { throw new Error("boom"); } } }; } })] }))).toBe("NOT_CLONEABLE");
+	});
+});

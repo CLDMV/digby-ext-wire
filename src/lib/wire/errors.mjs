@@ -132,11 +132,13 @@ export function cloneInput(value, what) {
 	let clone;
 	try {
 		clone = structuredClone(value);
-	} catch (err) {
+	} catch {
 		// structuredClone refuses functions, Proxies and symbols with DataCloneError (cycles it takes), and its
 		// serializer is recursive, so extreme nesting surfaces as a RangeError — both mean the input is not
-		// structured-clone data
-		fail(WireErrorCode.NOT_CLONEABLE, `${what} is not structured-clone data: ${err.message}`);
+		// structured-clone data. The thrown value is whatever the caller's getter threw (a null, a Symbol, an object)
+		// and is never read: it has no `.message` to read, or its message is itself hostile to stringify — either way
+		// the refusal is the fixed one (CLDMV/digby#39).
+		fail(WireErrorCode.NOT_CLONEABLE, `${what} is not structured-clone data`);
 	}
 	checkClone(clone, what);
 	return clone;
