@@ -25,7 +25,8 @@ import { describe, expect, it } from "vitest";
 import { Writer } from "../../src/lib/wire/buffer.mjs";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { writeTypeBitmap } from "../../src/lib/wire/rdata/dnssec.mjs";
-import { encodeRdataBytes, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { encodeRdataBytes, formatGeneric, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { TcpFramer, frameTcp } from "../../src/lib/wire/limits.mjs";
 import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
 import { parseName } from "../../src/lib/wire/names.mjs";
 import { formatRecord } from "../../src/lib/wire/presentation.mjs";
@@ -568,6 +569,16 @@ describe("the public surface throws only WireError, for any value in any argumen
 	let flips = 0;
 	const flipGetter = { get v() { return ++flips % 2 ? { x: 1 } : undefined; } };
 	const toPrimitiveThrower = { [Symbol.toPrimitive]() { throw null; } };
+	// a real Uint8Array over a plain ArrayBuffer whose own `buffer` property (data or getter) hides a SharedArrayBuffer
+	// (CLDMV/digby#39, round 7): the intrinsic buffer is the plain one, so the read must use the plain octets and never
+	// the shared memory behind the shadow
+	const shadowedBuffer = (getter) => {
+		const v = new Uint8Array([9, 8, 7]);
+		const sab = new SharedArrayBuffer(3);
+		new Uint8Array(sab).set([1, 2, 3]);
+		Object.defineProperty(v, "buffer", getter ? { get: () => sab } : { value: sab });
+		return v;
+	};
 	const hostiles = [
 		["a revoked Proxy", revokedProxy],
 		["a Proxy whose get trap throws", throwingGet],
@@ -586,7 +597,9 @@ describe("the public surface throws only WireError, for any value in any argumen
 		["a deep array", deep],
 		["a getter that alternates its value", flipGetter],
 		["a Symbol.toPrimitive that throws", toPrimitiveThrower],
-		["a BigInt64Array", new BigInt64Array(4)]
+		["a BigInt64Array", new BigInt64Array(4)],
+		["a Uint8Array whose own buffer property hides a SharedArrayBuffer", shadowedBuffer(false)],
+		["a Uint8Array whose own buffer getter hides a SharedArrayBuffer", shadowedBuffer(true)]
 	];
 
 	// a valid baseline per ENTRY — class constructors and prototype methods included — so the sweep replaces one argument
@@ -800,5 +813,34 @@ describe("a SharedArrayBuffer-backed view is refused, not shared (CLDMV/digby#39
 	it("a bare SharedArrayBuffer is refused too", () => {
 		const sab = new SharedArrayBuffer(8);
 		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: { data: sab } }] }))).toBe("NOT_CLONEABLE");
+	});
+	it("a shadowed buffer, byteOffset or byteLength cannot redirect the byte read (CLDMV/digby#39, round 7)", () => {
+		const real = encodeMessage(message({ questions: [{ name: "q.example.", type: TYPE.A, class: 1 }] }));
+		const hex = [...real].map((b) => b.toString(16).padStart(2, "0")).join("");
+		const sab = new SharedArrayBuffer(real.length);
+		new Uint8Array(sab).fill(0xff);
+		// today: the view is built from the caller's own `buffer` / `byteOffset` / `byteLength` properties, so an own
+		// `buffer` (data or getter) pointing at a SharedArrayBuffer makes decodeMessage, frameTcp, TcpFramer.push and
+		// formatGeneric read — and print — the shared octets instead of the view's
+		for (const [what, d] of [
+			["an own buffer property", { value: sab }],
+			["an own buffer getter", { get: () => sab }]
+		]) {
+			const v = new Uint8Array(real);
+			Object.defineProperty(v, "buffer", d);
+			expect(formatGeneric(v), what).toBe(`\\# ${real.length} ${hex}`);
+			expect([...frameTcp(v)], what).toEqual([real.length >>> 8, real.length & 0xff, ...real]);
+			expect(new TcpFramer().push(v), what).toEqual([real]);
+			expect(decodeMessage(v), what).toEqual(decodeMessage(real));
+		}
+		// a shadowed offset or length cannot make the view construction throw a raw RangeError, nor read past the view
+		const off = new Uint8Array(real);
+		Object.defineProperty(off, "byteOffset", { value: 1e9 });
+		const len = new Uint8Array(real);
+		Object.defineProperty(len, "byteLength", { value: 1e9 });
+		expect(formatGeneric(off)).toBe(formatGeneric(real));
+		expect(formatGeneric(len)).toBe(formatGeneric(real));
+		expect(decodeMessage(off)).toEqual(decodeMessage(real));
+		expect(decodeMessage(len)).toEqual(decodeMessage(real));
 	});
 });
