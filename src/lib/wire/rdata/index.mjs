@@ -13,7 +13,7 @@
 import { MAX_MESSAGE, Reader, Writer } from "../buffer.mjs";
 import { CLASS, TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
-import { WireErrorCode, cloneInput, describe, fail } from "../errors.mjs";
+import { WireError, WireErrorCode, cloneInput, describe, fail } from "../errors.mjs";
 import { Tokens, fromHex, toHex, tokenize } from "../text.mjs";
 import { A, AAAA, CAA, CNAME, MX, NAPTR, NS, PTR, SOA, SRV, SSHFP, TLSA, TXT } from "./basic.mjs";
 import { badRdata, bytes, obj } from "./common.mjs";
@@ -113,9 +113,35 @@ export function decodeRdata(type, r) {
  * @returns {object}
  */
 export function decodeRdataBytes(type, octets) {
-	const r = new Reader(bytes(octets, "rdata"));
+	// the standalone type rules, the same ones formatRdata, encodeRdataBytes and parseRdata apply (CLDMV/digby#38):
+	// reserved and non-integer types are refused — SIG stays a legal type (SIG(0) needs typeCovered 0, RFC 2931)
+	checkRdataType(type);
+	// the octets are copied once, before the decode reads them (CLDMV/digby#39): the length comes off the caller's
+	// view a single time and the decode reads the copy — a Proxy over a typed array (whose traps can throw or lie), a
+	// faked brand, or a view over shared memory is never consulted again while decoding. The instanceof and the
+	// buffer/byteLength reads can fire the caller's traps, so they sit inside the refusal they feed.
+	let src;
+	try {
+		src = bytes(octets, "rdata");
+		// a view over a SharedArrayBuffer is refused like any entry's input: the decode must not read memory the
+		// caller can change
+		if (src.buffer instanceof SharedArrayBuffer)
+			fail(WireErrorCode.NOT_CLONEABLE, "rdata is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "rdata must be a plain Uint8Array of octets");
+	}
+	let copy;
+	try {
+		copy = new Uint8Array(src.byteLength);
+		copy.set(src);
+	} catch {
+		// a Proxy whose traps throw, or a faked brand whose byteLength lies: the octets cannot be read as data
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "rdata must be a plain Uint8Array of octets");
+	}
+	const r = new Reader(copy);
 	r.standalone = true; // readName refuses compression pointers on a standalone reader (CLDMV/digby#38)
-	return r.limit(octets.length, () => decodeRdata(type, r));
+	return r.limit(copy.length, () => decodeRdata(type, r));
 }
 
 /**

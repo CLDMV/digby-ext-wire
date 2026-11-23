@@ -428,3 +428,29 @@ describe("the standalone entries never stringify caller values (CLDMV/digby#39, 
 		expect(code(() => encodeRdataBytes(TYPE.NSEC, { next: ".", types: [toStringOne] }))).toBe("BAD_RDATA");
 	});
 });
+describe("decodeRdataBytes applies the standalone type rules and reads the octets once (CLDMV/digby#38, CLDMV/digby#39, round 5)", () => {
+	const toStringOne = { toString: 1, valueOf: 1 };
+	const rrsig = (over) => ({ typeCovered: TYPE.A, algorithm: 13, labels: 2, originalTtl: 3600, expiration: 0, inception: 0, keyTag: 1, signerName: "example.", signature: new Uint8Array([1, 2, 3]), ...over });
+	it("refuses type 0, type 65535 and non-integer types like the other standalone entries", () => {
+		const octets = new Uint8Array([1, 2, 3, 4]);
+		// today: an unregistered type falls through to the RFC 3597 generic decode and returns the octets
+		expect(code(() => decodeRdataBytes(0, octets))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeRdataBytes(65535, octets))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeRdataBytes(-1, octets))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeRdataBytes(1.5, octets))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeRdataBytes(toStringOne, octets))).toBe("VALUE_OUT_OF_RANGE");
+		// SIG stays a legal type (SIG(0) needs typeCovered 0, RFC 2931): the rules refuse the type number, never SIG
+		expect(decodeRdataBytes(TYPE.SIG, octets)).toEqual({ data: octets });
+	});
+	it("copies the octets before decoding: the caller's view is read, never trusted", () => {
+		// today: the Reader is built straight over the caller's view — a `get` trap's raw RangeError escapes
+		const trap = new Proxy(new Uint8Array([1, 2, 3, 4]), { get() { throw new RangeError("get trap"); } });
+		expect(code(() => decodeRdataBytes(TYPE.A, trap))).toBe("VALUE_OUT_OF_RANGE");
+		// a view over a SharedArrayBuffer is refused: the decode must not read memory the caller can change
+		const shared = new Uint8Array(new SharedArrayBuffer(4));
+		shared.set([10, 0, 0, 1]);
+		expect(code(() => decodeRdataBytes(TYPE.A, shared))).toBe("NOT_CLONEABLE");
+		// a plain view still decodes, from the copy
+		expect(decodeRdataBytes(TYPE.A, new Uint8Array([10, 0, 0, 1]))).toEqual({ address: "10.0.0.1" });
+	});
+});
