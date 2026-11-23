@@ -108,7 +108,18 @@ describe("one snapshot of the caller's input (CLDMV/digby#39)", () => {
 		const data = counting({ address: "1.2.3.4" }, dc);
 		const rec = counting({ name: "x.example.", type: TYPE.A, class: 1, ttl: 60, data }, rc);
 		const m = counting(
-			{ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [rec, TXT("big.example.", 400), A(2)], authorities: [], additionals: [], edns: null },
+			{
+				id: 1,
+				flags: { qr: true },
+				rcode: 0,
+				// one question: a truncating encode of a message without exactly one question is refused (CLDMV/digby#43).
+				// q.test. shares no suffix with the records below, so it costs the packet exactly 11 octets
+				questions: [{ name: "q.test.", type: TYPE.A, class: 1 }],
+				answers: [rec, TXT("big.example.", 400), A(2)],
+				authorities: [],
+				additionals: [],
+				edns: null
+			},
 			mc
 		);
 		// the truncation path is where the re-reads lived: the RRset grouping and the probe, trial and final writes all
@@ -161,7 +172,10 @@ describe("one snapshot of the caller's input (CLDMV/digby#39)", () => {
 		const a5 = { name: "x.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "1.2.3.5" } };
 		// the grouping must see the type the one read produced: the two x. A records share one RRset and go out together —
 		// never the split pair a second read produces, where only the first record leaves and the set travels partly
-		const { bytes, truncated } = encodeCapped(message({ answers: [flip, TXT("big.example.", 400), a5] }), { limit: 60 });
+		// one question: a truncating encode of a message without exactly one question is refused (CLDMV/digby#43).
+		// q.test. shares no suffix with the records below, so it costs the packet exactly 11 octets and the kept set
+		// (12 head + 11 question + 24 flip + 16 for a5's compressed owner) is 63 — the window moves 60..483 to 63..486
+		const { bytes, truncated } = encodeCapped(message({ questions: [{ name: "q.test.", type: TYPE.A, class: 1 }], answers: [flip, TXT("big.example.", 400), a5] }), { limit: 63 });
 		const d = decodeMessage(bytes);
 		expect(d.answers).toEqual([{ name: "x.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "1.2.3.4" } }, a5]);
 		expect(truncated).toBe(true);
@@ -379,10 +393,14 @@ describe("one structuredClone of the caller's input (CLDMV/digby#39, round 4)", 
 		const mac = new LyingMac(32); // 32 real octets, reports 16
 		const rec = { name: "key.example.", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: { ...tsigData(1), mac } };
 		// today: the length field says 16 octets, .set() copies all 32, and the record on the wire does not round-trip —
-		// the decode misreads everything after the MAC (its originalId is not the message's ID)
-		const d = decodeMessage(encodeMessage({ id: 1, additionals: [rec] }));
-		expect(d.additionals[0].data.mac).toEqual(new Uint8Array(32));
-		expect(d.additionals[0].data.originalId).toBe(1);
+		// the decode misreads everything after the MAC (its originalId is not the message's ID). A TSIG record travels
+		// only through appendTsig now — encodeMessage refuses one (CLDMV/digby#39) — so the record is appended to a
+		// reservation sized for the record the copy actually produces (the copy erases the length getter)
+		const reserve = tsigRecordSize({ ...rec, data: { ...tsigData(1), mac: new Uint8Array(32) } });
+		const capped = encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: reserve });
+		const d = decodeMessage(appendTsig(capped, rec));
+		expect(d.additionals.at(-1).data.mac).toEqual(new Uint8Array(32));
+		expect(d.additionals.at(-1).data.originalId).toBe(1);
 	});
 
 	it("a MAC reporting length 0 on 2,000 octets does not escape a raw RangeError (CLDMV/digby#39)", () => {
@@ -393,9 +411,13 @@ describe("one structuredClone of the caller's input (CLDMV/digby#39, round 4)", 
 		}
 		const mac = new Zero(2000);
 		const rec = { name: "key.example.", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: { ...tsigData(1), mac } };
-		// today: the writer reserves 0 octets and .set() copies the 2,000 real ones — RangeError, out of bounds
-		const d = decodeMessage(encodeMessage({ id: 1, additionals: [rec] }));
-		expect(d.additionals[0].data.mac).toEqual(new Uint8Array(2000));
+		// today: the writer reserves 0 octets and .set() copies the 2,000 real ones — RangeError, out of bounds.
+		// encodeMessage refuses a TSIG record (CLDMV/digby#39), so the record goes through appendTsig, whose
+		// reservation is sized for the record the copy produces (2,000 real octets)
+		const reserve = tsigRecordSize({ ...rec, data: { ...tsigData(1), mac: new Uint8Array(2000) } });
+		const capped = encodeCapped(message({ additionals: [A(1)] }), { limit: reserve + 320, reserveTsig: reserve });
+		const d = decodeMessage(appendTsig(capped, rec));
+		expect(d.additionals.at(-1).data.mac).toEqual(new Uint8Array(2000));
 	});
 
 	it("appendTsig indexes the copy: a length getter cannot pad the caller's bytes past the comparison (CLDMV/digby#39)", () => {
