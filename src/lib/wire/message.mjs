@@ -290,7 +290,7 @@ const reservedEncodes = new WeakMap();
  *   is set (the final message when it is not); `reserved` echoes the option
  * @throws {WireError} TSIG_PRESENT when the message already carries a TSIG record (CLDMV/digby#39); MESSAGE_TOO_LARGE when
  *   even the header, questions and tail exceed the limit; TRUNCATION_REFUSED when truncating would corrupt an UPDATE or a
- *   transfer (CLDMV/digby#43)
+ *   transfer, or when the message does not carry exactly one question (CLDMV/digby#43)
  */
 export function encodeCapped(message, { limit, truncate = true, compress = true, reserveTsig = 0 } = {}) {
 	checkInt(limit, MAX_MESSAGE, "limit");
@@ -417,7 +417,8 @@ export function tsigRecordSize(tsigRecord) {
  * @param {boolean} options.compress
  * @returns {{ bytes: Uint8Array, truncated: boolean }}
  * @throws {WireError} MESSAGE_TOO_LARGE when even the header, questions and tail exceed the limit; TRUNCATION_REFUSED when
- *   truncation would corrupt an UPDATE or a transfer (CLDMV/digby#43)
+ *   truncation would corrupt an UPDATE or a transfer, or when the message does not carry exactly one question
+ *   (CLDMV/digby#43)
  */
 function encodeCappedRaw(message, { limit, truncate, compress }) {
 	checkInt(limit, MAX_MESSAGE, "limit");
@@ -884,6 +885,11 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		// fits still encodes normally.
 		if ((message.flags?.opcode ?? 0) === OPCODE.UPDATE)
 			fail(WireErrorCode.TRUNCATION_REFUSED, "an UPDATE cannot be truncated: dropping RRsets would change the update it describes");
+		// an AXFR continuation may carry no question at all (RFC 5936 2.2.1), and nothing about the message is
+		// identifiable without exactly one question — so any drop from a message that does not carry exactly one
+		// is refused (CLDMV/digby#43)
+		if (questions.length !== 1)
+			fail(WireErrorCode.TRUNCATION_REFUSED, `a message with ${questions.length} questions cannot be truncated: without exactly one question the message cannot be identified — encode it within the limit or refuse the drop`);
 		if (questions.some((q) => q.type === TYPE.AXFR || q.type === TYPE.IXFR))
 			fail(WireErrorCode.TRUNCATION_REFUSED, "a transfer cannot be truncated: dropping RRsets would break the SOA bookends (AXFR) or the SOA-diff structure (IXFR)");
 	}

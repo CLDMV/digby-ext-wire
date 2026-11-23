@@ -348,6 +348,26 @@ describe("truncation refuses messages whose meaning it would destroy (CLDMV/digb
 		expect(capped.truncated).toBe(false);
 		expect(decodeMessage(capped.bytes).additionals).toHaveLength(60);
 	});
+
+	it("refuses to truncate unless there is exactly one question (CLDMV/digby#43)", () => {
+		// an AXFR continuation may carry no question at all (RFC 5936 2.2.1), and other messages may carry more than
+		// one; without exactly one question the encode cannot tell what the message is, so a drop is refused — the
+		// 40 A records plus a trailing SOA at a 200-octet limit used to truncate to ~190 octets with the SOA dropped
+		const noQuestion = {
+			id: 1,
+			flags: { qr: true, aa: true },
+			questions: [],
+			answers: [...Array.from({ length: 40 }, (_, i) => A(i)), SOA(3)]
+		};
+		expect(code(() => encodeCapped(noQuestion, { limit: 200 }))).toBe("TRUNCATION_REFUSED");
+		// two questions: same refusal
+		const two = { ...noQuestion, questions: [{ name: "example.", type: TYPE.A, class: 1 }, { name: "example.", type: TYPE.NS, class: 1 }] };
+		expect(code(() => encodeCapped(two, { limit: 200 }))).toBe("TRUNCATION_REFUSED");
+		// when nothing drops, no question (or several) still encodes normally
+		const capped = encodeCapped(noQuestion, { limit: 65535 });
+		expect(capped.truncated).toBe(false);
+		expect(decodeMessage(capped.bytes).answers).toHaveLength(41);
+	});
 });
 
 /**
