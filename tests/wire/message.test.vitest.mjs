@@ -110,8 +110,9 @@ describe("messages", () => {
 		// a real RR type keeps the RFC 2136 form
 		const b = hex.from(`0000 2800 0000 0000 0001 0000 00 0001 00ff 00000000 0000`);
 		expect(decodeMessage(b).authorities[0]).toEqual({ name: ".", type: 1, class: CLASS.ANY, ttl: 0, data: null });
-		// and the encode side refuses the same types
-		expect(code(() => encodeMessage({ id: 0, additionals: [{ name: ".", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: null }] }))).toBe("VALUE_OUT_OF_RANGE");
+		// and the encode side refuses the same types — a TSIG record meets the TSIG_PRESENT refusal first (CLDMV/digby#39
+		// refuses any TSIG through an encode), so the empty-rdata rule shows on the decode side and for non-TSIG types
+		expect(code(() => encodeMessage({ id: 0, additionals: [{ name: ".", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: null }] }))).toBe("TSIG_PRESENT");
 	});
 
 	it("refuses an empty SIG record: SIG(0) is class ANY and its rdata is mandatory (CLDMV/digby#38)", () => {
