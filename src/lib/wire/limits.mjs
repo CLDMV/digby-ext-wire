@@ -11,7 +11,7 @@
  * 6.2.3, 6.2.5). TCP: 65535 octets, each message prefixed with a 2-octet length (RFC 1035 4.2.2, RFC 7766 8).
  */
 
-import { MAX_MESSAGE, asBytes, checkInt } from "./buffer.mjs";
+import { MAX_MESSAGE, asBytes, checkInt, cloneOptions } from "./buffer.mjs";
 import { WireErrorCode, describe, fail } from "./errors.mjs";
 import { encodeCapped } from "./message.mjs";
 
@@ -30,9 +30,11 @@ export const TCP_MAX = MAX_MESSAGE;
  * @param {number} [options.cap=1232] - our own EDNS buffer size; values below 512 are raised to 512
  * @returns {number}
  */
-export function udpLimit(query, { cap = DEFAULT_UDP_CAP } = {}) {
-	checkInt(cap, MAX_MESSAGE, "UDP cap");
-	const ours = Math.max(UDP_MIN, cap);
+export function udpLimit(query, options) {
+	// the options are guarded like every other argument (CLDMV/digby#39)
+	const o = cloneOptions(options, "the udpLimit options");
+	checkInt(o.cap ?? DEFAULT_UDP_CAP, MAX_MESSAGE, "UDP cap");
+	const ours = Math.max(UDP_MIN, o.cap ?? DEFAULT_UDP_CAP);
 	const theirs = query?.edns ? query.edns.udpSize : UDP_MIN;
 	return Math.min(ours, Math.max(UDP_MIN, theirs));
 }
@@ -53,7 +55,15 @@ export function udpLimit(query, { cap = DEFAULT_UDP_CAP } = {}) {
  *   TRUNCATION_REFUSED when truncating would corrupt the message's meaning (an UPDATE, or a question of type AXFR/IXFR —
  *   CLDMV/digby#43)
  */
-export function encodeForTransport(message, { transport, query = null, cap = DEFAULT_UDP_CAP, limit, compress = true }) {
+export function encodeForTransport(message, options) {
+	// the options are guarded like every other argument (CLDMV/digby#39): null and undefined mean "no options", and the
+	// copy — the query included — is read exactly once
+	const o = cloneOptions(options, "the encodeForTransport options");
+	const transport = o.transport;
+	const query = o.query ?? null;
+	const cap = o.cap ?? DEFAULT_UDP_CAP;
+	const limit = o.limit;
+	const compress = o.compress ?? true;
 	let max;
 	if (limit !== undefined) max = limit;
 	else if (transport === "udp") max = udpLimit(query, { cap });
