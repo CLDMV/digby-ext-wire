@@ -831,7 +831,8 @@ describe("a SharedArrayBuffer-backed view is refused, not shared (CLDMV/digby#39
 			Object.defineProperty(v, "buffer", d);
 			expect(formatGeneric(v), what).toBe(`\\# ${real.length} ${hex}`);
 			expect([...frameTcp(v)], what).toEqual([real.length >>> 8, real.length & 0xff, ...real]);
-			expect(new TcpFramer().push(v), what).toEqual([real]);
+			// the framer takes framed input: frame the view, then the one delivered frame is the view's real octets
+			expect(new TcpFramer().push(frameTcp(v)), what).toEqual([real]);
 			expect(decodeMessage(v), what).toEqual(decodeMessage(real));
 		}
 		// a shadowed offset or length cannot make the view construction throw a raw RangeError, nor read past the view
