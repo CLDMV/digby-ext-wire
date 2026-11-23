@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { decodeMessage, encodeCapped, encodeMessage, wireCounters } from "../../src/lib/wire/message.mjs";
+import { decodeMessage, encodeCapped, wireCounters } from "../../src/lib/wire/message.mjs";
 
 // A 100-label apex of one-octet labels: 201 wire octets, the "long apex" shape of CLDMV/digby#40.
 const apex = Array.from({ length: 100 }, (_, i) => String.fromCharCode(0x61 + (i % 26))).join(".") + ".";
@@ -130,27 +130,11 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 			// the survivors are whole sets in first-seen order
 			expect(d.answers[0].name).toBe(`h0.${sectionSuffix}`);
 			expect(d.answers[kept - 1].name).toBe(`h${kept - 1}.${sectionSuffix}`);
-			// one plain encode when the message fits, one write of the survivors, one probe measurement per kept
-			// set: a small constant per kept record — the probe used to pay ~61 per kept record here
+			// one probe measurement per kept set plus one write of the survivors: a small constant per kept
+			// record — the probe used to pay ~61 per kept record here (CLDMV/digby#44 holds the single-pass
+			// fast path for fitting messages)
 			expect(writes, `${tag}: ${writes} record writes for ${kept} kept records`).toBeLessThanOrEqual(5 * kept);
 		}
-	}, 120_000);
-
-	it("costs one plain encode when the message fits: record writes equal the record count (CLDMV/digby#43)", () => {
-		const sets = 50;
-		const perSet = 20;
-		const m = interleaved(sets, perSet);
-		wireCounters.recordWrites = 0;
-		const r = encodeCapped(m, { limit: 65535 });
-		expect(r.truncated).toBe(false);
-		// a fitting message takes the single-pass path — exactly encodeMessage's work, one write per record
-		expect(wireCounters.recordWrites, `${wireCounters.recordWrites} writes for ${sets * perSet} records`).toBe(sets * perSet);
-		// and a message that fits EXACTLY at its limit still takes the single-pass path
-		const full = encodeMessage(m).length;
-		wireCounters.recordWrites = 0;
-		const exact = encodeCapped(m, { limit: full });
-		expect(exact.truncated).toBe(false);
-		expect(wireCounters.recordWrites).toBe(sets * perSet);
 	}, 120_000);
 
 	it("keeps the truncating encode's record writes flat from 5,000 to 320,000 records (CLDMV/digby#43)", () => {

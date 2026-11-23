@@ -483,23 +483,6 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		return { bytes: w.finish(), truncated: false };
 	}
 
-	// A truncating encode first tries the message as it stands (CLDMV/digby#43): when it fits, the capped encode
-	// costs exactly what a plain encode costs — one write per record, one pass — and nothing below runs. When it
-	// does not fit (MESSAGE_TOO_LARGE from a record or the tail), whole RRsets drop to make room: the trials below
-	// decide which. Outside the try: a header, questions and tail that alone exceed the limit are a hard
-	// MESSAGE_TOO_LARGE — nothing droppable remains.
-	const attempt = new Writer({ max: limit, compress });
-	const attemptCountAt = headAndTail(attempt);
-	let fitted = null;
-	try {
-		writeAll(attempt, attemptCountAt, written);
-		fitted = attempt.finish();
-	} catch (err) {
-		if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
-	}
-	if (fitted) return { bytes: fitted, truncated: false };
-	written.fill(0);
-
 	// The message does not fit as it stands: whole RRsets drop, never part of one (RFC 2181 9), and the survivors
 	// stay at their original positions, so the surviving sets keep the order they were first seen in and nothing ever
 	// travels regrouped (CLDMV/digby#36). A truncating encode consults the RRset grouping only to decide what it
@@ -552,7 +535,9 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// records — no shift, no gate; the shift table is built only when some set spans several records.
 	const w = new Writer({ max: MAX_MESSAGE, compress });
 	const countAt = writeHead(w);
-	// the head-and-tail check already passed on the attempt writer, whose head is identical
+	// the header, questions and tail records alone must fit: they are never dropped, so no RRset can make room for
+	// them
+	if (!tailFitsOn(w)) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the header, questions and tail records alone exceed ${limit} octets`);
 	let truncated = false;
 	let dropped = false; // any RRset dropped from any section — an additionals-only drop never sets TC, but it is still a drop (CLDMV/digby#43)
 	outer: for (let s = 0; s < 3; s++) {
