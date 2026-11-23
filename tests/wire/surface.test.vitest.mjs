@@ -269,6 +269,7 @@ describe("parseRecord validates its default ttl and class like parsed values (CL
 	});
 
 	it("valid defaults still work", () => {
-		expect(parseRecord("a.example. IN A 10.0.0.1", { ttl: 3600, class: 3 })).toEqual({ name: "a.example.", ttl: 3600, class: 3, type: TYPE.A, data: { address: "10.0.0.1" } });
+		// the text carries neither TTL nor class, so both defaults are used
+		expect(parseRecord("a.example. A 10.0.0.1", { ttl: 3600, class: 3 })).toEqual({ name: "a.example.", ttl: 3600, class: 3, type: TYPE.A, data: { address: "10.0.0.1" } });
 	});
 });
