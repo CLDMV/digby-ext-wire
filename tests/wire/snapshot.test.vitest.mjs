@@ -589,9 +589,10 @@ describe("the public surface throws only WireError, for any value in any argumen
 		["a BigInt64Array", new BigInt64Array(4)]
 	];
 
-	// a valid baseline per entry, so the sweep replaces one argument of a call that works rather than one of a call that
-	// refuses up front — and so the valid surface stays working (a new export with no baseline is swept over undefined
-	// foundations, which still catches every escape, it just cannot assert the valid call)
+	// a valid baseline per ENTRY — class constructors and prototype methods included — so the sweep replaces one argument
+	// of a call that works rather than one of a call that refuses up front, and so the valid surface stays working. The
+	// baseline test below fails an export with no baseline, loudly: an unswept export is a hole in the surface (CLDMV/digby#39,
+	// round 7).
 	const validBytes = encodeMessage(message({}));
 	const tsigNeed = tsigRecordSize(tsigRecord(1));
 	const capped = () => encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: tsigNeed });
@@ -624,28 +625,40 @@ describe("the public surface throws only WireError, for any value in any argumen
 		parseRdata: () => [TYPE.MX, "10 mail", "example."],
 		formatRecord: () => [A(1)],
 		parseRecord: () => ["a.example. 60 IN A 10.0.0.1", { ttl: 60 }],
-		parseTtl: () => ["1h30m"]
+		parseTtl: () => ["1h30m"],
+		TcpFramer: () => [],
+		"TcpFramer.prototype.push": () => [new Uint8Array(0)]
 	};
 	// every export of the index, enumerated — a new export is covered automatically. A function export is called with a
 	// hostile value at every argument position, the others at their baseline (undefined where none is known); an options
 	// parameter with a default does not count into `length`, so the arity is length + 1. A class export contributes its
-	// constructor and every own prototype method (TcpFramer.push takes bytes).
+	// constructor and every own prototype method (TcpFramer.push takes bytes), each with a baseline of its own.
 	const exportNames = Object.keys(wire);
 	const isClass = (f) => {
 		const d = Object.getOwnPropertyDescriptor(f, "prototype");
 		return d !== undefined && !d.writable;
 	};
 	const atPosition = (hv, at, n) => Array.from({ length: n }, (_, i) => (i === at ? hv : undefined));
+	// call the baseline for one entry, whatever kind it is (a plain export, a class constructor or a prototype method)
+	const callBaseline = (name, args) => {
+		if (name.endsWith("() constructor")) return () => new wire[name.slice(0, -"() constructor".length)](...args);
+		const method = /^(.+)\.prototype\.(.+)$/.exec(name);
+		if (method) return () => new wire[method[1]]()[method[2]](...args);
+		return () => wire[name](...args);
+	};
 	const entries = [];
 	for (const name of exportNames) {
 		const v = wire[name];
 		if (typeof v !== "function" || name === "WireError") continue; // WireError is the error type itself, not an entry
 		if (isClass(v)) {
-			entries.push([`${name}() constructor`, (hv, at) => new v(...atPosition(hv, at, 1)), 1]);
+			const ctor = `${name}() constructor`;
+			entries.push([ctor, (hv, at) => new v(...atPosition(hv, at, 1)), 1]);
 			for (const m of Object.getOwnPropertyNames(v.prototype)) {
 				const d = Object.getOwnPropertyDescriptor(v.prototype, m);
 				if (m === "constructor" || typeof d?.value !== "function") continue;
-				entries.push([`${name}.prototype.${m}`, (hv, at) => new v()[m](...atPosition(hv, at, d.value.length + 1)), d.value.length + 1]);
+				const mname = `${name}.prototype.${m}`;
+				const arity = Math.max(baselines[mname]().length, d.value.length + 1);
+				entries.push([mname, (hv, at) => new v()[m](...atPosition(hv, at, arity)), arity]);
 			}
 			continue;
 		}
@@ -662,14 +675,15 @@ describe("the public surface throws only WireError, for any value in any argumen
 			arity
 		]);
 	}
-	// the byte-taking entries, with every SharedArrayBuffer form at each (decode, framer, transport, standalone rdata)
-	const byteEntries = [
-		["decodeMessage: the bytes", (b) => wire.decodeMessage(b)],
-		["frameTcp: the message", (b) => wire.frameTcp(b)],
-		["TcpFramer.push: the chunk", (b) => new wire.TcpFramer().push(b)],
-		["decodeRdataBytes: the octets", (b) => wire.decodeRdataBytes(TYPE.A, b)],
-		["formatGeneric: the octets", (b) => wire.formatGeneric(b)]
-	];
+	// the byte-taking argument positions, derived from the baselines (CLDMV/digby#39, round 7): any position whose
+	// baseline value is a view or an ArrayBuffer is swept with every SharedArrayBuffer form, so a byte-taking export is
+	// covered automatically and one missing from a hand-written list cannot happen
+	const bytePositions = [];
+	for (const [name, baseline] of Object.entries(baselines)) {
+		const args = baseline();
+		for (let at = 0; at < args.length; at++)
+			if (ArrayBuffer.isView(args[at]) || args[at] instanceof ArrayBuffer) bytePositions.push([name, at]);
+	}
 	const sabForms = [
 		["a bare SharedArrayBuffer", () => new SharedArrayBuffer(12)],
 		["a Uint8Array over a SharedArrayBuffer", () => new Uint8Array(new SharedArrayBuffer(12))],
@@ -678,8 +692,10 @@ describe("the public surface throws only WireError, for any value in any argumen
 		["a Buffer over a SharedArrayBuffer", () => Buffer.from(new SharedArrayBuffer(12))]
 	];
 
-	it("every entry accepts its valid baseline", () => {
-		for (const name of Object.keys(baselines)) expect(() => wire[name](...baselines[name]()), name).not.toThrow();
+	it("every enumerated entry has a valid baseline, and an export without one fails here", () => {
+		const missing = entries.map(([name]) => name).filter((name) => !(name in baselines));
+		expect(missing).toEqual([]);
+		for (const name of Object.keys(baselines)) expect(callBaseline(name, baselines[name]()), name).not.toThrow();
 	});
 
 	it("every hostile value at every argument position returns or throws WireError, never anything else", () => {
@@ -703,29 +719,36 @@ describe("the public surface throws only WireError, for any value in any argumen
 		expect(escapes).toEqual([]);
 	});
 
-	it("every SharedArrayBuffer form at every byte-taking entry is a WireError", () => {
+	it("every SharedArrayBuffer form at every derived byte-taking argument position is a WireError", () => {
 		const escapes = [];
-		for (const [what, shape] of byteEntries)
+		for (const [name, at] of bytePositions) {
+			const entry = entries.find(([n]) => n === name);
 			for (const [form, make] of sabForms) {
 				let outcome;
 				try {
-					shape(make());
+					entry[1](make(), at);
 					outcome = "returned";
 				} catch (err) {
 					outcome = err;
 				}
 				if (!(outcome instanceof WireError)) {
 					const shown = outcome instanceof Error ? outcome.constructor.name : String(outcome);
-					escapes.push(`${what} with ${form} escaped as ${shown}`);
+					escapes.push(`${name} (argument ${at}) with ${form} escaped as ${shown}`);
 				}
 			}
+		}
+		// the derivation itself must have found the byte-taking entries: a baseline that hides its bytes would sweep none
+		expect(bytePositions.length).toBeGreaterThan(0);
 		expect(escapes).toEqual([]);
 	});
 
-	it("the enumerated surface and the sweep's call count are logged for the handback", () => {
-		const calls = entries.reduce((n, [, , arity]) => n + arity, 0) * hostiles.length + byteEntries.length * sabForms.length;
+	it("the enumerated surface and the sweep's call counts are logged for the handback", () => {
+		const hostileCalls = entries.reduce((n, [, , arity]) => n + arity, 0) * hostiles.length;
+		const sabCalls = bytePositions.length * sabForms.length;
 		console.log(`[surface] exports (${exportNames.length}): ${exportNames.join(", ")}`);
-		console.log(`[surface] entries: ${entries.length} function/method entries + ${byteEntries.length} byte entries; hostile calls: ${calls}`);
+		console.log(
+			`[surface] entries: ${entries.length}; derived byte positions: ${bytePositions.length}; hostile calls: ${hostileCalls}; SAB calls: ${sabCalls}; total: ${hostileCalls + sabCalls}`
+		);
 		expect(exportNames.length).toBeGreaterThan(0);
 	});
 });
