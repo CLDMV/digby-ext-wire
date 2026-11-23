@@ -85,9 +85,10 @@ export function parseRecord(text, options) {
 	if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.BAD_PRESENTATION, `record type ${type} is reserved`);
 	ttl ??= o.ttl;
 	if (ttl === undefined) fail(WireErrorCode.BAD_PRESENTATION, "the record has no TTL and no default was given");
-	// the default TTL is validated exactly like a TTL parsed from the text (CLDMV/digby#39): an integer in 0..2^31 - 1,
-	// described never stringified
-	if (!Number.isInteger(ttl) || ttl < 0 || ttl > MAX_TTL) fail(WireErrorCode.BAD_PRESENTATION, `TTL out of range: ${describe(ttl)}`);
+	// the default TTL is a caller-supplied number, not presentation text, so it carries the same code as the default
+	// class and as every other out-of-range numeric argument (CLDMV/digby#39): an integer in 0..2^31 - 1, described
+	// never stringified. A TTL parsed from the text still fails BAD_PRESENTATION, in parseTtl.
+	if (!Number.isInteger(ttl) || ttl < 0 || ttl > MAX_TTL) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `TTL out of range: ${describe(ttl)}`);
 	const cls = clsTok ?? (o.class ?? CLASS.IN);
 	// the default class is validated exactly like a class parsed from the text: an integer in 0..0xffff
 	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${describe(cls)}`);
