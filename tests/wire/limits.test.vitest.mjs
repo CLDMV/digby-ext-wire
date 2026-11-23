@@ -37,6 +37,13 @@ describe("UDP limits", () => {
 		expect(udpLimit({ edns: { udpSize: 4096 } }, { cap: 100 })).toBe(512);
 		expect(code(() => udpLimit(null, { cap: 70000 }))).toBe("VALUE_OUT_OF_RANGE");
 	});
+
+	it("a non-object query is refused, never read as one without EDNS (CLDMV/digby#39, round 7)", () => {
+		// today: udpLimit("x") returned 512 — the query's edns read as undefined
+		for (const q of ["x", 5, 10n, true, Symbol("s")]) expect(code(() => udpLimit(q))).toBe("VALUE_OUT_OF_RANGE");
+		expect(udpLimit(null)).toBe(512);
+		expect(udpLimit(undefined)).toBe(512);
+	});
 });
 
 describe("truncation (RFC 2181 9)", () => {
