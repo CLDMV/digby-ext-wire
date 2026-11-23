@@ -104,15 +104,24 @@ export function asBytes(bytes) {
  */
 export function cloneOptions(options, what) {
 	if (options === null || options === undefined) return {};
-	// `typeof` runs no caller code, but the walk and the copy below can (a revoked Proxy's Object.keys throws) — both
-	// sit inside the refusal they feed
+	// `typeof` and `Object.getPrototypeOf` run no caller code on a plain object, but the walk and the copy below can
+	// (a revoked Proxy's Object.keys throws) — all sit inside the refusal they feed
 	let tag;
+	let proto;
 	try {
 		tag = typeof options;
+		proto = Object.getPrototypeOf(options);
 	} catch {
 		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
 	}
 	if (tag !== "object") fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be an object, got ${describe(options)}`);
+	// structuredClone copies own enumerable properties only, so an option that lives on the prototype — a size or
+	// name bound among them — would silently vanish into the copy: encodeMessage(big, Object.create({ maxSize: 40 }))
+	// encoded the whole message, udpLimit read the default cap, decodeMessage decoded without its name cap. Refuse
+	// every prototype that is neither Object.prototype nor null (a class instance, a Map, Object.create(proto)) —
+	// silently dropping a bound is not allowed (CLDMV/digby#39).
+	if (proto !== Object.prototype && proto !== null)
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object; an option on the prototype would be silently dropped by the copy (CLDMV/digby#39)`);
 	return cloneInput(options, what);
 }
 
