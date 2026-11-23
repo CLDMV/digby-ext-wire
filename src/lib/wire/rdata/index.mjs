@@ -13,7 +13,7 @@
 import { MAX_MESSAGE, Reader, Writer } from "../buffer.mjs";
 import { CLASS, TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
-import { WireErrorCode, fail } from "../errors.mjs";
+import { WireErrorCode, cloneInput, fail } from "../errors.mjs";
 import { Tokens, fromHex, toHex, tokenize } from "../text.mjs";
 import { A, AAAA, CAA, CNAME, MX, NAPTR, NS, PTR, SOA, SRV, SSHFP, TLSA, TXT } from "./basic.mjs";
 import { badRdata, bytes, obj } from "./common.mjs";
@@ -31,6 +31,22 @@ const OPT = {
 	parse: null,
 	format: null
 };
+
+/** The top of the type range is reserved (RFC 6895); no record may use it (CLDMV/digby#38). */
+const RESERVED_TYPE = 0xffff;
+
+/**
+ * Validate a standalone entry's type (CLDMV/digby#38): an integer in 0..0xffff, and neither reserved value — the same rule
+ * the record layer applies to record and question types. The RR line parser validates its own type before
+ * {@link parseRdataTokens}, so this guards the standalone entries only.
+ * @param {number} type
+ * @returns {number}
+ */
+function checkRdataType(type) {
+	if (!Number.isInteger(type) || type < 0 || type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(type)}`);
+	if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type ${type} is reserved`);
+	return type;
+}
 
 /** @type {Map<number, import("./common.mjs").RdataCodec>} */
 const CODECS = new Map([
@@ -121,6 +137,7 @@ export function encodeRdata(w, type, data) {
  * @throws {import("../errors.mjs").WireError} BAD_PRESENTATION, BAD_RDATA, BAD_SVCPARAM, RELATIVE_NAME, ...
  */
 export function parseRdata(type, text, origin) {
+	checkRdataType(type);
 	return parseRdataTokens(type, new Tokens(tokenize(text)), origin);
 }
 
@@ -160,23 +177,28 @@ export function parseRdataTokens(type, t, origin, cls) {
 }
 
 /**
- * Copy a caller-supplied rdata value into a plain structure, once (CLDMV/digby#39): every field of every plain object and
- * array is read exactly once, so a getter cannot show the validation one value and the encoder another. Octets (Uint8Array
- * instances, subclasses included) are shared by reference — their elements cannot change via getters. The copy descends one
- * level past the deepest field the codecs read (a field, its elements, an element's own fields); values below that are shared
- * by reference, which also bounds the copy on a self-referential value.
- * @param {unknown} data
- * @param {number} [depth]
- * @returns {unknown}
+ * Whether a type's presentation form is the RFC 3597 generic `\# <length> <hex>`: the types with no typed codec, and OPT —
+ * typed on the wire, generic in text (its codec has no presentation form of its own). presentation.mjs uses it to refuse the
+ * zero-length generic form under class ANY or NONE, where it would read back as the RFC 2136 update form (CLDMV/digby#37).
+ * @param {number} type
+ * @returns {boolean}
  */
-export function snapshotRdata(data, depth = 0) {
-	if (data === null || typeof data !== "object") return data;
-	if (data instanceof Uint8Array) return data;
-	if (depth >= 4) return data;
-	if (Array.isArray(data)) return data.map((e) => snapshotRdata(e, depth + 1));
-	const out = {};
-	for (const k of Object.keys(data)) out[k] = snapshotRdata(data[k], depth + 1);
-	return out;
+export function isGenericForm(type) {
+	const codec = CODECS.get(type);
+	return !codec || codec.format === null;
+}
+
+/**
+ * Encode an already-copied rdata value (CLDMV/digby#39): the public entries take the {@link cloneInput} copy once and share
+ * this, so a format's encode-plus-round-trip never copies twice.
+ * @param {number} type
+ * @param {object} data
+ * @returns {Uint8Array}
+ */
+function encodeRdataCopy(type, data) {
+	const w = new Writer({ compress: false });
+	encodeRdata(w, type, data);
+	return w.finish();
 }
 
 /**
@@ -185,31 +207,33 @@ export function snapshotRdata(data, depth = 0) {
  * of rdata that actually encodes — so a malformed shape raises the encode's `WireError` and no unvalidated field is ever
  * echoed into zone text (CLDMV/digby#37). The generic path encodes through the capped writer too, so rdata past a record's
  * 65,535-octet limit is refused, not printed (CLDMV/digby#37, the wire bound of CLDMV/digby#38).
- * @param {number} type
- * @param {object} data
+ * @param {number} type - an integer in 0..0xffff, neither reserved value (RFC 6895; CLDMV/digby#38)
+ * @param {object} data - copied once with structuredClone and only the copy encoded (CLDMV/digby#39)
  * @returns {string}
- * @throws {import("../errors.mjs").WireError} whatever the type's encoding or decoding raises (VALUE_OUT_OF_RANGE, BAD_RDATA,
- *   BAD_SVCPARAM, BAD_PRESENTATION, MESSAGE_TOO_LARGE, ...)
+ * @throws {import("../errors.mjs").WireError} VALUE_OUT_OF_RANGE for a type out of range or reserved (CLDMV/digby#38), or
+ *   whatever the type's encoding or decoding raises (BAD_RDATA, BAD_SVCPARAM, BAD_PRESENTATION, MESSAGE_TOO_LARGE, ...)
  */
 export function formatRdata(type, data) {
+	checkRdataType(type);
 	// one copy of the caller's value (CLDMV/digby#39): the encode and the round-trip act on it, never on the original
-	const snap = snapshotRdata(data);
+	const snap = cloneInput(data, `${typeToString(type)} rdata`);
 	const codec = CODECS.get(type);
-	if (codec?.format) return codec.format(decodeRdataBytes(type, encodeRdataBytes(type, snap)));
+	if (codec?.format) return codec.format(decodeRdataBytes(type, encodeRdataCopy(type, snap)));
 	// typed on the wire but generic in text (OPT), and types with no codec: encode, then print the octets
-	return formatGeneric(encodeRdataBytes(type, snap));
+	return formatGeneric(encodeRdataCopy(type, snap));
 }
 
 /**
  * Encode rdata into standalone octets.
- * @param {number} type
- * @param {object} data
+ * @param {number} type - an integer in 0..0xffff, neither reserved value (RFC 6895; CLDMV/digby#38)
+ * @param {object} data - copied once with structuredClone and only the copy encoded (CLDMV/digby#39)
  * @returns {Uint8Array}
+ * @throws {import("../errors.mjs").WireError} VALUE_OUT_OF_RANGE for a type out of range or reserved (CLDMV/digby#38), or
+ *   whatever the encoding raises
  */
 export function encodeRdataBytes(type, data) {
-	const w = new Writer({ compress: false });
-	encodeRdata(w, type, snapshotRdata(data));
-	return w.finish();
+	checkRdataType(type);
+	return encodeRdataCopy(type, cloneInput(data, `${typeToString(type)} rdata`));
 }
 
 /**
