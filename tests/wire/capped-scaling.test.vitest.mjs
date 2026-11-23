@@ -176,21 +176,35 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 		]
 	});
 
-	it("bounds the trials' writes on interleaved pending sets whose second records share a suffix (CLDMV/digby#43)", () => {
-		for (const M of [100, 200, 400, 800]) {
+	it("bounds the work on interleaved pending sets whose second records share a suffix (CLDMV/digby#43)", () => {
+		for (const M of [100, 200, 400, 800, 1600]) {
 			const records = 2 * M;
 			const m = paired(M);
-			const full = encodeMessage(m).length;
+			// "full" is the whole encode when it fits the largest message, and the largest message itself when the
+			// paired shape does not (M=1600 overflows 65,535 — the size that failed round 4)
+			let full;
+			let fullTruncates = false;
+			try {
+				full = encodeMessage(m).length;
+			} catch (err) {
+				if (!(err instanceof WireError) || err.code !== "MESSAGE_TOO_LARGE") throw err;
+				full = 65535;
+				fullTruncates = true;
+			}
 			for (const [tag, limit] of [
 				["full", full],
 				["one under full", full - 1],
 				["90%", Math.floor((full * 9) / 10)]
 			]) {
 				wireCounters.recordWrites = 0;
+				wireCounters.scratchEncodes = 0;
+				wireCounters.modelWork = 0;
 				const r = encodeCapped(m, { limit });
-				const writes = wireCounters.recordWrites;
+				// every unit of counted work: record writes, the scratch encodes, and the model's own work — the
+				// round-4 bound counted only recordWrites, and the model scans it did not see are real work
+				const writes = wireCounters.recordWrites + wireCounters.scratchEncodes + wireCounters.modelWork;
 				const d = decodeMessage(r.bytes);
-				expect(d.flags.tc, `M=${M} ${tag}: the truncation flag`).toBe(limit < full);
+				expect(d.flags.tc, `M=${M} ${tag}: the truncation flag`).toBe(limit < full || fullTruncates);
 				// the survivors are whole RRsets in first-seen order, each complete
 				const counts = new Map();
 				for (const rec of d.answers) counts.set(rec.name, (counts.get(rec.name) ?? 0) + 1);
@@ -199,7 +213,7 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 				// every record is written a small constant number of times: the round-4 trials wrote each record
 				// ~24-200 times on this shape (a fresh exact trial per set, each re-encoding the kept second
 				// records sitting between the candidate's two), growing with M
-				expect(writes, `M=${M} ${tag}: ${writes} record writes for ${records} records`).toBeLessThanOrEqual(6 * records);
+				expect(writes, `M=${M} ${tag}: ${writes} units of work for ${records} records`).toBeLessThanOrEqual(12 * records);
 			}
 		}
 	}, 120_000);
