@@ -228,7 +228,9 @@ export function svcKeyToString(key) {
 }
 
 /**
- * Parse a SvcParamKey name or `keyNNNNN`. Key 65535 is reserved and refused.
+ * Parse a SvcParamKey name or `keyNNNNN`. `key65535` round-trips with {@link svcKeyToString}: the mnemonic layer is
+ * permissive like TYPEnnn / CLASSnnn (whose generic form accepts the reserved top of the range), and the reserved key
+ * stays refused where a key is used — the SvcParam record layer refuses 65535 on decode, encode and parse.
  * @param {string} text
  * @returns {number}
  */
@@ -238,7 +240,7 @@ export function svcKeyFromString(text) {
 	const m = /^key(\d{1,5})$/.exec(s);
 	if (m) {
 		const n = Number(m[1]);
-		if (n < 65535) return n;
+		if (n <= 0xffff) return n;
 	}
 	return fail(WireErrorCode.BAD_SVCPARAM, `unknown SvcParamKey "${s}"`);
 }
