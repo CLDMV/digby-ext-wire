@@ -54,11 +54,15 @@ export const RDATA_REQUIRED = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.SIG, TYPE.IXFR
 const RESERVED_TYPE = 0xffff;
 /**
  * Diagnostic counters for the scaling tests (CLDMV/digby#43): `recordWrites` counts {@link writeRecord} calls — every
- * record any encode touches — so tests bound the work by count rather than wall-clock. Not part of the codec's public
- * surface (index.mjs does not re-export it); a test resets it before the encode it measures.
- * @type {{ recordWrites: number }}
+ * record any encode touches, in the probe measurements, the exact trials, the records written for good and the
+ * {@link appendTsig} append — so tests bound the work by count rather than wall-clock. `scratchEncodes` counts the
+ * encodes that go through a scratch writer and are thrown away: the tail's uncompressed size measurement and the
+ * near-boundary tail probes of {@link tailFitsOn} (a rolled-back OPT encode is not a {@link writeRecord} call, so
+ * `recordWrites` alone would hide it). Neither is part of the codec's public surface (index.mjs does not re-export
+ * them); a test resets them before the encode it measures.
+ * @type {{ recordWrites: number, scratchEncodes: number }}
  */
-export const wireCounters = { recordWrites: 0 };
+export const wireCounters = { recordWrites: 0, scratchEncodes: 0 };
 
 /**
  * Decode a message.
@@ -467,9 +471,13 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	const writeTail = (wr) => {
 		if (edns) writeOpt(wr, edns, rcode >>> 4);
 	};
-	// An upper bound on the tail's size: written uncompressed into a scratch writer, once.
+	// An upper bound on the tail's size: written uncompressed into a scratch writer, once. The OPT encode is
+	// scratch work no other counter sees, so it is counted (CLDMV/digby#43).
 	const scratch = new Writer({ compress: false });
-	if (edns) writeOpt(scratch, edns, rcode >>> 4);
+	if (edns) {
+		wireCounters.scratchEncodes++;
+		writeOpt(scratch, edns, rcode >>> 4);
+	}
 	const tailBound = scratch.length;
 	// Whether the OPT record still fits on `wr` after what is written now. The bound settles it almost always; near
 	// the limit, write it for real, measure and roll it back.
@@ -477,6 +485,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		if (wr.length + tailBound <= limit) return true;
 		const mark = wr.checkpoint();
 		try {
+			wireCounters.scratchEncodes++; // a rolled-back tail probe: counted scratch work (CLDMV/digby#43)
 			writeTail(wr);
 			return wr.length <= limit;
 		} catch (err) {

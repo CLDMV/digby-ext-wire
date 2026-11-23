@@ -138,11 +138,18 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 	}, 120_000);
 
 	it("keeps the truncating encode's record writes flat from 5,000 to 320,000 records (CLDMV/digby#43)", () => {
+		// the scratch encodes are part of the counted work: the counter must exist on the codec's counters surface,
+		// not be conjured by this test's own reset assignment
+		expect("scratchEncodes" in wireCounters, "wireCounters counts scratch encodes").toBe(true);
 		const count = (n) => {
 			const m = distinct(n);
 			wireCounters.recordWrites = 0;
+			wireCounters.scratchEncodes = 0;
 			encodeCapped(m, { limit: 65535 });
-			return wireCounters.recordWrites;
+			// every encode the truncation does is counted: record writes through writeRecord, and the scratch
+			// encodes (the tail's uncompressed size measurement, the near-boundary tail probes) through
+			// scratchEncodes — the round-4 shift table measured every record of the section uncounted
+			return wireCounters.recordWrites + wireCounters.scratchEncodes;
 		};
 		const small = count(5000);
 		const large = count(320000);
