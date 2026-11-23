@@ -227,6 +227,32 @@ describe("the constant converters, formatName and formatGeneric refuse hostile i
 		// today: String.fromCharCode(...chars) with a million arguments throws a raw RangeError
 		expect(code(() => formatName([new Uint8Array(1024 * 1024)]))).toBe("LABEL_TOO_LONG");
 	});
+
+	it("a label's own length property cannot shadow the wire length (CLDMV/digby#39, round 7)", () => {
+		// today: a zero-length label with an own length of 5 printed five raw NULs
+		const nul = new Uint8Array(0);
+		Object.defineProperty(nul, "length", { value: 5 });
+		expect(formatName([nul])).toBe(".");
+		// today: a 60-octet label with an own length of 3 printed only "aaa."
+		const padded = new Uint8Array(60).fill(0x61);
+		Object.defineProperty(padded, "length", { value: 3 });
+		expect(formatName([padded])).toBe(`${"a".repeat(60)}.`);
+		// the over-long check reads the intrinsic length too: the shadow cannot smuggle a 100-octet label past it
+		const long = new Uint8Array(100).fill(0x61);
+		Object.defineProperty(long, "length", { value: 3 });
+		expect(code(() => formatName([long]))).toBe("LABEL_TOO_LONG");
+	});
+
+	it("a label over a SharedArrayBuffer is refused like every byte-taking input (CLDMV/digby#39, round 7)", () => {
+		// formatName was the only byte-taking export without the SAB rule; with a length-tracking view over a growable
+		// SAB the length was checked and then read again
+		for (const make of [
+			() => new Uint8Array(new SharedArrayBuffer(1)),
+			() => new Uint8Array(new SharedArrayBuffer(1, { maxByteLength: 4 })),
+			() => Buffer.from(new SharedArrayBuffer(1))
+		])
+			expect(code(() => formatName([make()]))).toBe("NOT_CLONEABLE");
+	});
 });
 
 describe("every SharedArrayBuffer form is refused at every byte-taking entry (CLDMV/digby#39, round 6)", () => {
