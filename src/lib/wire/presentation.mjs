@@ -13,10 +13,10 @@
  */
 
 import { CLASS, classFromString, classToString, isClassToken, typeFromString, typeToString } from "./constants.mjs";
-import { WireErrorCode, fail } from "./errors.mjs";
+import { WireErrorCode, cloneInput, fail } from "./errors.mjs";
 import { RDATA_REQUIRED } from "./message.mjs";
 import { canonicalName } from "./names.mjs";
-import { formatRdata, isTyped, parseRdataTokens, snapshotRdata } from "./rdata/index.mjs";
+import { encodeRdataBytes, formatGeneric, formatRdata, isGenericForm, parseRdataTokens } from "./rdata/index.mjs";
 import { Tokens, tokenize } from "./text.mjs";
 
 export { formatRdata, parseRdata, formatGeneric } from "./rdata/index.mjs";
@@ -104,9 +104,10 @@ export function parseRecord(text, { origin, ttl: defaultTtl, class: defaultClass
  */
 export function formatRecord(rec) {
 	if (rec === null || typeof rec !== "object" || Array.isArray(rec)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a record must be an object");
-	// one copy of the caller's record (CLDMV/digby#39): every field is read exactly once, and the validation and the line are
-	// built from the copy — a getter cannot show the checks one value and the printed line another
-	const snap = { name: rec.name, ttl: rec.ttl, class: rec.class, type: rec.type, data: snapshotRdata(rec.data) };
+	// one copy of the caller's record (CLDMV/digby#39): the input is copied once with structuredClone and every field is read
+	// exactly once from the copy, so the validation and the line see the same values — a getter cannot show the checks one
+	// value and the printed line another
+	const snap = cloneInput(rec, "a record");
 	const name = canonicalName(snap.name); // parses, so no unvalidated name text reaches the line
 	if (!Number.isInteger(snap.ttl) || snap.ttl < 0 || snap.ttl > MAX_TTL) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `TTL out of range: ${String(snap.ttl)}`);
 	const cls = snap.class ?? CLASS.IN;
@@ -123,10 +124,17 @@ export function formatRecord(rec) {
 		if (RDATA_REQUIRED.has(snap.type)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${typeToString(snap.type)} rdata must be present; the empty-rdata update form does not apply to it`);
 		return head;
 	}
-	// under class ANY or NONE, zero-length rdata IS the update form — the wire reader maps rdlength 0 to data: null
-	// (CLDMV/digby#37) — so a zero-length generic rdata value has no line of its own: `\# 0` parses back as data: null.
-	// Refuse it and ask for the update form itself.
-	if ((cls === CLASS.ANY || cls === CLASS.NONE) && !isTyped(snap.type) && snap.data?.data instanceof Uint8Array && snap.data.data.length === 0)
-		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "zero-length rdata in class ANY or NONE is the empty-rdata update form; give data: null");
+	// Generic-form rdata: the types with no presentation of their own, and OPT — typed on the wire, generic in text. The
+	// octets are encoded here, so the zero-length refusal below and the printed line describe the same rdata (CLDMV/digby#37).
+	if (isGenericForm(snap.type)) {
+		const octets = encodeRdataBytes(snap.type, snap.data);
+		// under class ANY or NONE, zero-length rdata IS the update form — the wire reader maps rdlength 0 to data: null
+		// (CLDMV/digby#37) — so `\# 0` has no line of its own: it parses back as data: null. Refuse it and ask for the
+		// update form itself. OPT with no options slipped through the shape check that only saw the generic `{ data }` form
+		// (CLDMV/digby#38); encoding decides it for every generic-form type alike.
+		if ((cls === CLASS.ANY || cls === CLASS.NONE) && octets.length === 0)
+			fail(WireErrorCode.VALUE_OUT_OF_RANGE, "zero-length rdata in class ANY or NONE is the empty-rdata update form; give data: null");
+		return `${head} ${formatGeneric(octets)}`;
+	}
 	return `${head} ${formatRdata(snap.type, snap.data)}`;
 }
