@@ -30,25 +30,30 @@ const VIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(U
 /** The same two, for DataViews. */
 const DATAVIEW_BYTE_OFFSET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteOffset").get;
 const DATAVIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get;
+/** The getter sets per view kind: a typed array's (off the %TypedArray% prototype) and a DataView's. */
+const VIEW_GETTERS = [VIEW_BUFFER, VIEW_BYTE_OFFSET, VIEW_BYTE_LENGTH];
+const DATAVIEW_GETTERS = [DATAVIEW_BUFFER, DATAVIEW_BYTE_OFFSET, DATAVIEW_BYTE_LENGTH];
 
 /**
  * A view's buffer, byteOffset and byteLength, read through the intrinsic getters so no own `buffer`, `byteOffset` or
  * `byteLength` property can shadow them (CLDMV/digby#39): an own `buffer` data property or getter on a Uint8Array would
  * otherwise hand the caller a SharedArrayBuffer to read instead of refusing it, and a shadowed `byteOffset` or
- * `byteLength` would make the view construction itself throw a raw RangeError. The pick is brand-checked, not
- * `instanceof`-picked: every getter verifies its receiver's internal slot, so a prototype swap cannot make the DataView
- * getter run on a typed array or the other way round — the reader tries the DataView one and falls back to the
- * typed-array one. Returns null when `v` is not a view or the reads throw (a Proxy's traps, a revoked Proxy) — every
- * caller treats null as "not a SharedArrayBuffer"; the type checks refuse those values anyway.
+ * `byteLength` would make the view construction itself throw a raw RangeError. `instanceof` only picks which getter set
+ * to try first — it is a hint, never the check: every getter verifies its receiver's internal slot, so a prototype swap
+ * that fakes the hint merely costs the other set one try, and the brand check cannot be faked (CLDMV/digby#39). Returns
+ * null when `v` is not a view or the reads throw (a Proxy's traps, a revoked Proxy) — every caller treats null as "not a
+ * SharedArrayBuffer"; the type checks refuse those values anyway.
  * @param {unknown} v
  * @returns {{ buffer: ArrayBuffer | SharedArrayBuffer, byteOffset: number, byteLength: number } | null}
  */
 export function intrinsicView(v) {
+	const first = v instanceof DataView ? DATAVIEW_GETTERS : VIEW_GETTERS;
 	try {
-		return { buffer: DATAVIEW_BUFFER.call(v), byteOffset: DATAVIEW_BYTE_OFFSET.call(v), byteLength: DATAVIEW_BYTE_LENGTH.call(v) };
+		return { buffer: first[0].call(v), byteOffset: first[1].call(v), byteLength: first[2].call(v) };
 	} catch {}
+	const second = first === DATAVIEW_GETTERS ? VIEW_GETTERS : DATAVIEW_GETTERS;
 	try {
-		return { buffer: VIEW_BUFFER.call(v), byteOffset: VIEW_BYTE_OFFSET.call(v), byteLength: VIEW_BYTE_LENGTH.call(v) };
+		return { buffer: second[0].call(v), byteOffset: second[1].call(v), byteLength: second[2].call(v) };
 	} catch {}
 	return null;
 }
