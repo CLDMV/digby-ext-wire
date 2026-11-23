@@ -23,7 +23,7 @@
  * decode's walk, not the characters it materialises — see the cap's note.
  */
 
-import { MAX_MESSAGE } from "./buffer.mjs";
+import { MAX_MESSAGE, intrinsicView } from "./buffer.mjs";
 import { WireError, WireErrorCode, fail } from "./errors.mjs";
 
 /** The longest label (RFC 1035 2.3.4). */
@@ -150,10 +150,20 @@ export function formatName(labels) {
 		let n = 1;
 		for (const l of labels) {
 			if (!(l instanceof Uint8Array)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a name's labels are Uint8Arrays");
-			if (l.length > MAX_LABEL) fail(WireErrorCode.LABEL_TOO_LONG, `a label is at most ${MAX_LABEL} octets, got ${l.length}`);
-			n += l.length + 1;
+			// the label's shape is read through the intrinsic getters and the octets are formatted from a fresh view
+			// built from them (CLDMV/digby#39): an own `length` property cannot shadow the wire length — a zero-length
+			// label with an own length of 5 printed five raw NULs and a 60-octet label with an own length of 3 printed
+			// only "aaa." — and a label over a SharedArrayBuffer is refused like every byte-taking entry (formatName was
+			// the only one without the rule; with a length-tracking view over a growable SAB the length was checked once
+			// and then read again)
+			const view = intrinsicView(l);
+			if (view === null) fail(WireErrorCode.NOT_CLONEABLE, "a name's label is not a readable typed array");
+			if (view.buffer instanceof SharedArrayBuffer)
+				fail(WireErrorCode.NOT_CLONEABLE, "a name's label is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+			if (view.byteLength > MAX_LABEL) fail(WireErrorCode.LABEL_TOO_LONG, `a label is at most ${MAX_LABEL} octets, got ${view.byteLength}`);
+			n += view.byteLength + 1;
 			if (n > MAX_NAME) fail(WireErrorCode.NAME_TOO_LONG, `a name is at most ${MAX_NAME} octets in wire form, got ${n}`);
-			out += formatLabel(l) + ".";
+			out += formatLabel(new Uint8Array(view.buffer, view.byteOffset, view.byteLength)) + ".";
 		}
 	} catch (err) {
 		if (err instanceof WireError) throw err;
