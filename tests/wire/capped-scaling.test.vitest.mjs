@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
+import { WireError } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage, encodeCapped, encodeMessage, wireCounters } from "../../src/lib/wire/message.mjs";
 
 // A 100-label apex of one-octet labels: 201 wire octets, the "long apex" shape of CLDMV/digby#40.
@@ -199,6 +200,73 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 				// ~24-200 times on this shape (a fresh exact trial per set, each re-encoding the kept second
 				// records sitting between the candidate's two), growing with M
 				expect(writes, `M=${M} ${tag}: ${writes} record writes for ${records} records`).toBeLessThanOrEqual(6 * records);
+			}
+		}
+	}, 120_000);
+
+	// The shape the round-5 cascade goes quadratic on: a filler TXT parks the stream just under 0x4000, then one
+	// NS RRset's records interleave with many small distinct TXT sets. Every TXT keep inserts octets that push part
+	// of the NS set's registrations across the pointer range, and the round-5 flip scan re-measured ALL of the NS
+	// set's records for every flip — 49.6/97.6/190.9/191.6 writes per record at 301/601/1201/2401 records. The fix
+	// re-measures only the records the flip touches, and every unit of model work — the scans included — is counted
+	// in wireCounters.modelWork, so the bound below is on recordWrites + scratchEncodes + modelWork together.
+	const boundaryShape = (n) => {
+		// 16,000 octets of filler as 63 character-strings (a character-string is at most 255 octets): the stream
+		// sits just under 0x4000 before the first keep, so the keeps cross the registration boundary immediately
+		const filler = [];
+		for (let left = 16000; left > 0; left -= 255) filler.push(new Uint8Array(Math.min(255, left)).fill(0x66));
+		const answers = [
+			{ name: "f.t.", type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: filler } },
+			{ name: "e.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: "u.s0.example." } }
+		];
+		// the rest: alternating distinct TXT sets (~44 octets each) and the e.t. NS set's remaining records
+		const rest = n - 2;
+		for (let i = 0; i < rest; i++) {
+			if (i % 2 === 0) answers.push({ name: `x${i / 2}.t.`, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: [new Uint8Array(28).fill(0x78)] } });
+			else answers.push({ name: "e.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `u.s${(i + 1) / 2}.example.` } });
+		}
+		return { id: 1, flags: { qr: true }, questions: [{ name: "example.", type: TYPE.A, class: CLASS.IN }], answers };
+	};
+
+	it("keeps the model's work linear when keeps shift registrations across 0x4000 (CLDMV/digby#43)", () => {
+		const work = () => {
+			expect("modelWork" in wireCounters, "wireCounters counts model work").toBe(true);
+			return wireCounters.recordWrites + wireCounters.scratchEncodes + wireCounters.modelWork;
+		};
+		for (const n of [301, 1201, 2401]) {
+			const m = boundaryShape(n);
+			// "full" is the whole encode when it fits the largest message and the largest message itself when the
+			// 2,401-record shape does not (the filler alone is 16 KB, so 2,401 records overflow 65,535)
+			let full;
+			let fullTruncates = false;
+			try {
+				full = encodeMessage(m).length;
+			} catch (err) {
+				if (!(err instanceof WireError) || err.code !== "MESSAGE_TOO_LARGE") throw err;
+				full = 65535;
+				fullTruncates = true;
+			}
+			const nsRecords = 1 + Math.floor((n - 2) / 2);
+			for (const [tag, limit] of [
+				["full", full],
+				["one under full", full - 1],
+				["90%", Math.floor((full * 9) / 10)]
+			]) {
+				wireCounters.recordWrites = 0;
+				wireCounters.scratchEncodes = 0;
+				wireCounters.modelWork = 0;
+				const r = encodeCapped(m, { limit });
+				const w = work();
+				const d = decodeMessage(r.bytes);
+				expect(d.flags.tc, `n=${n} ${tag}: the truncation flag`).toBe(limit < full || fullTruncates);
+				// the survivors are whole RRsets in first-seen order, each complete
+				const counts = new Map();
+				for (const rec of d.answers) counts.set(rec.name, (counts.get(rec.name) ?? 0) + 1);
+				for (const [name, c] of counts) expect(c, `n=${n} ${tag}: ${name} complete`).toBe(name === "e.t." ? nsRecords : 1);
+				expect(r.bytes.length, `n=${n} ${tag}: within the limit`).toBeLessThanOrEqual(limit);
+				// linear: the same small constant multiple of the records at every size and limit — the round-5
+				// cascade spent ~50-192 record writes per record here and grew with n
+				expect(w, `n=${n} ${tag}: ${w} units of work for ${n} records`).toBeLessThanOrEqual(12 * n);
 			}
 		}
 	}, 120_000);
