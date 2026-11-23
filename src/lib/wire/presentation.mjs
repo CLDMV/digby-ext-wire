@@ -13,7 +13,7 @@
  */
 
 import { CLASS, classFromString, classToString, isClassToken, typeFromString, typeToString } from "./constants.mjs";
-import { WireError, WireErrorCode, cloneInput, fail } from "./errors.mjs";
+import { WireError, WireErrorCode, cloneInput, describe, fail } from "./errors.mjs";
 import { RDATA_REQUIRED } from "./message.mjs";
 import { canonicalName } from "./names.mjs";
 import { encodeRdataBytes, formatGeneric, formatRdata, isGenericForm, parseRdataTokens } from "./rdata/index.mjs";
@@ -35,6 +35,9 @@ const RESERVED_TYPE = 0xffff;
  * @returns {number}
  */
 export function parseTtl(text) {
+	// the text is checked before any regex coercion: /^\d+$/.test() stringifies its argument, and a Symbol or an
+	// object with a hostile toString would throw a raw TypeError (CLDMV/digby#39)
+	if (typeof text !== "string") fail(WireErrorCode.BAD_PRESENTATION, "a TTL must be a string");
 	let v;
 	if (/^\d+$/.test(text)) v = Number(text);
 	else if (/^(?:\d+[smhdwSMHDW])+$/.test(text)) {
@@ -119,10 +122,12 @@ export function formatRecord(rec) {
 	// value and the printed line another
 	const snap = cloneInput(rec, "a record");
 	const name = canonicalName(snap.name); // parses, so no unvalidated name text reaches the line
-	if (!Number.isInteger(snap.ttl) || snap.ttl < 0 || snap.ttl > MAX_TTL) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `TTL out of range: ${String(snap.ttl)}`);
+	// the fields are described, never String()ed: they are the copy's values, but a plain object with a hostile
+	// toString survives the clone and String() on it throws a TypeError (CLDMV/digby#39)
+	if (!Number.isInteger(snap.ttl) || snap.ttl < 0 || snap.ttl > MAX_TTL) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `TTL out of range: ${describe(snap.ttl)}`);
 	const cls = snap.class ?? CLASS.IN;
-	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${String(cls)}`);
-	if (!Number.isInteger(snap.type) || snap.type < 0 || snap.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(snap.type)}`);
+	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${describe(cls)}`);
+	if (!Number.isInteger(snap.type) || snap.type < 0 || snap.type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${describe(snap.type)}`);
 	// the record-layer rules parseRecord and writeRecord apply (CLDMV/digby#38): types 0 and 65535 are reserved, and empty
 	// rdata is only the RFC 2136 update form — a type that must carry rdata (RDATA_REQUIRED) never takes it
 	if (snap.type === 0 || snap.type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `record type ${snap.type} is reserved`);

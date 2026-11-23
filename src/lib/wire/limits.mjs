@@ -12,7 +12,7 @@
  */
 
 import { MAX_MESSAGE, asBytes, checkInt } from "./buffer.mjs";
-import { WireErrorCode, fail } from "./errors.mjs";
+import { WireErrorCode, describe, fail } from "./errors.mjs";
 import { encodeCapped } from "./message.mjs";
 
 /** The UDP limit without EDNS (RFC 1035 4.2.1). */
@@ -58,7 +58,8 @@ export function encodeForTransport(message, { transport, query = null, cap = DEF
 	if (limit !== undefined) max = limit;
 	else if (transport === "udp") max = udpLimit(query, { cap });
 	else if (transport === "tcp") max = TCP_MAX;
-	else fail(WireErrorCode.VALUE_OUT_OF_RANGE, `unknown transport "${String(transport)}"`);
+	// described, never String()ed — a hostile transport must not break the refusal itself (CLDMV/digby#39)
+	else fail(WireErrorCode.VALUE_OUT_OF_RANGE, `unknown transport ${describe(transport)}`);
 	const { bytes, truncated } = encodeCapped(message, { limit: max, compress });
 	return { bytes, truncated, limit: max };
 }

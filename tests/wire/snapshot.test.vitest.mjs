@@ -24,9 +24,10 @@ import { describe, expect, it } from "vitest";
 import { Writer } from "../../src/lib/wire/buffer.mjs";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { writeTypeBitmap } from "../../src/lib/wire/rdata/dnssec.mjs";
-import { encodeRdataBytes, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { decodeRdataBytes, encodeRdataBytes, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
 import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
-import { formatRecord } from "../../src/lib/wire/presentation.mjs";
+import { canonicalName, namesEqual, parseName } from "../../src/lib/wire/names.mjs";
+import { formatRecord, parseRdata, parseRecord, parseTtl } from "../../src/lib/wire/presentation.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 
 const code = (fn) => {
@@ -505,5 +506,164 @@ describe("the NOT_CLONEABLE refusal never reads the thrown value (CLDMV/digby#39
 	it("a getter that throws an object with a hostile message is never stringified", () => {
 		// today: `${err.message}` invokes the thrown value's message's toString — the raw Error("boom") escapes
 		expect(code(() => encodeMessage({ id: 1, answers: [rec({ get data() { throw { message: { toString() { throw new Error("boom"); } } }; } })] }))).toBe("NOT_CLONEABLE");
+	});
+});
+
+describe("a public entry throws only WireError, for any input (CLDMV/digby#39, round 5)", () => {
+	// every value a caller can hand an entry that is not plain data, or that breaks a naive String()/template of it
+	const revokedProxy = (() => {
+		const { proxy, revoke } = Proxy.revocable({}, {});
+		revoke();
+		return proxy;
+	})();
+	const throwingGet = new Proxy({}, { get() { throw new RangeError("get trap"); } });
+	const throwingProto = new Proxy({}, { getPrototypeOf() { throw new RangeError("getPrototypeOf trap"); } });
+	const throwingView = new Proxy(new Uint8Array([1, 2, 3, 4]), { get() { throw new RangeError("get trap"); } });
+	const throwingNull = Object.defineProperty({}, "x", { get() { throw null; }, enumerable: true });
+	const throwingSymbol = Object.defineProperty({}, "x", { get() { throw Symbol("boom"); }, enumerable: true });
+	const throwingObject = Object.defineProperty({}, "x", { get() { throw { message: { toString() { throw new Error("boom"); } } }; }, enumerable: true });
+	const toStringOne = { toString: 1, valueOf: 1 };
+	const toStringNull = { toString: null };
+	const nullProto = Object.create(null);
+	const hostiles = [
+		["a revoked Proxy", revokedProxy],
+		["a Proxy whose get trap throws", throwingGet],
+		["a Proxy whose getPrototypeOf trap throws", throwingProto],
+		["a Proxy over a Uint8Array whose get trap throws", throwingView],
+		["a getter that throws null", throwingNull],
+		["a getter that throws a Symbol", throwingSymbol],
+		["a getter that throws an unstringifiable object", throwingObject],
+		["{ toString: 1, valueOf: 1 }", toStringOne],
+		["{ toString: null }", toStringNull],
+		["Object.create(null)", nullProto],
+		["a Symbol", Symbol("nope")],
+		["a function", () => {}]
+	];
+
+	const question = (over) => ({ name: "q.example.", type: TYPE.A, class: 1, ...over });
+	const arec = (over) => ({ name: "a.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.1" }, ...over });
+	const envelope = (over) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [], authorities: [], additionals: [], edns: null, ...over });
+	const rrsigData = (over) => ({ typeCovered: TYPE.A, algorithm: 13, labels: 2, originalTtl: 3600, expiration: 0, inception: 0, keyTag: 1, signerName: "example.", signature: new Uint8Array([1, 2, 3]), ...over });
+	const tsigRdata = (over) => ({ ...tsigData(1), mac: new Uint8Array(4), ...over });
+	const tsig = (over) => ({ name: "key.example.", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: tsigRdata(), ...over });
+	const makeCapped = () => encodeCapped(envelope({ additionals: [arec()] }), { limit: 280, reserveTsig: tsigRecordSize(tsig()) });
+
+	// every input position of every public entry the snapshot round covers; each shape receives one hostile value.
+	// (decodeRdataBytes' octets position is the octet-copy round's; the names, mnemonic and transport helpers are
+	// outside this slice.)
+	const shapes = [
+		["decodeMessage: the bytes", (hv) => () => decodeMessage(hv)],
+		["encodeMessage: the message", (hv) => () => encodeMessage(hv)],
+		["encodeMessage: id", (hv) => () => encodeMessage(envelope({ id: hv }))],
+		["encodeMessage: flags", (hv) => () => encodeMessage(envelope({ flags: hv }))],
+		["encodeMessage: rcode", (hv) => () => encodeMessage(envelope({ rcode: hv }))],
+		["encodeMessage: question name", (hv) => () => encodeMessage(envelope({ questions: [question({ name: hv })] }))],
+		["encodeMessage: question type", (hv) => () => encodeMessage(envelope({ questions: [question({ type: hv })] }))],
+		["encodeMessage: question class", (hv) => () => encodeMessage(envelope({ questions: [question({ class: hv })] }))],
+		["encodeMessage: record name", (hv) => () => encodeMessage(envelope({ answers: [arec({ name: hv })] }))],
+		["encodeMessage: record type", (hv) => () => encodeMessage(envelope({ answers: [arec({ type: hv })] }))],
+		["encodeMessage: record class", (hv) => () => encodeMessage(envelope({ answers: [arec({ class: hv })] }))],
+		["encodeMessage: record ttl", (hv) => () => encodeMessage(envelope({ answers: [arec({ ttl: hv })] }))],
+		["encodeMessage: record data", (hv) => () => encodeMessage(envelope({ answers: [arec({ data: hv })] }))],
+		["encodeMessage: rdata field", (hv) => () => encodeMessage(envelope({ answers: [arec({ data: { address: hv } })] }))],
+		["encodeMessage: RRSIG typeCovered", (hv) => () => encodeMessage(envelope({ answers: [arec({ type: TYPE.RRSIG, data: rrsigData({ typeCovered: hv }) })] }))],
+		["encodeMessage: edns", (hv) => () => encodeMessage(envelope({ edns: hv }))],
+		["encodeMessage: edns udpSize", (hv) => () => encodeMessage(envelope({ edns: { udpSize: hv, options: [] } }))],
+		["encodeMessage: an EDNS option", (hv) => () => encodeMessage(envelope({ edns: { options: [hv] } }))],
+		["encodeMessage: EDNS option code", (hv) => () => encodeMessage(envelope({ edns: { options: [{ code: hv, data: new Uint8Array([1]) }] } }))],
+		["encodeMessage: maxSize", (hv) => () => encodeMessage(envelope(), { maxSize: hv })],
+		["encodeCapped: RRset class in the grouping key", (hv) => () => encodeCapped(envelope({ answers: [arec({ class: hv }), arec()] }), { limit: 60 })],
+		["encodeCapped: RRSIG typeCovered in the grouping key", (hv) => () => encodeCapped(envelope({ answers: [arec({ type: TYPE.RRSIG, data: rrsigData({ typeCovered: hv }) }), arec(), arec()] }), { limit: 60 })],
+		["encodeCapped: limit", (hv) => () => encodeCapped(envelope(), { limit: hv })],
+		["encodeCapped: reserveTsig", (hv) => () => encodeCapped(envelope(), { limit: 512, reserveTsig: hv })],
+		["appendTsig: the capped result", (hv) => () => appendTsig(hv, tsig())],
+		["appendTsig: the record", (hv) => () => appendTsig(makeCapped(), hv)],
+		["appendTsig: record name", (hv) => () => appendTsig(makeCapped(), tsig({ name: hv }))],
+		["appendTsig: record type", (hv) => () => appendTsig(makeCapped(), tsig({ type: hv }))],
+		["appendTsig: record class", (hv) => () => appendTsig(makeCapped(), tsig({ class: hv }))],
+		["appendTsig: record ttl", (hv) => () => appendTsig(makeCapped(), tsig({ ttl: hv }))],
+		["appendTsig: originalId", (hv) => () => appendTsig(makeCapped(), tsig({ data: tsigRdata({ originalId: hv }) }))],
+		["tsigRecordSize: the record", (hv) => () => tsigRecordSize(hv)],
+		["tsigRecordSize: record type", (hv) => () => tsigRecordSize(tsig({ type: hv }))],
+		["tsigRecordSize: record class", (hv) => () => tsigRecordSize(tsig({ class: hv }))],
+		["tsigRecordSize: record ttl", (hv) => () => tsigRecordSize(tsig({ ttl: hv }))],
+		["tsigRecordSize: originalId", (hv) => () => tsigRecordSize(tsig({ data: tsigRdata({ originalId: hv }) }))],
+		["formatRecord: the record", (hv) => () => formatRecord(hv)],
+		["formatRecord: name", (hv) => () => formatRecord(arec({ name: hv }))],
+		["formatRecord: ttl", (hv) => () => formatRecord(arec({ ttl: hv }))],
+		["formatRecord: class", (hv) => () => formatRecord(arec({ class: hv }))],
+		["formatRecord: type", (hv) => () => formatRecord(arec({ type: hv }))],
+		["formatRecord: data", (hv) => () => formatRecord(arec({ data: hv }))],
+		["formatRdata: type", (hv) => () => formatRdata(hv, { address: "10.0.0.1" })],
+		["formatRdata: data", (hv) => () => formatRdata(TYPE.A, hv)],
+		["formatRdata: RRSIG typeCovered", (hv) => () => formatRdata(TYPE.RRSIG, rrsigData({ typeCovered: hv }))],
+		["encodeRdataBytes: type", (hv) => () => encodeRdataBytes(hv, { address: "10.0.0.1" })],
+		["encodeRdataBytes: data", (hv) => () => encodeRdataBytes(TYPE.A, hv)],
+		["encodeRdataBytes: RRSIG typeCovered", (hv) => () => encodeRdataBytes(TYPE.RRSIG, rrsigData({ typeCovered: hv }))],
+		["decodeRdataBytes: type", (hv) => () => decodeRdataBytes(hv, new Uint8Array(4))],
+		["parseRecord: text", (hv) => () => parseRecord(hv)],
+		["parseRecord: origin", (hv) => () => parseRecord("@ IN A 10.0.0.1", { origin: hv })],
+		["parseRecord: default ttl", (hv) => () => parseRecord("a.example. IN A 10.0.0.1", { ttl: hv })],
+		["parseRecord: default class", (hv) => () => parseRecord("a.example. 60 IN A 10.0.0.1", { class: hv })],
+		["parseRdata: type", (hv) => () => parseRdata(hv, "10.0.0.1")],
+		["parseRdata: text", (hv) => () => parseRdata(TYPE.A, hv)],
+		["parseRdata: origin", (hv) => () => parseRdata(TYPE.MX, "10 mail", hv)],
+		["parseTtl: text", (hv) => () => parseTtl(hv)],
+		["parseName: text", (hv) => () => parseName(hv)],
+		["canonicalName: text", (hv) => () => canonicalName(hv)],
+		["namesEqual: a name", (hv) => () => namesEqual(hv, "a.example.")]
+	];
+
+	it("every hostile value at every input position returns or throws WireError, never anything else", () => {
+		const escapes = [];
+		for (const [what, shape] of shapes) {
+			for (const [hvName, hv] of hostiles) {
+				let outcome;
+				try {
+					shape(hv)();
+					outcome = "returned";
+				} catch (err) {
+					outcome = err;
+				}
+				if (outcome !== "returned" && !(outcome instanceof WireError)) {
+					const shown = outcome instanceof Error ? outcome.constructor.name : String(outcome);
+					escapes.push(`${what} with ${hvName} escaped as ${shown}: ${outcome instanceof Error ? outcome.message : ""}`);
+				}
+			}
+		}
+		// every escape at once, so one run lists all the positions that still leak
+		expect(escapes).toEqual([]);
+	});
+});
+
+describe("error messages never stringify caller values (CLDMV/digby#39, round 5)", () => {
+	const toStringOne = { toString: 1, valueOf: 1 };
+	it("checkType and checkInt describe a cloned hostile value instead of String()ing it", () => {
+		// today: `String(t)` on the cloned { toString: 1 } throws "is not a function" — a TypeError, not a WireError
+		expect(code(() => encodeMessage({ id: 1, questions: [{ name: "q.example.", type: toStringOne }] }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: checkedId's String(id) throws
+		expect(code(() => encodeMessage({ id: toStringOne, questions: [] }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: checkInt's String(v) on the ttl throws
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "a.example.", type: TYPE.A, class: 1, ttl: toStringOne, data: { address: "1.2.3.4" } }] }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: checkInt's String(maxSize) throws
+		expect(code(() => encodeMessage({ id: 1 }, { maxSize: toStringOne }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: checkInt's String(limit) and String(reserveTsig) throw
+		expect(code(() => encodeCapped({ id: 1 }, { limit: toStringOne }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeCapped({ id: 1 }, { limit: 512, reserveTsig: toStringOne }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+	it("appendTsig and tsigRecordSize describe cloned hostile values", () => {
+		const need = tsigRecordSize(tsigRecord(1));
+		const build = () => encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: need });
+		// today: String(rec.type) throws
+		expect(code(() => appendTsig(build(), { ...tsigRecord(1), type: toStringOne }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: classToString(rec.class) converts through a property key — the TypeError escapes
+		expect(code(() => appendTsig(build(), { ...tsigRecord(1), class: toStringOne }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: String(rec.ttl) throws
+		expect(code(() => appendTsig(build(), { ...tsigRecord(1), ttl: toStringOne }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: String(originalId) in the shown branch throws
+		expect(code(() => appendTsig(build(), { ...tsigRecord(1), data: { ...tsigData(1), mac: new Uint8Array(4), originalId: toStringOne } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => tsigRecordSize({ ...tsigRecord(1), type: toStringOne }))).toBe("VALUE_OUT_OF_RANGE");
+		// a string "4660" reads as the message's own ID in a bare String(); the description still names the type
+		expect(code(() => appendTsig(build(), { ...tsigRecord(1), data: { ...tsigData(1), mac: new Uint8Array(4), originalId: "4660" } }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 });

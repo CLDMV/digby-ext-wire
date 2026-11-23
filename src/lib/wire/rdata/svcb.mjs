@@ -16,7 +16,7 @@
  */
 
 import { SVC_KEY, svcKeyFromString, svcKeyToString } from "../constants.mjs";
-import { WireErrorCode, fail } from "../errors.mjs";
+import { WireErrorCode, describe, fail } from "../errors.mjs";
 import { canonicalName, readName, writeName } from "../names.mjs";
 import { escapeBytes, formatIPv4, formatIPv6, fromBase64, parseIPv4, parseIPv6, toBase64, unescapeBytes } from "../text.mjs";
 import { array, bytes, obj, string } from "./common.mjs";
@@ -142,7 +142,8 @@ function checkParams(params) {
 	let last = -1;
 	for (const p of params) {
 		if (p === null || typeof p !== "object") badParam("a SvcParam is an object { key, value }");
-		if (!Number.isInteger(p.key) || p.key < 0 || p.key >= 0xffff) badParam(`SvcParamKey ${String(p.key)} is invalid`);
+		// described, never String()ed — the params are the copy's values, but a hostile key must not break the refusal itself (CLDMV/digby#39)
+		if (!Number.isInteger(p.key) || p.key < 0 || p.key >= 0xffff) badParam(`SvcParamKey ${describe(p.key)} is invalid`);
 		if (p.key <= last) badParam("SvcParamKeys must be strictly increasing");
 		last = p.key;
 	}
@@ -150,7 +151,7 @@ function checkParams(params) {
 	if (!mandatory) return;
 	let prev = -1;
 	for (const k of array(mandatory.value, "mandatory")) {
-		if (!Number.isInteger(k) || k < 0 || k > 0xffff) badParam(`mandatory key ${String(k)} is invalid`);
+		if (!Number.isInteger(k) || k < 0 || k > 0xffff) badParam(`mandatory key ${describe(k)} is invalid`);
 		if (k === SVC_KEY.mandatory) badParam("mandatory must not list itself");
 		if (k <= prev) badParam("mandatory keys must be strictly increasing");
 		prev = k;

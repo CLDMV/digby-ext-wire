@@ -30,9 +30,9 @@
  */
 
 import { MAX_MESSAGE, Reader, Writer, asBytes, checkInt } from "./buffer.mjs";
-import { CLASS, OPCODE, TYPE, classToString, typeToString } from "./constants.mjs";
+import { CLASS, OPCODE, TYPE, typeToString } from "./constants.mjs";
 import { joinOptTtl, readOptions, splitOptTtl, writeOptions } from "./edns.mjs";
-import { WireError, WireErrorCode, cloneInput, fail } from "./errors.mjs";
+import { WireError, WireErrorCode, cloneInput, describe, fail } from "./errors.mjs";
 import { HEADER_SIZE, TC_BIT, packFlags, unpackFlags } from "./header.mjs";
 import { MAX_NAME_OCTETS, nameKey, readName, writeName } from "./names.mjs";
 import { array, obj, string } from "./rdata/common.mjs";
@@ -184,7 +184,9 @@ export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true 
  * @returns {number}
  */
 function checkType(t, what) {
-	if (!Number.isInteger(t) || t < 0 || t > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} out of range: ${String(t)}`);
+	// the value is described, never String()ed: the copy is plain data, but a plain object with `toString: 1` survives
+	// the clone and String() on it throws a TypeError (CLDMV/digby#39)
+	if (!Number.isInteger(t) || t < 0 || t > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} out of range: ${describe(t)}`);
 	if (t === 0 || t === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} ${t} is reserved`);
 	return t;
 }
@@ -351,15 +353,16 @@ export function appendTsig(capped, tsigRecord) {
 	if (!(given instanceof Uint8Array) || given.length !== bytes.length) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
 	for (let i = 0; i < bytes.length; i++) if (given[i] !== bytes[i]) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
 	const rec = snapshotRecord(cloneInput(tsigRecord, "TSIG record"), "TSIG record");
-	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(rec.type)}`);
+	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${describe(rec.type)}`);
 	// a TSIG record carries class ANY and TTL 0 on the wire (RFC 8945 4.1.1) (CLDMV/digby#39)
-	if (rec.class !== CLASS.ANY) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has class ANY (RFC 8945 4.1.1), got ${classToString(rec.class)}`);
-	if (rec.ttl !== 0) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has TTL 0 (RFC 8945 4.1.1), got ${String(rec.ttl)}`);
+	if (rec.class !== CLASS.ANY) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has class ANY (RFC 8945 4.1.1), got ${describe(rec.class)}`);
+	if (rec.ttl !== 0) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has TTL 0 (RFC 8945 4.1.1), got ${describe(rec.ttl)}`);
 	const id = (bytes[0] << 8) | bytes[1];
 	const originalId = rec.data?.originalId;
 	if (!Number.isInteger(originalId) || originalId !== id) {
-		// a non-number's String() can equal the message's ID ("4660"), so name the type (CLDMV/digby#39)
-		const shown = typeof originalId === "number" ? String(originalId) : `of type ${typeof originalId} (${String(originalId)})`;
+		// a non-number's String() can equal the message's ID ("4660"), so the type is named — and the value is
+		// described, never String()ed: a hostile originalId must not be able to break the refusal itself (CLDMV/digby#39)
+		const shown = typeof originalId === "number" ? String(originalId) : `of type ${typeof originalId} (${describe(originalId)})`;
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the TSIG's original ID ${shown} is not this message's ID ${id}`);
 	}
 	// the record must fit the space reserved for it; a Writer capped at exactly the room left turns an oversized record into
@@ -396,7 +399,7 @@ export function appendTsig(capped, tsigRecord) {
  */
 export function tsigRecordSize(tsigRecord) {
 	const rec = snapshotRecord(cloneInput(tsigRecord, "TSIG record"), "TSIG record");
-	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `tsigRecordSize measures a TSIG record, got type ${String(rec.type)}`);
+	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `tsigRecordSize measures a TSIG record, got type ${describe(rec.type)}`);
 	const w = new Writer({ max: MAX_MESSAGE, compress: false });
 	writeRecord(w, rec);
 	return w.length;
@@ -747,7 +750,11 @@ function rrsets(list) {
 	const byKey = new Map();
 	for (let i = 0; i < list.length; i++) {
 		const rec = list[i];
-		const k = `${nameKey(string(rec.name, "record name"))}|${rec.type}|${rec.class ?? CLASS.IN}|${rec.type === TYPE.RRSIG ? rec.data?.typeCovered : ""}`;
+		// the class and the covered type are described, never stringified: they are the copy's values, but a plain
+		// object with a hostile toString survives the clone and a template literal on it throws a TypeError. Such a
+		// class never reaches the wire (writeRecord's checkInt refuses it), so descriptions colliding into one key is
+		// harmless (CLDMV/digby#39).
+		const k = `${nameKey(string(rec.name, "record name"))}|${rec.type}|${describe(rec.class ?? CLASS.IN)}|${rec.type === TYPE.RRSIG ? describe(rec.data?.typeCovered) : ""}`;
 		let ix = byKey.get(k);
 		if (ix === undefined) {
 			ix = sets.length;

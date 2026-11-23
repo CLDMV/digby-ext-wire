@@ -14,7 +14,7 @@
  * logic can roll back a record set that did not fit.
  */
 
-import { WireErrorCode, fail } from "./errors.mjs";
+import { WireErrorCode, describe, fail } from "./errors.mjs";
 
 /** The largest DNS message: the TCP length prefix is 16 bits. */
 export const MAX_MESSAGE = 65535;
@@ -25,9 +25,16 @@ export const MAX_MESSAGE = 65535;
  * @returns {Uint8Array}
  */
 export function asBytes(bytes) {
-	if (bytes instanceof Uint8Array) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-	if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
-	if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	// `instanceof` and the buffer/offset/length reads can fire a Proxy's traps (a revoked Proxy throws for
+	// `instanceof`'s getPrototypeOf) — any such throw means the input cannot be read as octets, which is the
+	// VALUE_OUT_OF_RANGE refusal (CLDMV/digby#39)
+	try {
+		if (bytes instanceof Uint8Array) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
+		if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	} catch {
+		// fall through to the refusal
+	}
 	return fail(WireErrorCode.VALUE_OUT_OF_RANGE, "expected a Uint8Array, an ArrayBuffer or an ArrayBufferView");
 }
 
@@ -251,5 +258,7 @@ export class Writer {
  * @param {string} what
  */
 export function checkInt(v, max, what) {
-	if (!Number.isInteger(v) || v < 0 || v > max) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} out of range: ${String(v)}`);
+	// the value is described, never String()ed: a caller value with a hostile toString/valueOf must not be able to
+	// break the refusal itself (CLDMV/digby#39)
+	if (!Number.isInteger(v) || v < 0 || v > max) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} out of range: ${describe(v)}`);
 }

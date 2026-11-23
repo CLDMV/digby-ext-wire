@@ -83,6 +83,32 @@ export function fail(code, message, offset) {
 }
 
 /**
+ * Describe a caller value for an error message without running caller code and without ever throwing (CLDMV/digby#39).
+ * `String()` — and a template literal's `${v}` — invokes the value's `toString`/`valueOf`: a plain object with
+ * `toString: 1` (which clones fine — it is data) makes the stringification itself throw a TypeError, an
+ * `Object.create(null)` cannot be converted at all, and a revoked Proxy throws even for `typeof`. Error messages
+ * therefore never stringify a caller value through them: a primitive is shown directly, anything else only by its
+ * `typeof` tag.
+ * @param {unknown} v
+ * @returns {string}
+ */
+export function describe(v) {
+	let tag;
+	try {
+		tag = typeof v;
+	} catch {
+		return "an uninspectable value"; // a revoked Proxy: even `typeof` throws
+	}
+	if (tag === "string") return JSON.stringify(v);
+	if (tag === "number" || tag === "boolean" || tag === "bigint") return String(v); // primitives: String() never throws
+	if (tag === "object") return v === null ? "null" : "an object";
+	if (tag === "undefined") return "undefined";
+	if (tag === "function") return "a function";
+	if (tag === "symbol") return "a symbol";
+	return `a ${tag}`;
+}
+
+/**
  * The most entries any list the input may hold (CLDMV/digby#39): the largest count the wire form can carry (a 16-bit
  * section count, RFC 1035 4.1). A list this long already costs its own octets on the wire, so anything a caller hands
  * the codec beyond it is either a sparse array (refused below, before anything walks it) or a dense one a truncating

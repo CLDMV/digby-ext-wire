@@ -411,3 +411,20 @@ describe("the standalone entries refuse reserved and non-integer types (CLDMV/di
 		expect(code(() => parseRdata(1.5, "10.0.0.1"))).toBe("VALUE_OUT_OF_RANGE");
 	});
 });
+
+describe("the standalone entries never stringify caller values (CLDMV/digby#39, round 5)", () => {
+	const toStringOne = { toString: 1, valueOf: 1 };
+	const rrsig = (over) => ({ typeCovered: TYPE.A, algorithm: 13, labels: 2, originalTtl: 3600, expiration: 0, inception: 0, keyTag: 1, signerName: "example.", signature: new Uint8Array([1, 2, 3]), ...over });
+	it("checkRdataType describes a hostile type instead of String()ing it", () => {
+		// today: String(Object.create(null)) throws "Cannot convert object to primitive value", before any clone runs
+		expect(code(() => formatRdata(Object.create(null), {}))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRdata(toStringOne, { data: new Uint8Array([1]) }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeRdataBytes(toStringOne, { data: new Uint8Array([1]) }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+	it("RRSIG's and the type bitmap's refusals describe a cloned hostile value", () => {
+		// today: the reserved check passes a hostile covered, and checkInt's String(v) on it throws
+		expect(code(() => encodeRdataBytes(TYPE.RRSIG, rrsig({ typeCovered: toStringOne })))).toBe("VALUE_OUT_OF_RANGE");
+		// today: String(t) in the type bitmap's validation loop throws
+		expect(code(() => encodeRdataBytes(TYPE.NSEC, { next: ".", types: [toStringOne] }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+});

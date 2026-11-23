@@ -12,7 +12,7 @@
  */
 
 import { typeFromString, typeToString } from "../constants.mjs";
-import { WireErrorCode, fail } from "../errors.mjs";
+import { WireErrorCode, describe, fail } from "../errors.mjs";
 import { canonicalName, readName, writeName } from "../names.mjs";
 import { formatTime, fromBase32Hex, fromBase64, fromHex, parseTime, toBase32Hex, toBase64, toHex } from "../text.mjs";
 import { array, badRdata, bytes, obj, string } from "./common.mjs";
@@ -51,7 +51,9 @@ export function readTypeBitmap(r) {
 export function writeTypeBitmap(w, types) {
 	const list = [];
 	for (const t of array(types, "the type list")) {
-		if (!Number.isInteger(t) || t < 0 || t > 0xffff) badRdata(`type ${String(t)} is out of range`);
+		// the type is described, never String()ed: the list is the copy's values, but a plain object with a hostile
+		// toString survives the clone and String() on it throws a TypeError (CLDMV/digby#39)
+		if (!Number.isInteger(t) || t < 0 || t > 0xffff) badRdata(`type ${describe(t)} is out of range`);
 		if (t === 0) badRdata("a type bitmap must not include type 0"); // type 0 is reserved (CLDMV/digby#38)
 		if (t === 0xffff) badRdata("a type bitmap must not include type 65535"); // 65535 is reserved (CLDMV/digby#38)
 		list.push(t);
@@ -187,7 +189,8 @@ export const RRSIG = {
 	encode(w, data) {
 		obj(data, "RRSIG");
 		const covered = data.typeCovered; // read once: the check and the write act on the same value (CLDMV/digby#39)
-		if (covered === 0 || covered === 0xffff) badRdata(`RRSIG type covered ${String(covered)} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
+		// described, never String()ed — a hostile covered must not break the refusal itself (CLDMV/digby#39)
+		if (covered === 0 || covered === 0xffff) badRdata(`RRSIG type covered ${describe(covered)} is reserved`); // 0 and 65535 are reserved (CLDMV/digby#38)
 		w.u16(covered);
 		w.u8(data.algorithm);
 		w.u8(data.labels);

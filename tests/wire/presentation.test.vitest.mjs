@@ -274,3 +274,20 @@ describe("formatRecord validates its input (CLDMV/digby#37)", () => {
 		expect(code(() => formatRecord({ name: "a.", ttl: 0, class: 254, type: 249, data: null }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 });
+
+describe("formatRecord and parseTtl never stringify caller values (CLDMV/digby#39, round 5)", () => {
+	const toStringOne = { toString: 1, valueOf: 1 };
+	it("the ttl, class and type refusals describe a cloned hostile value", () => {
+		// today: String(snap.ttl) on the cloned { toString: 1 } throws "is not a function" — a TypeError, not a WireError
+		expect(code(() => formatRecord({ name: "a.example.", ttl: toStringOne, type: TYPE.A, data: { address: "10.0.0.1" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.example.", ttl: 60, class: toStringOne, type: TYPE.A, data: { address: "10.0.0.1" } }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => formatRecord({ name: "a.example.", ttl: 60, type: toStringOne, data: { address: "10.0.0.1" } }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: String(Object.create(null)) throws "Cannot convert object to primitive value"
+		expect(code(() => formatRecord({ name: "a.example.", ttl: 60, type: Object.create(null), data: { address: "10.0.0.1" } }))).toBe("VALUE_OUT_OF_RANGE");
+	});
+	it("parseTtl refuses a non-string before any coercion", () => {
+		// today: /^\d+$/.test(symbol) coerces through ToString — a raw TypeError
+		expect(code(() => parseTtl(Symbol("nope")))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseTtl(toStringOne))).toBe("BAD_PRESENTATION");
+	});
+});

@@ -13,7 +13,7 @@
 import { MAX_MESSAGE, Reader, Writer } from "../buffer.mjs";
 import { CLASS, TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
-import { WireErrorCode, cloneInput, fail } from "../errors.mjs";
+import { WireErrorCode, cloneInput, describe, fail } from "../errors.mjs";
 import { Tokens, fromHex, toHex, tokenize } from "../text.mjs";
 import { A, AAAA, CAA, CNAME, MX, NAPTR, NS, PTR, SOA, SRV, SSHFP, TLSA, TXT } from "./basic.mjs";
 import { badRdata, bytes, obj } from "./common.mjs";
@@ -43,7 +43,10 @@ const RESERVED_TYPE = 0xffff;
  * @returns {number}
  */
 function checkRdataType(type) {
-	if (!Number.isInteger(type) || type < 0 || type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${String(type)}`);
+	// the type is described, never String()ed: it is the caller's raw value — no clone has run yet — so an
+	// Object.create(null) (which String() cannot convert) or a hostile toString must not be able to break the refusal
+	// itself (CLDMV/digby#39)
+	if (!Number.isInteger(type) || type < 0 || type > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type out of range: ${describe(type)}`);
 	if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `type ${type} is reserved`);
 	return type;
 }
