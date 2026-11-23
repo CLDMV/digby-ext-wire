@@ -249,7 +249,8 @@ describe("encodeCapped and TSIG (CLDMV/digby#39)", () => {
 	});
 
 	it("reserves octets: the result plus the reservation fits the cap", () => {
-		const m = message({ answers: [TXT("p1.example.", 200), A(1)], additionals: [A(2)] });
+		// one question: a truncating encode of a message without exactly one question is refused (CLDMV/digby#43)
+		const m = message({ questions: [{ name: "example.", type: TYPE.A, class: 1 }], answers: [TXT("p1.example.", 200), A(1)], additionals: [A(2)] });
 		const full = encodeMessage(m).length;
 		// the default stays exactly what it was: bytes and truncated, nothing reserved
 		const base = encodeCapped(m, { limit: full });
@@ -527,6 +528,24 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 	const ns = (name, target) => ({ name, type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target } });
 	const txt = (name, n) => ({ name, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: txtFiller(n) });
 	const x63 = "x".repeat(63);
+	// A truncating encode of a message without exactly one question is refused (CLDMV/digby#43), so the shapes
+	// without a question can only be compared against the reference where nothing drops; the one-question shapes
+	// keep the full comparison across every limit.
+	const compareWithReference = (m, limit, tag) => {
+		let capped;
+		try {
+			capped = encodeCapped(m, { limit });
+		} catch (err) {
+			expect(err, `${tag}: the refusal`).toBeInstanceOf(WireError);
+			expect(err.code, `${tag}: the refusal code`).toBe("TRUNCATION_REFUSED");
+			expect(m.questions.length, `${tag}: the refusal only fires without exactly one question`).toBe(0);
+			return;
+		}
+		expect(capped.bytes.length, `${tag}: the capped encode stays within the limit`).toBeLessThanOrEqual(limit);
+		const reference = oracleCapped(m, { limit });
+		expect(capped.truncated, `${tag}: the truncation flag matches the exact-trial reference`).toBe(reference.truncated);
+		expect(hex.to(capped.bytes), `${tag}: the bytes match the exact-trial reference`).toBe(hex.to(reference.bytes));
+	};
 
 	it("never outputs more than the limit when an insertion pushes a kept registration past 0x4000", () => {
 		// The round-3 probe's bound covers only the set being measured: keeping set k shifts every kept record
@@ -542,11 +561,7 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 				questions: [],
 				answers: [bigTxt("t.test.", filler), ns("z.test.", "n1.aaaa.example."), txt("b.test.", 200), ns("z.test.", `n2.${x63}.example.`), ns("z.test.", `n3.${x63}.example.`)]
 			};
-			const capped = encodeCapped(m, { limit: 16546 });
-			const reference = oracleCapped(m, { limit: 16546 });
-			expect(capped.bytes.length, `filler ${filler}: the capped encode stays within the limit`).toBeLessThanOrEqual(16546);
-			expect(capped.truncated, `filler ${filler}: the truncation flag matches the exact-trial reference`).toBe(reference.truncated);
-			expect(hex.to(capped.bytes), `filler ${filler}: the bytes match the exact-trial reference`).toBe(hex.to(reference.bytes));
+			compareWithReference(m, 16546, `filler ${filler}`);
 		}
 	});
 
@@ -562,10 +577,7 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 				const m = { id: 1, flags: { qr: true }, questions: q ? [{ name: q, type: TYPE.A, class: CLASS.IN }] : [], answers: answers(F) };
 				const full = encodeMessage(m).length;
 				for (let limit = full - 700; limit <= full; limit++) {
-					const capped = encodeCapped(m, { limit });
-					const reference = oracleCapped(m, { limit });
-					expect(capped.truncated, `F=${F} q=${q} limit=${limit}`).toBe(reference.truncated);
-					expect(hex.to(capped.bytes), `F=${F} q=${q} limit=${limit}`).toBe(hex.to(reference.bytes));
+					compareWithReference(m, limit, `F=${F} q=${q} limit=${limit}`);
 				}
 			}
 		}
@@ -584,11 +596,42 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 			const m = { id: 1, flags: { qr: true }, questions: [], answers: recs };
 			const full = encodeMessage(m).length;
 			for (let limit = full - 900; limit <= full; limit += 1) {
-				const capped = encodeCapped(m, { limit });
-				const reference = oracleCapped(m, { limit });
-				expect(capped.truncated, `seed=${seed} limit=${limit}`).toBe(reference.truncated);
-				expect(hex.to(capped.bytes), `seed=${seed} limit=${limit}`).toBe(hex.to(reference.bytes));
+				compareWithReference(m, limit, `seed=${seed} limit=${limit}`);
 			}
 		}
 	}, 600_000);
+
+	it("treats a registration whose real offset lands exactly on 0x4000 as absent (CLDMV/digby#43)", () => {
+		// Set 0 is a two-record TXT RRset (positions 0 and 2); set 1 is a three-record NS RRset (positions 1, 3, 4)
+		// whose rdata names share the <63x>.example. suffix. At set 1's measurement set 0 is kept, so a suffix
+		// registered while writing the record at position 3 lands at its probe offset plus the 243 octets of the
+		// record at position 2 — the shift — which puts it at exactly 16,384. The compression pointer range ends at
+		// 0x3fff, so the registration does not exist, and the record at position 4 writes the shared suffix in full.
+		// The boundary mutant (`< 0x4000` -> `<= 0x4000` at the three sites that implement the rule: the probe
+		// registration, the model lookup and the flip scan) keeps that registration: the record at position 4 then
+		// measures 62 octets shorter, the keep decision flips, and the encode goes out 16,531 octets over its
+		// 16,500-octet limit — this golden is the failure evidence for that mutant (tmp/agents/r5-capped/mutant.log
+		// in the round-5 work area holds the pod run).
+		const m = {
+			id: 1,
+			flags: { qr: true },
+			questions: [{ name: "example.", type: TYPE.A, class: CLASS.IN }],
+			answers: [bigTxt("a.test.", 16000), ns("b.test.", "n0.example."), bigTxt("a.test.", 230), ns("b.test.", `n1.${x63}.example.`), ns("b.test.", `n2.${x63}.example.`)]
+		};
+		// the limit sits inside the flip window: the whole message does not fit, set 1 does not fit either under the
+		// correct boundary (the record at position 4 writes the shared suffix in full), but does under the mutant
+		// (it measures 62 octets shorter)
+		const full = encodeMessage(m).length;
+		const capped = encodeCapped(m, { limit: full - 30 });
+		expect(capped.truncated, "the truncation flag").toBe(true);
+		expect(capped.bytes.length, "within the limit").toBeLessThanOrEqual(full - 30);
+		// the kept stream: header + the whole a.test. TXT set at its positions + the first b.test. NS record
+		expect(capped.bytes.length, "the b.test. NS set dropped whole").toBe(full - 162);
+		const d = decodeMessage(capped.bytes);
+		expect(d.flags.tc, "TC set").toBe(true);
+		expect(d.answers.map((r) => r.name)).toEqual(["a.test.", "b.test.", "a.test."]);
+		expect(d.answers[0].data.strings.reduce((n, s) => n + s.length, 0)).toBe(16000);
+		expect(d.answers[1].data.target).toBe("n0.example.");
+		expect(d.answers[2].data.strings.reduce((n, s) => n + s.length, 0)).toBe(230);
+	});
 });

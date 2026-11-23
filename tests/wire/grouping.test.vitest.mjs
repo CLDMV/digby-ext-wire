@@ -41,7 +41,10 @@ const message = (sections) => ({
 	id: 1,
 	flags: { qr: true, opcode: 0, aa: false, tc: false, rd: false, ra: false, z: false, ad: false, cd: false },
 	rcode: 0,
-	questions: [],
+	// one question: a truncating encode of a message without exactly one question is refused (CLDMV/digby#43).
+	// q.test. shares no suffix with the shapes below except the root, so it costs each packet exactly 13 octets:
+	// 12 of head, plus the first name's root label becoming a pointer to the question's root registration.
+	questions: [{ name: "q.test.", type: TYPE.A, class: 1 }],
 	answers: [],
 	authorities: [],
 	additionals: [],
@@ -65,9 +68,10 @@ describe("record order is kept; grouping only decides truncation (CLDMV/digby#36
 		}
 		// the issue's window: the later piece of the split set is the one that does not fit, so the whole set goes and the
 		// small trailing TXT with it — while the records that survive keep their positions. Owner-name compression shrinks
-		// this packet (the p1/p2 owners share ns.example.'s suffix): [A, TXT p1, A] is 272 octets, the whole packet 300, so
-		// the window where the first three fit but p2 does not is caps 272..299 — 280 sits in it
-		const { bytes } = encodeCapped(m, { limit: 280 });
+		// this packet (the p1/p2 owners share ns.example.'s suffix): with the question's 13 octets, [A, TXT p1, A] is 285
+		// octets and the whole packet 313, so the window where the first three fit but p2 does not is caps 285..312 — 293
+		// sits in it
+		const { bytes } = encodeCapped(m, { limit: 293 });
 		expect(decodeMessage(bytes).additionals).toEqual([A(1), TXT("p1.example.", 200), A(2)]);
 	});
 
