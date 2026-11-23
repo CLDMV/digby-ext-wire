@@ -85,7 +85,12 @@ export function parseRecord(text, options) {
 	if (type === 0 || type === RESERVED_TYPE) fail(WireErrorCode.BAD_PRESENTATION, `record type ${type} is reserved`);
 	ttl ??= o.ttl;
 	if (ttl === undefined) fail(WireErrorCode.BAD_PRESENTATION, "the record has no TTL and no default was given");
+	// the default TTL is validated exactly like a TTL parsed from the text (CLDMV/digby#39): an integer in 0..2^31 - 1,
+	// described never stringified
+	if (!Number.isInteger(ttl) || ttl < 0 || ttl > MAX_TTL) fail(WireErrorCode.BAD_PRESENTATION, `TTL out of range: ${describe(ttl)}`);
 	const cls = clsTok ?? (o.class ?? CLASS.IN);
+	// the default class is validated exactly like a class parsed from the text: an integer in 0..0xffff
+	if (!Number.isInteger(cls) || cls < 0 || cls > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `class out of range: ${describe(cls)}`);
 	// No rdata text at all is the RFC 2136 update form, the same rule readRecord and writeRecord apply (CLDMV/digby#37):
 	// empty rdata is only a class ANY or NONE record — every other class with no rdata stays refused. The zero-length
 	// generic form (`\# 0`) is the update form too under ANY / NONE; parseRdataTokens maps it the way the wire reader
