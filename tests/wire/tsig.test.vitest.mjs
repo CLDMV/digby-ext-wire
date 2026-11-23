@@ -139,6 +139,20 @@ describe(`TSIG around the capped encode (CLDMV/digby#39, seed ${SEED})`, () => {
 		expect(code(() => appendTsig(capped, tsig))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
+	it("encodeMessage refuses a TSIG record: signing happens only via appendTsig (CLDMV/digby#39)", () => {
+		// re-encoding a signed message cannot keep the MAC valid (RFC 8945 5), so passing a TSIG through the encode
+		// is never useful — encodeMessage refuses it with TSIG_PRESENT, the same as encodeCapped
+		const tsig = tsigRecord(1);
+		expect(code(() => encodeMessage(message({ additionals: [A(1), tsig] })))).toBe("TSIG_PRESENT");
+		expect(code(() => encodeMessage(message({ additionals: [tsig] })))).toBe("TSIG_PRESENT");
+		expect(code(() => encodeMessage(message({ answers: [tsig] })))).toBe("TSIG_PRESENT");
+		expect(code(() => encodeMessage(message({ authorities: [tsig] })))).toBe("TSIG_PRESENT");
+		// a misplaced TSIG gets the same refusal — the encode never examines placement for a record it refuses
+		expect(code(() => encodeMessage(message({ additionals: [tsig, A(1)] })))).toBe("TSIG_PRESENT");
+		// without the TSIG the same message encodes
+		expect(encodeMessage(message({ additionals: [A(1)] })).length).toBeGreaterThan(0);
+	});
+
 	it("the property holds across generated messages and TSIG records", () => {
 		const g = prng(SEED);
 		for (let i = 0; i < 200; i++) {

@@ -162,17 +162,27 @@ function readRecord(r) {
  * are written exactly in the order given: record order is meaning (a transfer's SOA bookends, an IXFR's SOA-diff structure,
  * an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36).
  *
+ * A message that already carries a TSIG record is refused (CLDMV/digby#39): re-encoding a signed message cannot
+ * keep the MAC valid (RFC 8945 5), so signing happens only via {@link appendTsig}.
+ *
  * @param {object} message - shape above; `flags`, the section arrays and `edns` may be omitted. The input is copied once
  *   with structuredClone and only the copy is validated and written (see the module's input contract, CLDMV/digby#39).
  * @param {object} [options]
  * @param {number} [options.maxSize=65535] - fail MESSAGE_TOO_LARGE rather than produce more octets than this
  * @param {boolean} [options.compress=true]
  * @returns {Uint8Array}
- * @throws {WireError}
+ * @throws {WireError} TSIG_PRESENT when the message already carries a TSIG record (CLDMV/digby#39)
  */
 export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true } = {}) {
 	checkInt(maxSize, MAX_MESSAGE, "maxSize");
-	return encodeCappedRaw(snapshotMessage(cloneInput(message, "a message")), { limit: maxSize, truncate: false, compress }).bytes;
+	// a TSIG never passes through an encode (CLDMV/digby#39): re-encoding a signed message cannot keep the MAC
+	// valid (RFC 8945 5), so passing one through is never useful — signing happens only via appendTsig
+	const snap = snapshotMessage(cloneInput(message, "a message"));
+	for (const section of [snap.answers, snap.authorities, snap.additionals])
+		for (const rec of section)
+			if (rec.type === TYPE.TSIG)
+				fail(WireErrorCode.TSIG_PRESENT, "the message already carries a TSIG record: re-encoding it cannot keep the MAC valid — encode unsigned with reserveTsig, sign, then appendTsig (CLDMV/digby#39)");
+	return encodeCappedRaw(snap, { limit: maxSize, truncate: false, compress }).bytes;
 }
 
 /**
@@ -406,9 +416,9 @@ export function tsigRecordSize(tsigRecord) {
 }
 
 /**
- * The capped encode itself, with the OPT record and (for {@link encodeMessage}, which never truncates) a trailing TSIG record
- * as an always-kept tail. `message` is a {@link snapshotMessage} copy (CLDMV/digby#39): plain objects throughout, so reading
- * a field here can never re-run a getter on the caller's input.
+ * The capped encode itself, with the OPT record as an always-kept tail. `message` is a {@link snapshotMessage} copy
+ * (CLDMV/digby#39): plain objects throughout, so reading a field here can never re-run a getter on the caller's input.
+ * No TSIG can reach it: both public entries refuse a message that carries one (CLDMV/digby#39).
  *
  * @param {object} message
  * @param {object} options
@@ -429,18 +439,13 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	checkInt(rcode, 0xfff, "rcode");
 	if (rcode > 0xf && !edns) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `rcode ${rcode} needs EDNS (its upper bits live in the OPT record)`);
 
-	// split off a trailing TSIG; refuse OPT and misplaced TSIG records (the types were validated at the copy, CLDMV/digby#39)
-	let tsig = null;
-	sections.forEach((list, s) =>
-		list.forEach((rec, i) => {
+	// refuse an OPT record (the types were validated at the copy, CLDMV/digby#39); a TSIG cannot reach this
+	// encode — both public entries refuse one before it
+	sections.forEach((list) =>
+		list.forEach((rec) => {
 			if (rec.type === TYPE.OPT) fail(WireErrorCode.OPT_MISPLACED, "give EDNS as message.edns, not as an OPT record");
-			if (rec.type === TYPE.TSIG) {
-				if (s !== 2 || i !== list.length - 1) fail(WireErrorCode.TSIG_MISPLACED, "TSIG must be the last record of the additional section");
-				tsig = rec;
-			}
 		})
 	);
-	if (tsig) sections[2] = sections[2].slice(0, -1);
 
 	// The header and questions, written into whichever writer the caller passes: the plain attempt, the
 	// non-truncating encode and the trial path all write the same head. Returns where the section counts start.
@@ -461,16 +466,13 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	};
 	const writeTail = (wr) => {
 		if (edns) writeOpt(wr, edns, rcode >>> 4);
-		if (tsig) writeRecord(wr, tsig);
 	};
 	// An upper bound on the tail's size: written uncompressed into a scratch writer, once.
 	const scratch = new Writer({ compress: false });
 	if (edns) writeOpt(scratch, edns, rcode >>> 4);
-	if (tsig) writeRecord(scratch, tsig);
 	const tailBound = scratch.length;
-	// Whether the tail (OPT, TSIG) still fits on `wr` after what is written now. The bound settles it almost always;
-	// near the limit, write the tail for real, measure and roll it back, since the TSIG owner may compress against
-	// names written so far.
+	// Whether the OPT record still fits on `wr` after what is written now. The bound settles it almost always; near
+	// the limit, write it for real, measure and roll it back.
 	const tailFitsOn = (wr) => {
 		if (wr.length + tailBound <= limit) return true;
 		const mark = wr.checkpoint();
@@ -501,7 +503,6 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			}
 		writeTail(wr);
 		if (edns) written[2]++;
-		if (tsig) written[2]++;
 		written.forEach((n, i) => wr.patch16(countAt + i * 2, n));
 	};
 
@@ -895,7 +896,6 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	}
 	writeTail(w);
 	if (edns) written[2]++;
-	if (tsig) written[2]++;
 	written.forEach((n, i) => w.patch16(countAt + i * 2, n));
 	if (truncated) w.patch16(2, ((w.bytes[2] << 8) | w.bytes[3]) | TC_BIT);
 	return { bytes: w.finish(), truncated };

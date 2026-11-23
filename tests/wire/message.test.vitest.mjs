@@ -197,8 +197,10 @@ describe("messages", () => {
 		expect(code(() => decodeMessage(hex.from(`0000 0000 0000 0001 0000 0000 ${tsig}`)))).toBe("TSIG_MISPLACED");
 		const t = decodeMessage(hex.from(`0000 0000 0000 0000 0000 0001 ${tsig}`)).additionals[0];
 		const rec = { name: ".", type: 1, class: 1, ttl: 0, data: { address: "1.2.3.4" } };
-		expect(code(() => encodeMessage({ id: 0, additionals: [t, rec] }))).toBe("TSIG_MISPLACED");
-		expect(code(() => encodeMessage({ id: 0, answers: [t] }))).toBe("TSIG_MISPLACED");
+		// the encode refuses any TSIG (CLDMV/digby#39, round 5): re-encoding a signed message cannot keep the MAC
+		// valid, so a TSIG never passes through encodeMessage — signing happens only via appendTsig
+		expect(code(() => encodeMessage({ id: 0, additionals: [t, rec] }))).toBe("TSIG_PRESENT");
+		expect(code(() => encodeMessage({ id: 0, answers: [t] }))).toBe("TSIG_PRESENT");
 	});
 
 	it("refuses malformed message objects with WireError", () => {
@@ -240,8 +242,9 @@ describe("encodeCapped and TSIG (CLDMV/digby#39)", () => {
 			expect(err).toBeInstanceOf(WireError);
 			expect(err.message).toContain("CLDMV/digby#39");
 		}
-		// encodeMessage never truncates, so a signed message still encodes
-		expect(decodeMessage(encodeMessage(message({ additionals: [tsig] }))).additionals).toEqual([tsig]);
+		// and encodeMessage refuses it too (CLDMV/digby#39, round 5): re-encoding a signed message cannot keep the
+		// MAC valid, so a TSIG never passes through any encode — sign the capped result with appendTsig instead
+		expect(code(() => encodeMessage(message({ additionals: [tsig] })))).toBe("TSIG_PRESENT");
 	});
 
 	it("reserves octets: the result plus the reservation fits the cap", () => {
