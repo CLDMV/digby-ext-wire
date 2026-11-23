@@ -24,7 +24,7 @@
  */
 
 import { MAX_MESSAGE } from "./buffer.mjs";
-import { WireErrorCode, fail } from "./errors.mjs";
+import { WireError, WireErrorCode, fail } from "./errors.mjs";
 
 /** The longest label (RFC 1035 2.3.4). */
 export const MAX_LABEL = 63;
@@ -57,14 +57,16 @@ const SPECIAL = new Set([0x2e, 0x5c, 0x22, 0x28, 0x29, 0x3b, 0x40, 0x24]);
  * @returns {string}
  */
 export function formatLabel(bytes, start = 0, end = bytes.length) {
-	const chars = [];
+	// built by loop into the string, never String.fromCharCode(...chars): the spread of a large label's characters
+	// overflows the stack (CLDMV/digby#39)
+	let out = "";
 	for (let i = start; i < end; i++) {
 		const c = bytes[i];
-		if (SPECIAL.has(c)) chars.push(0x5c, c);
-		else if (c > 0x20 && c < 0x7f) chars.push(c);
-		else chars.push(0x5c, 0x30 + ((c / 100) | 0), 0x30 + (((c / 10) | 0) % 10), 0x30 + (c % 10));
+		if (SPECIAL.has(c)) out += String.fromCharCode(0x5c, c);
+		else if (c > 0x20 && c < 0x7f) out += String.fromCharCode(c);
+		else out += String.fromCharCode(0x5c, 0x30 + ((c / 100) | 0), 0x30 + (((c / 10) | 0) % 10), 0x30 + (c % 10));
 	}
-	return String.fromCharCode(...chars);
+	return out;
 }
 
 /**
@@ -133,15 +135,31 @@ function checkLength(labels) {
 }
 
 /**
- * Format labels as a canonical absolute name.
+ * Format labels as a canonical absolute name. The shape is read and every label is formatted in one pass, inside the
+ * refusal it feeds (CLDMV/digby#39): the reads (`Array.isArray`, the iteration, `instanceof`) can run caller code on a
+ * Proxy, and any such throw is NOT_CLONEABLE, never a raw TypeError; each label is read exactly once; and the labels
+ * are validated like parseName's output, so a label that is not a Uint8Array (a BigInt64Array formatted as garbage), a
+ * label over 63 octets and a name over 255 octets in wire form are all refused.
  * @param {Uint8Array[]} labels
  * @returns {string}
  */
 export function formatName(labels) {
-	if (labels.length === 0) return ".";
 	let out = "";
-	for (const l of labels) out += formatLabel(l) + ".";
-	return out;
+	try {
+		if (!Array.isArray(labels)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a name is an array of labels");
+		let n = 1;
+		for (const l of labels) {
+			if (!(l instanceof Uint8Array)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a name's labels are Uint8Arrays");
+			if (l.length > MAX_LABEL) fail(WireErrorCode.LABEL_TOO_LONG, `a label is at most ${MAX_LABEL} octets, got ${l.length}`);
+			n += l.length + 1;
+			if (n > MAX_NAME) fail(WireErrorCode.NAME_TOO_LONG, `a name is at most ${MAX_NAME} octets in wire form, got ${n}`);
+			out += formatLabel(l) + ".";
+		}
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		fail(WireErrorCode.NOT_CLONEABLE, "a name is not structured-clone data");
+	}
+	return out.length === 0 ? "." : out;
 }
 
 /**

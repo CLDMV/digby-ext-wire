@@ -8,7 +8,7 @@
  * plus the RFC 3597 `TYPEnnn` / `CLASSnnn` conversions.
  */
 
-import { WireErrorCode, fail } from "./errors.mjs";
+import { WireErrorCode, describe, fail } from "./errors.mjs";
 
 /**
  * RR type numbers. Every type with a typed rdata codec is here, plus the mnemonics the presentation format should know by
@@ -135,11 +135,41 @@ const CLASS_NAME = invert(CLASS);
 const SVC_KEY_NAME = invert(SVC_KEY);
 
 /**
+ * Require a 16-bit integer for a numeric converter (CLDMV/digby#39): the value is described, never stringified — a
+ * template literal of a plain object with `toString: 1` throws a TypeError, so the converters validate first and
+ * refuse anything that is not an integer in 0..0xffff.
+ * @param {unknown} v
+ * @param {string} what
+ * @returns {number}
+ */
+function check16(v, what) {
+	if (!Number.isInteger(v) || v < 0 || v > 0xffff) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} out of range: ${describe(v)}`);
+	return v;
+}
+
+/**
+ * A mnemonic argument as a string, without running caller code (CLDMV/digby#39): `String()` on a plain object with
+ * `toString: 1` throws a TypeError and cannot convert an Object.create(null) at all, so anything that is not a string
+ * or a safe primitive is refused.
+ * @param {unknown} text
+ * @param {string} what
+ * @param {string} [code=UNKNOWN_MNEMONIC]
+ * @returns {string}
+ */
+function mnemonicText(text, what, code = WireErrorCode.UNKNOWN_MNEMONIC) {
+	const tag = typeof text; // typeof runs no caller code, even on a revoked Proxy
+	if (tag === "string") return text;
+	if (tag === "number" || tag === "boolean" || tag === "bigint") return String(text);
+	fail(code, `${what} must be a string, got ${describe(text)}`);
+}
+
+/**
  * The presentation mnemonic of a type: its name when known, otherwise RFC 3597 `TYPEnnn`.
  * @param {number} type
  * @returns {string}
  */
 export function typeToString(type) {
+	check16(type, "type");
 	return TYPE_NAME[type] ?? `TYPE${type}`;
 }
 
@@ -150,9 +180,9 @@ export function typeToString(type) {
  * @throws {import("./errors.mjs").WireError} UNKNOWN_MNEMONIC
  */
 export function typeFromString(text) {
-	const upper = String(text).toUpperCase();
+	const upper = mnemonicText(text, "a type mnemonic").toUpperCase();
 	if (Object.hasOwn(TYPE, upper)) return TYPE[upper];
-	return generic(upper, "TYPE", text);
+	return generic(upper, "TYPE", upper);
 }
 
 /**
@@ -161,6 +191,7 @@ export function typeFromString(text) {
  * @returns {string}
  */
 export function classToString(cls) {
+	check16(cls, "class");
 	return CLASS_NAME[cls] ?? `CLASS${cls}`;
 }
 
@@ -171,9 +202,9 @@ export function classToString(cls) {
  * @throws {import("./errors.mjs").WireError} UNKNOWN_MNEMONIC
  */
 export function classFromString(text) {
-	const upper = String(text).toUpperCase();
+	const upper = mnemonicText(text, "a class mnemonic").toUpperCase();
 	if (Object.hasOwn(CLASS, upper)) return CLASS[upper];
-	return generic(upper, "CLASS", text);
+	return generic(upper, "CLASS", upper);
 }
 
 /**
@@ -182,7 +213,7 @@ export function classFromString(text) {
  * @returns {boolean}
  */
 export function isClassToken(text) {
-	const upper = String(text).toUpperCase();
+	const upper = mnemonicText(text, "a class token").toUpperCase();
 	return Object.hasOwn(CLASS, upper) || /^CLASS\d{1,5}$/.test(upper);
 }
 
@@ -192,6 +223,7 @@ export function isClassToken(text) {
  * @returns {string}
  */
 export function svcKeyToString(key) {
+	check16(key, "SvcParamKey");
 	return SVC_KEY_NAME[key] ?? `key${key}`;
 }
 
@@ -201,13 +233,14 @@ export function svcKeyToString(key) {
  * @returns {number}
  */
 export function svcKeyFromString(text) {
-	if (Object.hasOwn(SVC_KEY, text)) return SVC_KEY[text];
-	const m = /^key(\d{1,5})$/.exec(text);
+	const s = mnemonicText(text, "a SvcParamKey name", WireErrorCode.BAD_SVCPARAM);
+	if (Object.hasOwn(SVC_KEY, s)) return SVC_KEY[s];
+	const m = /^key(\d{1,5})$/.exec(s);
 	if (m) {
 		const n = Number(m[1]);
 		if (n < 65535) return n;
 	}
-	return fail(WireErrorCode.BAD_SVCPARAM, `unknown SvcParamKey "${text}"`);
+	return fail(WireErrorCode.BAD_SVCPARAM, `unknown SvcParamKey "${s}"`);
 }
 
 function generic(upper, prefix, original) {

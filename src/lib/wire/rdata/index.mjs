@@ -10,7 +10,7 @@
  * then decoded with the typed codec, so a malformed generic rdata is refused the same way as malformed wire.
  */
 
-import { MAX_MESSAGE, Reader, Writer } from "../buffer.mjs";
+import { MAX_MESSAGE, Reader, Writer, asBytes } from "../buffer.mjs";
 import { CLASS, TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
 import { WireError, WireErrorCode, cloneInput, describe, fail } from "../errors.mjs";
@@ -266,10 +266,13 @@ export function encodeRdataBytes(type, data) {
 }
 
 /**
- * The RFC 3597 generic presentation of octets.
+ * The RFC 3597 generic presentation of octets. The octets go through the one guarded byte path (CLDMV/digby#39): every
+ * SharedArrayBuffer form is refused NOT_CLONEABLE, and anything that is not octets is VALUE_OUT_OF_RANGE — `.length` on
+ * a bare SharedArrayBuffer reads undefined and used to print `\# 0`.
  * @param {Uint8Array} octets
  * @returns {string}
  */
 export function formatGeneric(octets) {
-	return octets.length ? `\\# ${octets.length} ${toHex(octets)}` : "\\# 0";
+	const b = asBytes(octets);
+	return b.length ? `\\# ${b.length} ${toHex(b)}` : "\\# 0";
 }
