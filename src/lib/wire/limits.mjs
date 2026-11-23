@@ -11,7 +11,7 @@
  * 6.2.3, 6.2.5). TCP: 65535 octets, each message prefixed with a 2-octet length (RFC 1035 4.2.2, RFC 7766 8).
  */
 
-import { MAX_MESSAGE, asBytes, checkInt, cloneOptions } from "./buffer.mjs";
+import { MAX_MESSAGE, asBytes, checkInt, cloneOptions, readField } from "./buffer.mjs";
 import { WireErrorCode, describe, fail } from "./errors.mjs";
 import { encodeCapped } from "./message.mjs";
 
@@ -35,7 +35,15 @@ export function udpLimit(query, options) {
 	const o = cloneOptions(options, "the udpLimit options");
 	checkInt(o.cap ?? DEFAULT_UDP_CAP, MAX_MESSAGE, "UDP cap");
 	const ours = Math.max(UDP_MIN, o.cap ?? DEFAULT_UDP_CAP);
-	const theirs = query?.edns ? query.edns.udpSize : UDP_MIN;
+	// the query's EDNS is read once, through the guarded field read (CLDMV/digby#39): the advertised size is validated,
+	// never coerced — Math.max's ToNumber on a BigInt, a Symbol, a hostile toString or a throwing Symbol.toPrimitive
+	// throws a raw TypeError, a sparse or deep array coerces to a wrong limit, and a missing udpSize produced a NaN
+	const edns = readField(query, "edns");
+	let theirs = UDP_MIN;
+	if (edns) {
+		theirs = readField(edns, "udpSize");
+		checkInt(theirs, 0xffff, "the query's EDNS udpSize");
+	}
 	return Math.min(ours, Math.max(UDP_MIN, theirs));
 }
 
