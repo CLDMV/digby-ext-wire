@@ -20,15 +20,19 @@
  * round 3's depth-bounded copy did.
  */
 
+import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import { Writer } from "../../src/lib/wire/buffer.mjs";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { writeTypeBitmap } from "../../src/lib/wire/rdata/dnssec.mjs";
-import { decodeRdataBytes, encodeRdataBytes, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { encodeRdataBytes, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
 import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
-import { canonicalName, namesEqual, parseName } from "../../src/lib/wire/names.mjs";
-import { formatRecord, parseRdata, parseRecord, parseTtl } from "../../src/lib/wire/presentation.mjs";
+import { parseName } from "../../src/lib/wire/names.mjs";
+import { formatRecord } from "../../src/lib/wire/presentation.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
+
+// the enumerated public surface the structural test below sweeps (CLDMV/digby#39, round 6): every export of the index
+const wire = await import("../../src/lib/wire/index.mjs");
 
 const code = (fn) => {
 	try {
@@ -532,8 +536,11 @@ describe("the NOT_CLONEABLE refusal never reads the thrown value (CLDMV/digby#39
 	});
 });
 
-describe("a public entry throws only WireError, for any input (CLDMV/digby#39, round 5)", () => {
-	// every value a caller can hand an entry that is not plain data, or that breaks a naive String()/template of it
+describe("the public surface throws only WireError, for any value in any argument position (CLDMV/digby#39, round 6)", () => {
+	// every value a caller can hand an entry that is not plain data, or that breaks a naive String()/template of it —
+	// the round-5 set plus the shapes the round-6 findings name (a BigInt for Math.max's coercion, sparse and deep
+	// arrays, a getter whose value flips between reads, a throwing Symbol.toPrimitive, a BigInt64Array for formatLabel's
+	// indexed reads)
 	const revokedProxy = (() => {
 		const { proxy, revoke } = Proxy.revocable({}, {});
 		revoke();
@@ -548,6 +555,19 @@ describe("a public entry throws only WireError, for any input (CLDMV/digby#39, r
 	const toStringOne = { toString: 1, valueOf: 1 };
 	const toStringNull = { toString: null };
 	const nullProto = Object.create(null);
+	const sparse = new Array(100);
+	sparse[0] = 1;
+	const deep = [];
+	{
+		let at = deep;
+		for (let i = 0; i < 64; i++) {
+			at.push([]);
+			at = at[0];
+		}
+	}
+	let flips = 0;
+	const flipGetter = { get v() { return ++flips % 2 ? { x: 1 } : undefined; } };
+	const toPrimitiveThrower = { [Symbol.toPrimitive]() { throw null; } };
 	const hostiles = [
 		["a revoked Proxy", revokedProxy],
 		["a Proxy whose get trap throws", throwingGet],
@@ -560,102 +580,153 @@ describe("a public entry throws only WireError, for any input (CLDMV/digby#39, r
 		["{ toString: null }", toStringNull],
 		["Object.create(null)", nullProto],
 		["a Symbol", Symbol("nope")],
-		["a function", () => {}]
+		["a function", () => {}],
+		["a BigInt", 10n],
+		["a sparse array", sparse],
+		["a deep array", deep],
+		["a getter that alternates its value", flipGetter],
+		["a Symbol.toPrimitive that throws", toPrimitiveThrower],
+		["a BigInt64Array", new BigInt64Array(4)]
 	];
 
-	const question = (over) => ({ name: "q.example.", type: TYPE.A, class: 1, ...over });
-	const arec = (over) => ({ name: "a.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.1" }, ...over });
-	const envelope = (over) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [], authorities: [], additionals: [], edns: null, ...over });
-	const rrsigData = (over) => ({ typeCovered: TYPE.A, algorithm: 13, labels: 2, originalTtl: 3600, expiration: 0, inception: 0, keyTag: 1, signerName: "example.", signature: new Uint8Array([1, 2, 3]), ...over });
-	const tsigRdata = (over) => ({ ...tsigData(1), mac: new Uint8Array(4), ...over });
-	const tsig = (over) => ({ name: "key.example.", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: tsigRdata(), ...over });
-	const makeCapped = () => encodeCapped(envelope({ additionals: [arec()] }), { limit: 280, reserveTsig: tsigRecordSize(tsig()) });
-
-	// every input position of every public entry the snapshot round covers; each shape receives one hostile value.
-	// (decodeRdataBytes' octets position is the octet-copy round's; the names, mnemonic and transport helpers are
-	// outside this slice.)
-	const shapes = [
-		["decodeMessage: the bytes", (hv) => () => decodeMessage(hv)],
-		["encodeMessage: the message", (hv) => () => encodeMessage(hv)],
-		["encodeMessage: id", (hv) => () => encodeMessage(envelope({ id: hv }))],
-		["encodeMessage: flags", (hv) => () => encodeMessage(envelope({ flags: hv }))],
-		["encodeMessage: rcode", (hv) => () => encodeMessage(envelope({ rcode: hv }))],
-		["encodeMessage: question name", (hv) => () => encodeMessage(envelope({ questions: [question({ name: hv })] }))],
-		["encodeMessage: question type", (hv) => () => encodeMessage(envelope({ questions: [question({ type: hv })] }))],
-		["encodeMessage: question class", (hv) => () => encodeMessage(envelope({ questions: [question({ class: hv })] }))],
-		["encodeMessage: record name", (hv) => () => encodeMessage(envelope({ answers: [arec({ name: hv })] }))],
-		["encodeMessage: record type", (hv) => () => encodeMessage(envelope({ answers: [arec({ type: hv })] }))],
-		["encodeMessage: record class", (hv) => () => encodeMessage(envelope({ answers: [arec({ class: hv })] }))],
-		["encodeMessage: record ttl", (hv) => () => encodeMessage(envelope({ answers: [arec({ ttl: hv })] }))],
-		["encodeMessage: record data", (hv) => () => encodeMessage(envelope({ answers: [arec({ data: hv })] }))],
-		["encodeMessage: rdata field", (hv) => () => encodeMessage(envelope({ answers: [arec({ data: { address: hv } })] }))],
-		["encodeMessage: RRSIG typeCovered", (hv) => () => encodeMessage(envelope({ answers: [arec({ type: TYPE.RRSIG, data: rrsigData({ typeCovered: hv }) })] }))],
-		["encodeMessage: edns", (hv) => () => encodeMessage(envelope({ edns: hv }))],
-		["encodeMessage: edns udpSize", (hv) => () => encodeMessage(envelope({ edns: { udpSize: hv, options: [] } }))],
-		["encodeMessage: an EDNS option", (hv) => () => encodeMessage(envelope({ edns: { options: [hv] } }))],
-		["encodeMessage: EDNS option code", (hv) => () => encodeMessage(envelope({ edns: { options: [{ code: hv, data: new Uint8Array([1]) }] } }))],
-		["encodeMessage: maxSize", (hv) => () => encodeMessage(envelope(), { maxSize: hv })],
-		["encodeCapped: RRset class in the grouping key", (hv) => () => encodeCapped(envelope({ answers: [arec({ class: hv }), arec()] }), { limit: 60 })],
-		["encodeCapped: RRSIG typeCovered in the grouping key", (hv) => () => encodeCapped(envelope({ answers: [arec({ type: TYPE.RRSIG, data: rrsigData({ typeCovered: hv }) }), arec(), arec()] }), { limit: 60 })],
-		["encodeCapped: limit", (hv) => () => encodeCapped(envelope(), { limit: hv })],
-		["encodeCapped: reserveTsig", (hv) => () => encodeCapped(envelope(), { limit: 512, reserveTsig: hv })],
-		["appendTsig: the capped result", (hv) => () => appendTsig(hv, tsig())],
-		["appendTsig: the record", (hv) => () => appendTsig(makeCapped(), hv)],
-		["appendTsig: record name", (hv) => () => appendTsig(makeCapped(), tsig({ name: hv }))],
-		["appendTsig: record type", (hv) => () => appendTsig(makeCapped(), tsig({ type: hv }))],
-		["appendTsig: record class", (hv) => () => appendTsig(makeCapped(), tsig({ class: hv }))],
-		["appendTsig: record ttl", (hv) => () => appendTsig(makeCapped(), tsig({ ttl: hv }))],
-		["appendTsig: originalId", (hv) => () => appendTsig(makeCapped(), tsig({ data: tsigRdata({ originalId: hv }) }))],
-		["tsigRecordSize: the record", (hv) => () => tsigRecordSize(hv)],
-		["tsigRecordSize: record type", (hv) => () => tsigRecordSize(tsig({ type: hv }))],
-		["tsigRecordSize: record class", (hv) => () => tsigRecordSize(tsig({ class: hv }))],
-		["tsigRecordSize: record ttl", (hv) => () => tsigRecordSize(tsig({ ttl: hv }))],
-		["tsigRecordSize: originalId", (hv) => () => tsigRecordSize(tsig({ data: tsigRdata({ originalId: hv }) }))],
-		["formatRecord: the record", (hv) => () => formatRecord(hv)],
-		["formatRecord: name", (hv) => () => formatRecord(arec({ name: hv }))],
-		["formatRecord: ttl", (hv) => () => formatRecord(arec({ ttl: hv }))],
-		["formatRecord: class", (hv) => () => formatRecord(arec({ class: hv }))],
-		["formatRecord: type", (hv) => () => formatRecord(arec({ type: hv }))],
-		["formatRecord: data", (hv) => () => formatRecord(arec({ data: hv }))],
-		["formatRdata: type", (hv) => () => formatRdata(hv, { address: "10.0.0.1" })],
-		["formatRdata: data", (hv) => () => formatRdata(TYPE.A, hv)],
-		["formatRdata: RRSIG typeCovered", (hv) => () => formatRdata(TYPE.RRSIG, rrsigData({ typeCovered: hv }))],
-		["encodeRdataBytes: type", (hv) => () => encodeRdataBytes(hv, { address: "10.0.0.1" })],
-		["encodeRdataBytes: data", (hv) => () => encodeRdataBytes(TYPE.A, hv)],
-		["encodeRdataBytes: RRSIG typeCovered", (hv) => () => encodeRdataBytes(TYPE.RRSIG, rrsigData({ typeCovered: hv }))],
-		["decodeRdataBytes: type", (hv) => () => decodeRdataBytes(hv, new Uint8Array(4))],
-		["parseRecord: text", (hv) => () => parseRecord(hv)],
-		["parseRecord: origin", (hv) => () => parseRecord("@ IN A 10.0.0.1", { origin: hv })],
-		["parseRecord: default ttl", (hv) => () => parseRecord("a.example. IN A 10.0.0.1", { ttl: hv })],
-		["parseRecord: default class", (hv) => () => parseRecord("a.example. 60 IN A 10.0.0.1", { class: hv })],
-		["parseRdata: type", (hv) => () => parseRdata(hv, "10.0.0.1")],
-		["parseRdata: text", (hv) => () => parseRdata(TYPE.A, hv)],
-		["parseRdata: origin", (hv) => () => parseRdata(TYPE.MX, "10 mail", hv)],
-		["parseTtl: text", (hv) => () => parseTtl(hv)],
-		["parseName: text", (hv) => () => parseName(hv)],
-		["canonicalName: text", (hv) => () => canonicalName(hv)],
-		["namesEqual: a name", (hv) => () => namesEqual(hv, "a.example.")]
+	// a valid baseline per entry, so the sweep replaces one argument of a call that works rather than one of a call that
+	// refuses up front — and so the valid surface stays working (a new export with no baseline is swept over undefined
+	// foundations, which still catches every escape, it just cannot assert the valid call)
+	const validBytes = encodeMessage(message({}));
+	const tsigNeed = tsigRecordSize(tsigRecord(1));
+	const capped = () => encodeCapped(message({ additionals: [A(1)] }), { limit: 280, reserveTsig: tsigNeed });
+	const baselines = {
+		classFromString: () => ["in"],
+		classToString: () => [CLASS.IN],
+		svcKeyFromString: () => ["alpn"],
+		svcKeyToString: () => [3],
+		typeFromString: () => ["a"],
+		typeToString: () => [TYPE.A],
+		canonicalName: () => ["www.example."],
+		formatName: () => [parseName("www.example.")],
+		labelCount: () => ["a.b.example."],
+		nameKey: () => ["a.b.example."],
+		namesEqual: () => ["a.b.example.", "A.B.EXAMPLE."],
+		parseName: () => ["www.example."],
+		appendTsig: () => [capped(), tsigRecord(1)],
+		decodeMessage: () => [validBytes, { allowTrailing: true }],
+		encodeCapped: () => [message({}), { limit: 512 }],
+		encodeMessage: () => [message({}), { maxSize: 512 }],
+		tsigRecordSize: () => [tsigRecord(1)],
+		encodeForTransport: () => [message({}), { transport: "udp" }],
+		frameTcp: () => [validBytes],
+		udpLimit: () => [{ edns: { udpSize: 1232 } }, { cap: 1232 }],
+		decodeRdataBytes: () => [TYPE.A, new Uint8Array([10, 0, 0, 1])],
+		encodeRdataBytes: () => [TYPE.A, { address: "10.0.0.1" }],
+		formatGeneric: () => [new Uint8Array([1, 2, 3])],
+		formatRdata: () => [TYPE.A, { address: "10.0.0.1" }],
+		isTyped: () => [TYPE.A],
+		parseRdata: () => [TYPE.MX, "10 mail", "example."],
+		formatRecord: () => [A(1)],
+		parseRecord: () => ["a.example. 60 IN A 10.0.0.1", { ttl: 60 }],
+		parseTtl: () => ["1h30m"]
+	};
+	// every export of the index, enumerated — a new export is covered automatically. A function export is called with a
+	// hostile value at every argument position, the others at their baseline (undefined where none is known); an options
+	// parameter with a default does not count into `length`, so the arity is length + 1. A class export contributes its
+	// constructor and every own prototype method (TcpFramer.push takes bytes).
+	const exportNames = Object.keys(wire);
+	const isClass = (f) => {
+		const d = Object.getOwnPropertyDescriptor(f, "prototype");
+		return d !== undefined && !d.writable;
+	};
+	const atPosition = (hv, at, n) => Array.from({ length: n }, (_, i) => (i === at ? hv : undefined));
+	const entries = [];
+	for (const name of exportNames) {
+		const v = wire[name];
+		if (typeof v !== "function" || name === "WireError") continue; // WireError is the error type itself, not an entry
+		if (isClass(v)) {
+			entries.push([`${name}() constructor`, (hv, at) => new v(...atPosition(hv, at, 1)), 1]);
+			for (const m of Object.getOwnPropertyNames(v.prototype)) {
+				const d = Object.getOwnPropertyDescriptor(v.prototype, m);
+				if (m === "constructor" || typeof d?.value !== "function") continue;
+				entries.push([`${name}.prototype.${m}`, (hv, at) => new v()[m](...atPosition(hv, at, d.value.length + 1)), d.value.length + 1]);
+			}
+			continue;
+		}
+		const baseline = baselines[name];
+		const arity = Math.max(baseline ? baseline().length : 0, v.length + 1);
+		entries.push([
+			name,
+			(hv, at) => {
+				const args = baseline ? baseline() : [];
+				while (args.length < arity) args.push(undefined);
+				args[at] = hv;
+				return v(...args);
+			},
+			arity
+		]);
+	}
+	// the byte-taking entries, with every SharedArrayBuffer form at each (decode, framer, transport, standalone rdata)
+	const byteEntries = [
+		["decodeMessage: the bytes", (b) => wire.decodeMessage(b)],
+		["frameTcp: the message", (b) => wire.frameTcp(b)],
+		["TcpFramer.push: the chunk", (b) => new wire.TcpFramer().push(b)],
+		["decodeRdataBytes: the octets", (b) => wire.decodeRdataBytes(TYPE.A, b)],
+		["formatGeneric: the octets", (b) => wire.formatGeneric(b)]
+	];
+	const sabForms = [
+		["a bare SharedArrayBuffer", () => new SharedArrayBuffer(12)],
+		["a Uint8Array over a SharedArrayBuffer", () => new Uint8Array(new SharedArrayBuffer(12))],
+		["a growable SharedArrayBuffer view", () => new Uint8Array(new SharedArrayBuffer(12, { maxByteLength: 24 }))],
+		["a DataView over a SharedArrayBuffer", () => new DataView(new SharedArrayBuffer(12))],
+		["a Buffer over a SharedArrayBuffer", () => Buffer.from(new SharedArrayBuffer(12))]
 	];
 
-	it("every hostile value at every input position returns or throws WireError, never anything else", () => {
+	it("every entry accepts its valid baseline", () => {
+		for (const name of Object.keys(baselines)) expect(() => wire[name](...baselines[name]()), name).not.toThrow();
+	});
+
+	it("every hostile value at every argument position returns or throws WireError, never anything else", () => {
 		const escapes = [];
-		for (const [what, shape] of shapes) {
-			for (const [hvName, hv] of hostiles) {
+		for (const [what, shape, arity] of entries)
+			for (let at = 0; at < arity; at++)
+				for (const [hvName, hv] of hostiles) {
+					let outcome;
+					try {
+						shape(hv, at);
+						outcome = "returned";
+					} catch (err) {
+						outcome = err;
+					}
+					if (outcome !== "returned" && !(outcome instanceof WireError)) {
+						const shown = outcome instanceof Error ? outcome.constructor.name : String(outcome);
+						escapes.push(`${what} (argument ${at}) with ${hvName} escaped as ${shown}${outcome instanceof Error ? `: ${outcome.message}` : ""}`);
+					}
+				}
+		// every escape at once, so one run lists all the positions that still leak
+		expect(escapes).toEqual([]);
+	});
+
+	it("every SharedArrayBuffer form at every byte-taking entry is a WireError", () => {
+		const escapes = [];
+		for (const [what, shape] of byteEntries)
+			for (const [form, make] of sabForms) {
 				let outcome;
 				try {
-					shape(hv)();
+					shape(make());
 					outcome = "returned";
 				} catch (err) {
 					outcome = err;
 				}
-				if (outcome !== "returned" && !(outcome instanceof WireError)) {
+				if (!(outcome instanceof WireError)) {
 					const shown = outcome instanceof Error ? outcome.constructor.name : String(outcome);
-					escapes.push(`${what} with ${hvName} escaped as ${shown}: ${outcome instanceof Error ? outcome.message : ""}`);
+					escapes.push(`${what} with ${form} escaped as ${shown}`);
 				}
 			}
-		}
-		// every escape at once, so one run lists all the positions that still leak
 		expect(escapes).toEqual([]);
+	});
+
+	it("the enumerated surface and the sweep's call count are logged for the handback", () => {
+		const calls = entries.reduce((n, [, , arity]) => n + arity, 0) * hostiles.length + byteEntries.length * sabForms.length;
+		console.log(`[surface] exports (${exportNames.length}): ${exportNames.join(", ")}`);
+		console.log(`[surface] entries: ${entries.length} function/method entries + ${byteEntries.length} byte entries; hostile calls: ${calls}`);
+		expect(exportNames.length).toBeGreaterThan(0);
 	});
 });
 
