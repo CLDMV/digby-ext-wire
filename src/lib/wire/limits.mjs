@@ -35,6 +35,17 @@ export function udpLimit(query, options) {
 	const o = cloneOptions(options, "the udpLimit options");
 	checkInt(o.cap ?? DEFAULT_UDP_CAP, MAX_MESSAGE, "UDP cap");
 	const ours = Math.max(UDP_MIN, o.cap ?? DEFAULT_UDP_CAP);
+	// the query is guarded like every other argument (CLDMV/digby#39): null and undefined mean "no query", and any
+	// other non-object is refused instead of reading as one without EDNS — udpLimit("x") used to return 512
+	if (query !== null && query !== undefined) {
+		let tag;
+		try {
+			tag = typeof query;
+		} catch {
+			fail(WireErrorCode.NOT_CLONEABLE, "the query is not structured-clone data (CLDMV/digby#39)");
+		}
+		if (tag !== "object") fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the query must be an object, got ${describe(query)}`);
+	}
 	// the query's EDNS is read once, through the guarded field read (CLDMV/digby#39): the advertised size is validated,
 	// never coerced — Math.max's ToNumber on a BigInt, a Symbol, a hostile toString or a throwing Symbol.toPrimitive
 	// throws a raw TypeError, a sparse or deep array coerces to a wrong limit, and a missing udpSize produced a NaN
