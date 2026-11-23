@@ -104,7 +104,12 @@ describe("mnemonics", () => {
 		expect(svcKeyToString(1)).toBe("alpn");
 		expect(svcKeyToString(1234)).toBe("key1234");
 		expect(svcKeyFromString("key1")).toBe(1);
-		expect(code(() => svcKeyFromString("key65535"))).toBe("BAD_SVCPARAM");
+		// key65535 round-trips with svcKeyToString (CLDMV/digby#39, round 7): the mnemonic layer is permissive like
+		// TYPEnnn / CLASSnnn, and the SvcParam record layer refuses the reserved key on decode, encode and parse
+		expect(svcKeyFromString("key65535")).toBe(65535);
+		expect(svcKeyToString(svcKeyFromString("key65535"))).toBe("key65535");
+		expect(svcKeyFromString(svcKeyToString(65535))).toBe(65535);
+		expect(code(() => svcKeyFromString("key65536"))).toBe("BAD_SVCPARAM");
 	});
 });
 
