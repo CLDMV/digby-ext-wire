@@ -138,6 +138,32 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 	it("a getter that throws in the options is a WireError, not a raw null", () => {
 		expect(code(() => encodeMessage(message(), { get maxSize() { throw null; } }))).toBe("NOT_CLONEABLE");
 	});
+
+	it("options on a prototype or in a Map are refused, never silently dropped (CLDMV/digby#39, round 7)", () => {
+		// structuredClone copies own enumerable properties only, so a bound on the prototype would silently vanish:
+		// encodeMessage(big, Object.create({ maxSize: 40 })) encoded 189 octets instead of refusing, udpLimit read the
+		// default 1232 instead of cap 600, and decodeMessage decoded everything without the name cap
+		const big = {
+			...message(),
+			answers: [
+				{ name: "a.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.1" } },
+				{ name: "b.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.2" } }
+			]
+		};
+		expect(code(() => encodeMessage(big, { maxSize: 40 }))).toBe("MESSAGE_TOO_LARGE");
+		expect(code(() => encodeMessage(big, Object.create({ maxSize: 40 })))).toBe("VALUE_OUT_OF_RANGE");
+		class Opts {
+			get maxSize() {
+				return 40;
+			}
+		}
+		expect(code(() => encodeMessage(big, new Opts()))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => udpLimit({ edns: { udpSize: 4096 } }, Object.create({ cap: 600 })))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeMessage(bytes, Object.create({ maxNameOctets: 5 })))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeMessage(bytes, new Map([["maxNameOctets", 5]])))).toBe("VALUE_OUT_OF_RANGE");
+		// a null-prototype options object is still plain data and still works
+		expect(() => decodeMessage(bytes, Object.assign(Object.create(null), { allowTrailing: true }))).not.toThrow();
+	});
 });
 
 describe("udpLimit reads the query's EDNS size once and validates it (CLDMV/digby#39, round 6)", () => {
