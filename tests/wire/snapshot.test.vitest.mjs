@@ -816,7 +816,8 @@ describe("a SharedArrayBuffer-backed view is refused, not shared (CLDMV/digby#39
 	});
 	it("a shadowed buffer, byteOffset or byteLength cannot redirect the byte read (CLDMV/digby#39, round 7)", () => {
 		const real = encodeMessage(message({ questions: [{ name: "q.example.", type: TYPE.A, class: 1 }] }));
-		const hex = [...real].map((b) => b.toString(16).padStart(2, "0")).join("");
+		// formatGeneric's hex is uppercase (toHex), so the expected form is too
+		const hex = [...real].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
 		const sab = new SharedArrayBuffer(real.length);
 		new Uint8Array(sab).fill(0xff);
 		// today: the view is built from the caller's own `buffer` / `byteOffset` / `byteLength` properties, so an own
