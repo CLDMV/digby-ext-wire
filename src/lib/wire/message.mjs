@@ -544,8 +544,12 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// - Measuring a candidate writes its records into a probe writer positioned at the candidate's first record's
 	//   stream offset, seeded with the model's targets and the closed records' targets, and each registration the
 	//   probe makes is corrected by the exact shift — the kept octets between the candidate's records, from the
-	//   tree. The probe's lookups therefore hit and miss exactly as the interleaved drop-here stream would, so the
-	//   measured contribution is the candidate's exact octets there, not a bound.
+	//   tree. The probe's lookups therefore hit and miss exactly as the drop-here stream would at the name being
+	//   written: a target is visible only where the stream already has it — written by an earlier record, or an
+	//   earlier name of the same one. A registration a LATER record will make is not yet on the wire and cannot
+	//   shorten an earlier name (writeName registers targets even for names it never compresses — an SRV target, an
+	//   RRSIG signer — CLDMV/digby#43), so the measured contribution is the candidate's exact octets there, not a
+	//   bound.
 	//
 	// Keeping a set folds its octets and registrations into the model, which can disturb earlier kept records: the
 	// inserted octets shift their registrations (one can cross 0x4000 and vanish, lengthening the records that
@@ -560,7 +564,11 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	//
 	// The fit check is the exact stream total plus the uncompressed tail bound, so it can only refuse a set whose
 	// stream actually fits when the tail itself compresses; the exact trial settles those.
-	const w = new Writer({ max: MAX_MESSAGE, compress });
+	//
+	// The writer is capped at the limit, not MAX_MESSAGE (CLDMV/digby#43): the model's answer must fit when it is
+	// finally written, and if it does not — the model cannot be assumed exact — the overflow is caught here and the
+	// section falls back to exact trials. The encoder never returns more octets than the limit.
+	const w = new Writer({ max: limit, compress });
 	const countAt = writeHead(w);
 	// the header, questions and tail records alone must fit: they are never dropped, so no RRset can make room for
 	// them
@@ -571,8 +579,14 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	outer: for (let s = 0; s < 3; s++) {
 		const list = sections[s];
 		const { sets, owner } = rrsets(list);
+		const sectionMark = w.checkpoint(); // the state before this section wrote anything: a model overflow rolls back to here
 		let pos = 0; // section positions below this are decided and finally written
 		let keptSets = sets.length;
+		// The model's keep decisions are trusted only as far as the final write confirms them: a MESSAGE_TOO_LARGE from
+		// the capped writer — a kept stream that does not actually fit — rolls the whole section back and decides it by
+		// exact trials, which are exact by construction. The trials cannot overflow, so a second overflow is a refusal.
+		section: for (;;) {
+		let overflow = false;
 		if (sets.length > 0) {
 			// the stream offset this section's records sit at: the header and questions plus every kept record of the
 			// sections before it. w.length grows past this as this section's records are written for good, so the
@@ -587,6 +601,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			let recStart = 0; // probe offset where the record being measured starts
 			let curRec = 0; // the position of the record being measured
 			let curShift = 0; // kept octets between the candidate's first record and it
+			let curReal = 0; // the record's first octet's offset in the drop-here stream
 			const touched = [];
 			const realOf = (entry) => sectionBase + fen.prefix(entry.rec) + entry.rel;
 			const lookup = (key) => {
@@ -595,7 +610,11 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				const m = model.get(key);
 				if (m !== undefined) {
 					const r = realOf(m);
-					return r < 0x4000 ? r : undefined;
+					// a target is visible only where the stream already has it: written before the name being measured, and
+					// inside the pointer range. A registration a LATER record makes — one writeName performs even for a name
+					// it never compresses, an SRV target, an RRSIG signer — is not on the wire when an earlier name is
+					// written, so it must not shorten one (CLDMV/digby#43).
+					return r < 0x4000 && r < curReal + (probe.length - recStart) ? r : undefined;
 				}
 				return w.names.get(key);
 			};
@@ -640,9 +659,13 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				// octets in it (zero for a candidate, whose positions are not in the tree yet; its old octets on a
 				// re-measure, which the consecutive probe layout already carries)
 				let own = 0;
+				let ownNew = 0; // probe octets written for the set's own records before the one being measured
 				for (const at of open) {
 					curRec = at;
 					curShift = fen.prefix(at) - fen.prefix(p1) - own;
+					// the record's first octet sits at the kept octets before it plus its own set's earlier records as the
+					// probe just wrote them (their old tree values are what the tree still carries)
+					curReal = sectionBase + fen.prefix(at) - own + ownNew;
 					own += fen.vals[at];
 					recStart = probe.length;
 					touched.length = 0;
@@ -657,6 +680,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 						throw err;
 					}
 					recs.push({ at, oct: probe.length - start });
+					ownNew += probe.length - start;
 					for (const key of touched) examined.add(key);
 				}
 				return { recs, contribution: overflow ? Infinity : probe.length - probeBase, overflow, examined };
@@ -813,12 +837,14 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				const first = sets[k][0];
 				// records before this set's first record belong to sets already decided as kept: write them for
 				// good — their compression targets become final (the real writer's table holds them now) and their
-				// model entries retire
-				for (let i = pos; i < first; i++) {
-					const at = w.length;
-					writeRecord(w, list[i]);
-					written[s]++;
-					if (!modelBroken) fen.set(i, w.length - at); // the tree carries the actual octets from here on
+				// model entries retire. A write past the cap means the model kept a stream that does not fit:
+				// abandon the section and redo it by exact trial.
+				try {
+					for (let i = pos; i < first; i++) {
+						const at = w.length;
+						writeRecord(w, list[i]);
+						written[s]++;
+						if (!modelBroken) fen.set(i, w.length - at); // the tree carries the actual octets from here on
 					if (!modelBroken) {
 						const state = setEntries.get(owner[i]);
 						if (state !== undefined) {
@@ -834,6 +860,11 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 						}
 					}
 				}
+				} catch (err) {
+					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+					overflow = true;
+				}
+				if (overflow) break;
 				pos = first;
 				if (!modelBroken) {
 					const m = measureSet(k);
@@ -879,12 +910,30 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			}
 		}
 		// the surviving records from `pos` on: all of them, or — after a drop — only the records of the sets kept
-		// so far, at their original positions, written for good once
-		for (let i = pos; i < list.length; i++)
-			if (owner[i] < keptSets) {
-				writeRecord(w, list[i]);
-				written[s]++;
-			}
+		// so far, at their original positions, written for good once. A write past the cap here is the same signal
+		// as above, and so is the tail gate: the tail is never dropped, so the kept stream must leave room for it.
+		try {
+			for (let i = pos; i < list.length; i++)
+				if (owner[i] < keptSets) {
+					writeRecord(w, list[i]);
+					written[s]++;
+				}
+			if (!tailFitsOn(w)) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the kept stream leaves no room for the tail records within ${limit} octets`);
+		} catch (err) {
+			if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+			overflow = true;
+		}
+		if (!overflow) break section;
+		// the model's answer did not fit when written: roll the section back and decide it by exact trials
+		if (modelBroken) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the exact trials kept a stream that exceeds ${limit} octets`);
+		w.rollback(sectionMark);
+		written[s] = 0;
+		truncated = false;
+		dropped = false;
+		pos = 0;
+		keptSets = sets.length;
+		modelBroken = true;
+		}
 		if (keptSets < sets.length) break outer;
 	}
 	if (dropped) {

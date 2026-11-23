@@ -376,10 +376,36 @@ describe("truncation refuses messages whose meaning it would destroy (CLDMV/digb
 });
 
 /**
+ * The type bitmap writer the exact-trial reference mirrors from rdata/dnssec.mjs: sorted unique types, one window per
+ * 256-type block, the bitmap cut at the highest set bit of the window.
+ * @param {import("../../src/lib/wire/buffer.mjs").Writer} w
+ * @param {number[]} types
+ */
+function writeTypeBitmap(w, types) {
+	const sorted = [...new Set(types)].sort((a, b) => a - b);
+	let i = 0;
+	while (i < sorted.length) {
+		const win = sorted[i] >> 8;
+		const map = new Uint8Array(32);
+		let len = 0;
+		while (i < sorted.length && sorted[i] >> 8 === win) {
+			const low = sorted[i] & 0xff;
+			map[low >> 3] |= 0x80 >> (low & 7);
+			len = (low >> 3) + 1;
+			i++;
+		}
+		w.u8(win);
+		w.u8(len);
+		w.raw(map.subarray(0, len));
+	}
+}
+
+/**
  * The exact-trial reference (CLDMV/digby#43): the round-2/3 truncation algorithm, captured from commit 11347f0
  * (`encodeCappedRaw`'s truncation branch) and re-implemented here on the exported primitives — {@link Writer},
  * {@link writeName}, {@link nameKey}, {@link packFlags} — plus local rdata writers for the record types the
- * differential shapes carry (A, NS, CNAME, PTR, MX, TXT). Per set it writes the stream that would actually go out
+ * differential shapes carry (A, NS, CNAME, PTR, MX, TXT, SRV, NAPTR, RRSIG, NSEC, SVCB, HTTPS — the types whose rdata names
+ * register without compressing included, so the differential pins the model against them). Per set it writes the stream that would actually go out
  * (all kept sets plus this one, at their original positions, with real compression) and keeps it when it fits, so
  * its keep/drop decisions and its bytes are exact by construction. The differential below pins `encodeCapped` to
  * it byte for byte: a fast probe path may only skip the trial when it cannot change what is kept.
@@ -418,6 +444,45 @@ function oracleCapped(message, { limit, truncate = true, compress = true }) {
 				for (const s of d.strings) {
 					w.u8(s.length);
 					w.raw(s);
+				}
+				return;
+			case TYPE.SRV:
+				w.u16(d.priority);
+				w.u16(d.weight);
+				w.u16(d.port);
+				writeName(w, d.target, false);
+				return;
+			case TYPE.NAPTR:
+				w.u16(d.order);
+				w.u16(d.preference);
+				w.charString(d.flags);
+				w.charString(d.services);
+				w.charString(d.regexp);
+				writeName(w, d.replacement, false);
+				return;
+			case TYPE.RRSIG:
+				w.u16(d.typeCovered);
+				w.u8(d.algorithm);
+				w.u8(d.labels);
+				w.u32(d.originalTtl);
+				w.u32(d.expiration);
+				w.u32(d.inception);
+				w.u16(d.keyTag);
+				writeName(w, d.signerName, false);
+				w.raw(d.signature);
+				return;
+			case TYPE.NSEC:
+				writeName(w, d.next, false);
+				writeTypeBitmap(w, d.types);
+				return;
+			case TYPE.SVCB:
+			case TYPE.HTTPS:
+				w.u16(d.priority);
+				writeName(w, d.target, false);
+				for (const p of d.params) {
+					w.u16(p.key);
+					w.u16(p.value.length);
+					w.raw(p.value);
 				}
 				return;
 			default:
@@ -583,15 +648,76 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 		}
 	}, 600_000);
 
+	it("never encodes past the limit when a kept set's registration belongs to a later record (CLDMV/digby#43)", () => {
+		// The model registered a target by ANY kept record, including one at a LATER stream position: writeName registers
+		// targets even for names it never compresses (an SRV target, an RRSIG signer), so the first SRV's set is measured
+		// with its second record's target compressing against the registration the b.t. NS record's measurement will make
+		// LATER — the real stream writes that name in full, the fit check passed on the 2-octet phantom, and the output
+		// went over the limit. Repro: question `q.` A; answers `a.t.` SRV -> s1.example., `b.t.` NS -> <60xl>.example.,
+		// `a.t.` SRV -> <60xl>.example. (records 0 and 2 are one RRset; record 1 is its own NS set). Full encode 217
+		// octets; at limits 156..216 the buggy encode returned all 217 with truncated:false, the exact-trial reference
+		// returns 140 with truncated:true. Every limit in the window is compared byte for byte, and the output stays
+		// within the limit — the encoder must never return more octets than the limit.
+		const l60 = "l".repeat(60);
+		const srv = (target) => ({ name: "a.t.", type: TYPE.SRV, class: CLASS.IN, ttl: 60, data: { priority: 1, weight: 2, port: 3, target } });
+		const m = {
+			id: 1,
+			flags: { qr: true },
+			questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }],
+			answers: [srv("s1.example."), { name: "b.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `${l60}.example.` } }, srv(`${l60}.example.`)]
+		};
+		const full = encodeMessage(m).length;
+		expect(full, "the repro's full encode").toBe(217);
+		for (let limit = 140; limit <= full; limit++) {
+			const capped = encodeCapped(m, { limit });
+			expect(capped.bytes.length, `limit=${limit}: the encoder never returns more octets than the limit`).toBeLessThanOrEqual(limit);
+			const reference = oracleCapped(m, { limit });
+			expect(capped.truncated, `limit=${limit}: the truncation flag matches the exact-trial reference`).toBe(reference.truncated);
+			expect(hex.to(capped.bytes), `limit=${limit}: the bytes match the exact-trial reference`).toBe(hex.to(reference.bytes));
+		}
+		// the window the bug sat in: the exact-trial reference truncates to 140 octets well before the full encode, and
+		// every limit inside the window gets the 140-octet stream (the phantom pointer saved rec1's 61-octet target
+		// suffix, so the window opens at 217 - 61 = 156 — the window the finding reports)
+		for (const limit of [156, 180, 200, 216]) {
+			const reference = oracleCapped(m, { limit });
+			expect(reference.truncated, `limit=${limit}: the reference truncates inside the window`).toBe(true);
+			expect(reference.bytes.length, `limit=${limit}: the reference's kept stream`).toBe(140);
+		}
+	});
+
 	it("matches the exact-trial reference on pseudo-random interleavings straddling 0x4000", () => {
 		for (let seed = 0; seed < 40; seed++) {
 			const rand = (n) => ((seed * 1103515245 + 12345 + n * 69069) >>> 8) % 997;
 			const F = 15300 + (rand(1) % 1100);
 			const recs = [bigTxt("big.test.", F)];
 			const names = ["z.test.", "b.test.", "c.test.", "d.test."];
+			const sig = new Uint8Array(24).fill(0x5a);
 			for (let i = 0; i < 8; i++) {
 				const n = names[rand(2 + i) % names.length];
-				recs.push(rand(3 + i) % 2 ? txt(n, 40 + (rand(i) % 220)) : ns(n, `t${i}.${x63}.example.`));
+				const target = `t${i}.${x63}.example.`;
+				switch (rand(3 + i) % 7) {
+					case 0:
+						recs.push(txt(n, 40 + (rand(i) % 220)));
+						break;
+					case 1:
+						recs.push(ns(n, target));
+						break;
+					case 2:
+						recs.push({ name: n, type: TYPE.SRV, class: CLASS.IN, ttl: 60, data: { priority: 1, weight: 2, port: 3, target } });
+						break;
+					case 3:
+						recs.push({ name: n, type: TYPE.NAPTR, class: CLASS.IN, ttl: 60, data: { order: 1, preference: 2, flags: new Uint8Array(2).fill(0x73), services: new Uint8Array(3).fill(0x74), regexp: new Uint8Array(4).fill(0x75), replacement: target } });
+						break;
+					case 4:
+						recs.push({ name: n, type: TYPE.RRSIG, class: CLASS.IN, ttl: 60, data: { typeCovered: TYPE.A, algorithm: 8, labels: 2, originalTtl: 3600, expiration: 1700000000, inception: 1600000000, keyTag: 1234, signerName: target, signature: sig } });
+						break;
+					case 5:
+						recs.push({ name: n, type: TYPE.NSEC, class: CLASS.IN, ttl: 60, data: { next: target, types: [TYPE.A, TYPE.NS, TYPE.TXT] } });
+						break;
+					default:
+						recs.push({ name: n, type: TYPE.SVCB, class: CLASS.IN, ttl: 60, data: { priority: 3, target, params: [{ key: 65001, value: new Uint8Array(6).fill(0x71) }] } });
+						break;
+				}
 			}
 			const m = { id: 1, flags: { qr: true }, questions: [], answers: recs };
 			const full = encodeMessage(m).length;
