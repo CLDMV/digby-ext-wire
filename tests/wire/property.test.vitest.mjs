@@ -29,15 +29,18 @@ describe(`wire properties (seed ${SEED})`, () => {
 		const g = prng(SEED);
 		for (let i = 0; i < MESSAGES; i++) {
 			const m = genMessage(g);
-			const bytes = encodeMessage(m);
+			// genMessage sometimes adds a TSIG record; the encode refuses any message that carries one (CLDMV/digby#39 —
+			// re-encoding a signed message cannot keep the MAC valid), so the round-trip target is the unsigned form
+			const unsigned = { ...m, additionals: m.additionals.filter((r) => r.type !== TYPE.TSIG) };
+			const bytes = encodeMessage(unsigned);
 			expect(bytes.length).toBeLessThanOrEqual(65535);
 			// genMessage emits up to two questions; the decode default is one (the server path), so say so. The encoder keeps
 			// record order — record order is meaning, even when a section's RRsets interleave (CLDMV/digby#36) — so the
 			// round-trip target is the message itself.
-			expect(decodeMessage(bytes, { maxQuestions: 2 })).toEqual(m);
-			const plain = encodeMessage(m, { compress: false });
+			expect(decodeMessage(bytes, { maxQuestions: 2 })).toEqual(unsigned);
+			const plain = encodeMessage(unsigned, { compress: false });
 			expect(plain.length).toBeGreaterThanOrEqual(bytes.length);
-			expect(decodeMessage(plain, { maxQuestions: 2 })).toEqual(m);
+			expect(decodeMessage(plain, { maxQuestions: 2 })).toEqual(unsigned);
 		}
 	});
 

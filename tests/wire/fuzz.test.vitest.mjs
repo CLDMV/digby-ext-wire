@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CLASS } from "../../src/lib/wire/constants.mjs";
+import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
 import { canonicalName } from "../../src/lib/wire/names.mjs";
@@ -92,6 +92,9 @@ function checkInput(input) {
 		again = encodeMessage(m);
 	} catch (err) {
 		if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE) return "accepted";
+		// a mutation can turn a record into a TSIG; the encode refuses any message that carries one
+		// (CLDMV/digby#39) — the refusal is the correct outcome for such a decode
+		if (err instanceof WireError && err.code === WireErrorCode.TSIG_PRESENT) return "accepted";
 		throw report("re-encoding a decoded message failed", input, err);
 	}
 	let back;
@@ -140,7 +143,12 @@ const TEXT_WORDS = ["A", "AAAA", "TXT", "MX", "SOA", "SVCB", "HTTPS", "NSEC", "R
 describe(`wire fuzz (seed ${SEED}, ${ITERATIONS} iterations)`, () => {
 	it("decode returns or throws WireError, and what it returns survives re-encoding and presentation", () => {
 		const g = prng(SEED);
-		const seeds = Array.from({ length: 64 }, () => encodeMessage(genMessage(g)));
+		// genMessage sometimes adds a TSIG record; the encode refuses any message that carries one (CLDMV/digby#39),
+		// so the seeds are the unsigned forms
+		const seeds = Array.from({ length: 64 }, () => {
+			const m = genMessage(g);
+			return encodeMessage({ ...m, additionals: m.additionals.filter((r) => r.type !== TYPE.TSIG) });
+		});
 		const tally = { accepted: 0, rejected: 0 };
 		const heapBefore = process.memoryUsage().heapUsed;
 		const started = performance.now();

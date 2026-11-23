@@ -32,7 +32,8 @@ const code = (fn) => {
 
 const A = (i) => ({ name: "ns.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: `10.0.0.${i}` } });
 const TXT = (name, n) => ({ name, type: TYPE.TXT, class: 1, ttl: 60, data: { strings: Array.from({ length: Math.ceil(n / 255) }, (_, i) => Uint8Array.from({ length: Math.min(255, n - i * 255) }, () => 0x78)) } });
-const message = (sections) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [], answers: [], authorities: [], additionals: [], ...sections });
+// one question: a truncating encode of a message without exactly one question is refused (CLDMV/digby#43)
+const message = (sections) => ({ id: 1, flags: { qr: true }, rcode: 0, questions: [{ name: "example.", type: TYPE.A, class: 1 }], answers: [], authorities: [], additionals: [], ...sections });
 
 /** A TSIG record a signer would produce for message id `originalId`; `macLen` sets its size. */
 const tsigRecord = (originalId, macLen = 32) => ({
