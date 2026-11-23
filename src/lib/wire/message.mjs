@@ -92,8 +92,10 @@ export function decodeMessage(input, options) {
 	const o = cloneOptions(options, "the decode options");
 	const bytes = asBytes(input);
 	if (bytes.length > MAX_MESSAGE) fail(WireErrorCode.INPUT_TOO_LARGE, `a message is at most ${MAX_MESSAGE} octets, got ${bytes.length}`);
-	checkInt(o.maxQuestions ?? 1, 0xffff, "maxQuestions");
-	checkInt(o.maxNameOctets ?? MAX_NAME_OCTETS, Number.MAX_SAFE_INTEGER, "maxNameOctets");
+	const maxQuestions = o.maxQuestions ?? 1;
+	checkInt(maxQuestions, 0xffff, "maxQuestions");
+	const maxNameOctets = o.maxNameOctets ?? MAX_NAME_OCTETS;
+	checkInt(maxNameOctets, Number.MAX_SAFE_INTEGER, "maxNameOctets");
 	const r = new Reader(bytes);
 	if (bytes.length < HEADER_SIZE) fail(WireErrorCode.TRUNCATED, `a message is at least ${HEADER_SIZE} octets, got ${bytes.length}`, 0);
 	const id = r.u16();
@@ -105,7 +107,7 @@ export function decodeMessage(input, options) {
 	// count of newly materialised name octets against the cap.
 	r.nameMemo = new Map();
 	r.nameOctets = 0;
-	r.maxNameOctets = o.maxNameOctets ?? MAX_NAME_OCTETS;
+	r.maxNameOctets = maxNameOctets;
 
 	const questions = [];
 	for (let i = 0; i < qd; i++) {
