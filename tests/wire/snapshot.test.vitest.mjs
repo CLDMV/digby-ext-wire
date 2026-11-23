@@ -639,7 +639,7 @@ describe("the public surface throws only WireError, for any value in any argumen
 		formatRecord: () => [A(1)],
 		parseRecord: () => ["a.example. 60 IN A 10.0.0.1", { ttl: 60 }],
 		parseTtl: () => ["1h30m"],
-		TcpFramer: () => [],
+		"TcpFramer() constructor": () => [],
 		"TcpFramer.prototype.push": () => [new Uint8Array(0)]
 	};
 	// every export of the index, enumerated — a new export is covered automatically. A function export is called with a
