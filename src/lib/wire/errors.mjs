@@ -181,9 +181,23 @@ export function cloneInput(value, what) {
 function boundClone(root, what) {
 	const seen = new Set(); // a self-referential value is walked once, never in circles
 	const stack = [[root, what]];
+	// a view over a SharedArrayBuffer (a growable one included) is cloned by SHARING the buffer, not copying it: the
+	// copy would alias memory the caller can still change while the encode reads it, so the one-copy rule cannot hold.
+	// Checked both in this walk (fail before paying the copy) and in checkClone (the copy — which also catches a view
+	// an accessor returned, which this walk skips) (CLDMV/digby#39).
+	const refuseShared = (v, where) => {
+		if (v.buffer instanceof SharedArrayBuffer)
+			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a view over a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
+	};
 	while (stack.length > 0) {
 		const [v, where] = stack.pop();
-		if (v === null || typeof v !== "object" || ArrayBuffer.isView(v)) continue;
+		if (v === null || typeof v !== "object") continue;
+		if (ArrayBuffer.isView(v)) {
+			refuseShared(v, where);
+			continue;
+		}
+		if (v instanceof SharedArrayBuffer)
+			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 		if (seen.has(v)) continue;
 		seen.add(v);
 		if (Array.isArray(v) && v.length > MAX_LIST) {
@@ -201,7 +215,11 @@ function boundClone(root, what) {
 			const d = Object.getOwnPropertyDescriptor(v, k);
 			if (d === undefined || !("value" in d)) continue; // an accessor: the serializer reads it; this guard does not
 			const e = d.value;
-			if (e !== null && typeof e === "object" && !ArrayBuffer.isView(e)) stack.push([e, `${where}.${k}`]);
+			if (e !== null && typeof e === "object") {
+				// a view is checked here and never descended into: its contents are octets, not structure
+				if (ArrayBuffer.isView(e)) refuseShared(e, `${where}.${k}`);
+				else stack.push([e, `${where}.${k}`]);
+			}
 		}
 	}
 }
@@ -217,9 +235,21 @@ function boundClone(root, what) {
 function checkClone(root, what) {
 	const seen = new Set();
 	const stack = [[root, what]];
+	// the SharedArrayBuffer refusal on the copy: this walk also catches a view an accessor returned, which boundClone
+	// skips — the serializer read it, and the copy shares its buffer (CLDMV/digby#39)
+	const refuseShared = (v, where) => {
+		if (v.buffer instanceof SharedArrayBuffer)
+			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a view over a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
+	};
 	while (stack.length > 0) {
 		const [v, where] = stack.pop();
-		if (v === null || typeof v !== "object" || ArrayBuffer.isView(v)) continue;
+		if (v === null || typeof v !== "object") continue;
+		if (ArrayBuffer.isView(v)) {
+			refuseShared(v, where);
+			continue;
+		}
+		if (v instanceof SharedArrayBuffer)
+			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 		if (seen.has(v)) continue;
 		seen.add(v);
 		if (Array.isArray(v)) {
@@ -236,14 +266,21 @@ function checkClone(root, what) {
 			}
 			for (let i = 0; i < v.length; i++) {
 				const e = v[i];
-				if (e !== null && typeof e === "object" && !ArrayBuffer.isView(e)) stack.push([e, `${where}[${i}]`]);
+				if (e !== null && typeof e === "object") {
+					// a view is checked here and never descended into: its contents are octets, not structure
+					if (ArrayBuffer.isView(e)) refuseShared(e, `${where}[${i}]`);
+					else stack.push([e, `${where}[${i}]`]);
+				}
 			}
 		} else {
 			const proto = Object.getPrototypeOf(v);
 			if (proto !== Object.prototype && proto !== null) continue; // a Map, a Set, a Date, ...: refused where a codec reads it
 			for (const k of Object.keys(v)) {
 				const e = v[k];
-				if (e !== null && typeof e === "object" && !ArrayBuffer.isView(e)) stack.push([e, `${where}.${k}`]);
+				if (e !== null && typeof e === "object") {
+					if (ArrayBuffer.isView(e)) refuseShared(e, `${where}.${k}`);
+					else stack.push([e, `${where}.${k}`]);
+				}
 			}
 		}
 	}

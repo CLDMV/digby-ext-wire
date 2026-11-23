@@ -667,3 +667,21 @@ describe("error messages never stringify caller values (CLDMV/digby#39, round 5)
 		expect(code(() => appendTsig(build(), { ...tsigRecord(1), data: { ...tsigData(1), mac: new Uint8Array(4), originalId: "4660" } }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 });
+
+describe("a SharedArrayBuffer-backed view is refused, not shared (CLDMV/digby#39, round 5)", () => {
+	it("a view over a SharedArrayBuffer is refused NOT_CLONEABLE wherever an encode copies it", () => {
+		const view = new Uint8Array(new SharedArrayBuffer(8));
+		view.set([1, 2, 3, 4]);
+		// today: structuredClone shares the buffer with the copy — the caller can change the octets the encode is
+		// reading while it reads them, so the one-copy rule cannot hold
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: { data: view } }] }))).toBe("NOT_CLONEABLE");
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: TYPE.TXT, class: 1, ttl: 60, data: { strings: [view] } }] }))).toBe("NOT_CLONEABLE");
+		// a getter-hidden view too: the walk skips accessors, so the copy itself is checked
+		const hidden = { get data() { return view; } };
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: hidden }] }))).toBe("NOT_CLONEABLE");
+	});
+	it("a bare SharedArrayBuffer is refused too", () => {
+		const sab = new SharedArrayBuffer(8);
+		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: 999, class: 1, ttl: 0, data: { data: sab } }] }))).toBe("NOT_CLONEABLE");
+	});
+});

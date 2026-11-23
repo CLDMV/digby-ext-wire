@@ -424,7 +424,7 @@ describe("the standalone entries never stringify caller values (CLDMV/digby#39, 
 	it("RRSIG's and the type bitmap's refusals describe a cloned hostile value", () => {
 		// today: the reserved check passes a hostile covered, and checkInt's String(v) on it throws
 		expect(code(() => encodeRdataBytes(TYPE.RRSIG, rrsig({ typeCovered: toStringOne })))).toBe("VALUE_OUT_OF_RANGE");
-		// today: String(t) in the type bitmap's validation loop throws
-		expect(code(() => encodeRdataBytes(TYPE.NSEC, { next: ".", types: [toStringOne] }))).toBe("VALUE_OUT_OF_RANGE");
+		// today: String(t) in the type bitmap's validation loop throws; the bitmap's refusal is a BAD_RDATA
+		expect(code(() => encodeRdataBytes(TYPE.NSEC, { next: ".", types: [toStringOne] }))).toBe("BAD_RDATA");
 	});
 });
