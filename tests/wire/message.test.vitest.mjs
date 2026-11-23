@@ -604,14 +604,14 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 	it("treats a registration whose real offset lands exactly on 0x4000 as absent (CLDMV/digby#43)", () => {
 		// Set 0 is a two-record TXT RRset (positions 0 and 2); set 1 is a three-record NS RRset (positions 1, 3, 4)
 		// whose rdata names share the <63x>.example. suffix. At set 1's measurement set 0 is kept, so a suffix
-		// registered while writing the record at position 3 lands at its probe offset plus the 243 octets of the
-		// record at position 2 — the shift — which puts it at exactly 16,384. The compression pointer range ends at
+		// registered while writing the record at position 3 lands at its probe offset plus the kept record at
+		// position 2's octets — the shift — which puts it at exactly 16,384. The compression pointer range ends at
 		// 0x3fff, so the registration does not exist, and the record at position 4 writes the shared suffix in full.
 		// The boundary mutant (`< 0x4000` -> `<= 0x4000` at the three sites that implement the rule: the probe
 		// registration, the model lookup and the flip scan) keeps that registration: the record at position 4 then
-		// measures 62 octets shorter, the keep decision flips, and the encode goes out 16,531 octets over its
-		// 16,500-octet limit — this golden is the failure evidence for that mutant (tmp/agents/r5-capped/mutant.log
-		// in the round-5 work area holds the pod run).
+		// measures 62 octets shorter, the keep decision flips, and the encode goes out over its limit — this golden
+		// is the failure evidence for that mutant (tmp/agents/r5-capped/ev-evidence.out in the round-5 work area
+		// holds the pod run).
 		// g is the filler size at which the registration lands exactly on the boundary, found empirically (the
 		// hand arithmetic for a 16 KB stream is not trustworthy — see tmp/agents/r5-capped/findg.out in the round-5
 		// work area)
