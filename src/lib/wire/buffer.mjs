@@ -23,21 +23,46 @@ export const MAX_MESSAGE = 65535;
 const VIEW_BUFFER = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "buffer").get;
 /** The same, for DataViews. */
 const DATAVIEW_BUFFER = Object.getOwnPropertyDescriptor(DataView.prototype, "buffer").get;
+/** The typed-array `byteOffset` getter. */
+const VIEW_BYTE_OFFSET = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteOffset").get;
+/** The typed-array `byteLength` getter. */
+const VIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteLength").get;
+/** The same two, for DataViews. */
+const DATAVIEW_BYTE_OFFSET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteOffset").get;
+const DATAVIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get;
 
 /**
- * A view's buffer, read through the intrinsic getter so an own `buffer` property cannot shadow it (CLDMV/digby#39):
- * an own `buffer` data property on a Uint8Array returns the shadow, and a SharedArrayBuffer hidden behind one would be
- * read instead of refused. Returns null when `v` is not a view or the read throws (a Proxy's trap, a revoked Proxy) —
+ * A view's buffer, byteOffset and byteLength, read through the intrinsic getters so no own `buffer`, `byteOffset` or
+ * `byteLength` property can shadow them (CLDMV/digby#39): an own `buffer` data property or getter on a Uint8Array would
+ * otherwise hand the caller a SharedArrayBuffer to read instead of refusing it, and a shadowed `byteOffset` or
+ * `byteLength` would make the view construction itself throw a raw RangeError. The pick is brand-checked, not
+ * `instanceof`-picked: every getter verifies its receiver's internal slot, so a prototype swap cannot make the DataView
+ * getter run on a typed array or the other way round — the reader tries the DataView one and falls back to the
+ * typed-array one. Returns null when `v` is not a view or the reads throw (a Proxy's traps, a revoked Proxy) — every
+ * caller treats null as "not a SharedArrayBuffer"; the type checks refuse those values anyway.
+ * @param {unknown} v
+ * @returns {{ buffer: ArrayBuffer | SharedArrayBuffer, byteOffset: number, byteLength: number } | null}
+ */
+export function intrinsicView(v) {
+	try {
+		return { buffer: DATAVIEW_BUFFER.call(v), byteOffset: DATAVIEW_BYTE_OFFSET.call(v), byteLength: DATAVIEW_BYTE_LENGTH.call(v) };
+	} catch {}
+	try {
+		return { buffer: VIEW_BUFFER.call(v), byteOffset: VIEW_BYTE_OFFSET.call(v), byteLength: VIEW_BYTE_LENGTH.call(v) };
+	} catch {}
+	return null;
+}
+
+/**
+ * A view's buffer, read through the intrinsic getters (see {@link intrinsicView}) so an own `buffer` property cannot
+ * shadow it (CLDMV/digby#39). Returns null when `v` is not a view or the read throws (a Proxy's trap, a revoked Proxy) —
  * every caller treats null as "not a SharedArrayBuffer"; the type checks refuse those values anyway.
  * @param {unknown} v
  * @returns {ArrayBuffer | SharedArrayBuffer | null}
  */
 export function intrinsicBuffer(v) {
-	try {
-		return (v instanceof DataView ? DATAVIEW_BUFFER : VIEW_BUFFER).call(v);
-	} catch {
-		return null;
-	}
+	const view = intrinsicView(v);
+	return view === null ? null : view.buffer;
 }
 
 /**
@@ -46,19 +71,21 @@ export function intrinsicBuffer(v) {
  * @returns {Uint8Array}
  */
 export function asBytes(bytes) {
-	// `instanceof` and the buffer/offset/length reads can fire a Proxy's traps (a revoked Proxy throws for
-	// `instanceof`'s getPrototypeOf) — any such throw means the input cannot be read as octets, which is the
-	// VALUE_OUT_OF_RANGE refusal (CLDMV/digby#39). The buffer is read through the intrinsic getter, so an own `buffer`
-	// property cannot shadow the SharedArrayBuffer refusal (CLDMV/digby#39): every byte-taking entry — decodeMessage,
-	// frameTcp, TcpFramer.push, formatGeneric — refuses every SAB form here, bare SABs included.
+	// `instanceof` and the intrinsic reads can fire a Proxy's traps (a revoked Proxy throws for `instanceof`'s
+	// getPrototypeOf) — any such throw means the input cannot be read as octets, which is the VALUE_OUT_OF_RANGE refusal
+	// (CLDMV/digby#39). The view is built only from the intrinsic buffer, byteOffset and byteLength (CLDMV/digby#39):
+	// every byte-taking entry — decodeMessage, frameTcp, TcpFramer.push, formatGeneric — refuses every SAB form here,
+	// bare SABs included, and no own `buffer`, `byteOffset` or `byteLength` property can shadow any of the three reads.
 	try {
-		if (intrinsicBuffer(bytes) instanceof SharedArrayBuffer)
-			fail(WireErrorCode.NOT_CLONEABLE, "byte input is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
-		if (bytes instanceof Uint8Array) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-		if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
-		if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		const view = intrinsicView(bytes);
+		if (view !== null) {
+			if (view.buffer instanceof SharedArrayBuffer)
+				fail(WireErrorCode.NOT_CLONEABLE, "byte input is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+			return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+		}
 		if (bytes instanceof SharedArrayBuffer)
 			fail(WireErrorCode.NOT_CLONEABLE, "byte input is a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+		if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
 	} catch (err) {
 		if (err instanceof WireError) throw err;
 		// fall through to the refusal
