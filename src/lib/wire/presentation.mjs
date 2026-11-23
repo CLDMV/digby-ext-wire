@@ -100,7 +100,7 @@ export function parseRecord(text, options) {
 		if (cls !== CLASS.ANY && cls !== CLASS.NONE)
 			fail(WireErrorCode.BAD_PRESENTATION, "the record has no rdata; empty rdata is only the class ANY or NONE update form");
 		data = null;
-	} else data = parseRdataTokens(type, t, origin, cls);
+	} else data = parseRdataTokens(type, t, o.origin, cls);
 	if (data === null && RDATA_REQUIRED.has(type))
 		fail(WireErrorCode.BAD_PRESENTATION, `${typeToString(type)} rdata must be present; the empty-rdata update form does not apply to it`);
 	return { name, ttl, class: cls, type, data };
