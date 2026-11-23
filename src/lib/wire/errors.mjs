@@ -9,6 +9,8 @@
  * public functions. Callers map the code to an answer: a decode failure of a query is FORMERR, an encode failure is SERVFAIL.
  */
 
+import { intrinsicBuffer } from "./buffer.mjs";
+
 /**
  * The error codes, grouped by where they arise.
  * @readonly
@@ -186,7 +188,9 @@ function boundClone(root, what) {
 	// Checked both in this walk (fail before paying the copy) and in checkClone (the copy — which also catches a view
 	// an accessor returned, which this walk skips) (CLDMV/digby#39).
 	const refuseShared = (v, where) => {
-		if (v.buffer instanceof SharedArrayBuffer)
+		// the buffer is read through the intrinsic getter (CLDMV/digby#39): an own `buffer` property on the view would
+		// otherwise shadow the SharedArrayBuffer and the copy would share it after all
+		if (intrinsicBuffer(v) instanceof SharedArrayBuffer)
 			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a view over a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 	};
 	while (stack.length > 0) {
@@ -238,7 +242,9 @@ function checkClone(root, what) {
 	// the SharedArrayBuffer refusal on the copy: this walk also catches a view an accessor returned, which boundClone
 	// skips — the serializer read it, and the copy shares its buffer (CLDMV/digby#39)
 	const refuseShared = (v, where) => {
-		if (v.buffer instanceof SharedArrayBuffer)
+		// the buffer is read through the intrinsic getter (CLDMV/digby#39): an own `buffer` property on the view would
+		// otherwise shadow the SharedArrayBuffer and the copy would share it after all
+		if (intrinsicBuffer(v) instanceof SharedArrayBuffer)
 			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a view over a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 	};
 	while (stack.length > 0) {

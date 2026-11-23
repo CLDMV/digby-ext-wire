@@ -19,6 +19,27 @@ import { WireError, WireErrorCode, cloneInput, describe, fail } from "./errors.m
 /** The largest DNS message: the TCP length prefix is 16 bits. */
 export const MAX_MESSAGE = 65535;
 
+/** The `buffer` getter off the view prototype, so the read can go through the intrinsic, never a shadowing own property (CLDMV/digby#39). */
+const VIEW_BUFFER = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "buffer").get;
+/** The same, for DataViews. */
+const DATAVIEW_BUFFER = Object.getOwnPropertyDescriptor(DataView.prototype, "buffer").get;
+
+/**
+ * A view's buffer, read through the intrinsic getter so an own `buffer` property cannot shadow it (CLDMV/digby#39):
+ * an own `buffer` data property on a Uint8Array returns the shadow, and a SharedArrayBuffer hidden behind one would be
+ * read instead of refused. Returns null when `v` is not a view or the read throws (a Proxy's trap, a revoked Proxy) —
+ * every caller treats null as "not a SharedArrayBuffer"; the type checks refuse those values anyway.
+ * @param {unknown} v
+ * @returns {ArrayBuffer | SharedArrayBuffer | null}
+ */
+export function intrinsicBuffer(v) {
+	try {
+		return (v instanceof DataView ? DATAVIEW_BUFFER : VIEW_BUFFER).call(v);
+	} catch {
+		return null;
+	}
+}
+
 /**
  * View any byte source as a plain Uint8Array without copying.
  * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes
@@ -27,12 +48,19 @@ export const MAX_MESSAGE = 65535;
 export function asBytes(bytes) {
 	// `instanceof` and the buffer/offset/length reads can fire a Proxy's traps (a revoked Proxy throws for
 	// `instanceof`'s getPrototypeOf) — any such throw means the input cannot be read as octets, which is the
-	// VALUE_OUT_OF_RANGE refusal (CLDMV/digby#39)
+	// VALUE_OUT_OF_RANGE refusal (CLDMV/digby#39). The buffer is read through the intrinsic getter, so an own `buffer`
+	// property cannot shadow the SharedArrayBuffer refusal (CLDMV/digby#39): every byte-taking entry — decodeMessage,
+	// frameTcp, TcpFramer.push, formatGeneric — refuses every SAB form here, bare SABs included.
 	try {
+		if (intrinsicBuffer(bytes) instanceof SharedArrayBuffer)
+			fail(WireErrorCode.NOT_CLONEABLE, "byte input is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
 		if (bytes instanceof Uint8Array) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
 		if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-	} catch {
+		if (bytes instanceof SharedArrayBuffer)
+			fail(WireErrorCode.NOT_CLONEABLE, "byte input is a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+	} catch (err) {
+		if (err instanceof WireError) throw err;
 		// fall through to the refusal
 	}
 	return fail(WireErrorCode.VALUE_OUT_OF_RANGE, "expected a Uint8Array, an ArrayBuffer or an ArrayBufferView");

@@ -10,7 +10,7 @@
  * then decoded with the typed codec, so a malformed generic rdata is refused the same way as malformed wire.
  */
 
-import { MAX_MESSAGE, Reader, Writer, asBytes } from "../buffer.mjs";
+import { MAX_MESSAGE, Reader, Writer, asBytes, intrinsicBuffer } from "../buffer.mjs";
 import { CLASS, TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
 import { WireError, WireErrorCode, cloneInput, describe, fail } from "../errors.mjs";
@@ -124,8 +124,9 @@ export function decodeRdataBytes(type, octets) {
 	try {
 		src = bytes(octets, "rdata");
 		// a view over a SharedArrayBuffer is refused like any entry's input: the decode must not read memory the
-		// caller can change
-		if (src.buffer instanceof SharedArrayBuffer)
+		// caller can change. The buffer is read through the intrinsic getter, so an own `buffer` property cannot
+		// shadow the refusal (CLDMV/digby#39)
+		if (intrinsicBuffer(src) instanceof SharedArrayBuffer)
 			fail(WireErrorCode.NOT_CLONEABLE, "rdata is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
 	} catch (err) {
 		if (err instanceof WireError) throw err;
