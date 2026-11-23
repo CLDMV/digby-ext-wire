@@ -39,6 +39,7 @@ export const WireErrorCode = Object.freeze({
 	BAD_SVCPARAM: "BAD_SVCPARAM", // a SVCB/HTTPS SvcParam that is malformed, out of order or inconsistent
 	// Encode
 	VALUE_OUT_OF_RANGE: "VALUE_OUT_OF_RANGE", // a number that does not fit its field, or a field of the wrong kind
+	NOT_CLONEABLE: "NOT_CLONEABLE", // the input is not structured-clone data — a function, a Proxy, a symbol — so the one-copy rule cannot hold (CLDMV/digby#39)
 	MESSAGE_TOO_LARGE: "MESSAGE_TOO_LARGE", // the encoding exceeds the size cap and cannot be truncated to fit
 	TSIG_PRESENT: "TSIG_PRESENT", // a capped encode was given a message that already carries a TSIG record; truncating it would invalidate the MAC (CLDMV/digby#39)
 	TRUNCATION_REFUSED: "TRUNCATION_REFUSED", // a capped encode was asked to truncate a message whose meaning truncation would destroy — an UPDATE, or a question of type AXFR or IXFR (CLDMV/digby#43)
@@ -79,4 +80,134 @@ export class WireError extends Error {
  */
 export function fail(code, message, offset) {
 	throw new WireError(code, message, offset);
+}
+
+/**
+ * The most entries any list the input may hold (CLDMV/digby#39): the largest count the wire form can carry (a 16-bit
+ * section count, RFC 1035 4.1). A list this long already costs its own octets on the wire, so anything a caller hands
+ * the codec beyond it is either a sparse array (refused below, before anything walks it) or a dense one a truncating
+ * encode legitimately takes and drops whole RRsets from (CLDMV/digby#43's 320,000-record bound).
+ */
+const MAX_LIST = 0xffff;
+
+/**
+ * Copy the caller's input once with structuredClone, then cap and density-check the copy's lists (CLDMV/digby#39, codec
+ * fix round 4). The public entries take this copy and never touch the original again: V8's serializer reads each own
+ * enumerable property exactly once, so a getter cannot show the checks one value and the writer another; no caller
+ * method, iterator or `Symbol.species` runs; a typed-array subclass arrives as a plain Uint8Array of its real octets; a
+ * faked brand (`Object.setPrototypeOf({}, Uint8Array.prototype)`) arrives as a plain object the field checks refuse; an
+ * own `__proto__` key stays a data key.
+ *
+ * The input contract is structured-clone data: plain objects — own enumerable properties only, so prototype getters are
+ * not read and a record built on a class with prototype getters encodes as absent — plus arrays, primitives and typed
+ * arrays. Anything else the serializer refuses (a function, a Proxy, a symbol, extreme nesting) is NOT_CLONEABLE; a list
+ * over {@link MAX_LIST} entries that is not dense, or a list with a hole, is VALUE_OUT_OF_RANGE. In both cases a
+ * `WireError`, never a TypeError, a raw RangeError, or a hang. A self-referential value is not refused: the copy
+ * preserves the cycle, both walks bound themselves with a visited set, and the codecs read only the fields they know —
+ * the same observable behaviour as round 3's depth-bounded copy.
+ *
+ * The size bound runs BEFORE the copy ({@link boundClone}) as well as after it ({@link checkClone}): V8's serializer
+ * walks a fast-holey array by index, so a sparse list of 2**32-1 entries would exhaust the heap inside the copy itself.
+ * The bound reads the original only through own enumerable DATA properties — reading a data property runs no caller
+ * code, so a getter is still read exactly once, by the serializer; a getter's value is the serializer's to read and its
+ * cost is the caller's.
+ *
+ * @param {unknown} value
+ * @param {string} what - what the value is, for the refusal message ("a message", "TSIG record", ...)
+ * @returns {unknown} the copy
+ * @throws {WireError} NOT_CLONEABLE when structuredClone refuses the value; VALUE_OUT_OF_RANGE for a list longer than
+ *   {@link MAX_LIST} that is not dense, or a list with a hole
+ */
+export function cloneInput(value, what) {
+	boundClone(value, what);
+	let clone;
+	try {
+		clone = structuredClone(value);
+	} catch (err) {
+		// structuredClone refuses functions, Proxies and symbols with DataCloneError (cycles it takes), and its
+		// serializer is recursive, so extreme nesting surfaces as a RangeError — both mean the input is not
+		// structured-clone data
+		fail(WireErrorCode.NOT_CLONEABLE, `${what} is not structured-clone data: ${err.message}`);
+	}
+	checkClone(clone, what);
+	return clone;
+}
+
+/**
+ * Refuse, before the copy, every list too big for the serializer to take in bounded time (CLDMV/digby#39): a list over
+ * {@link MAX_LIST} entries that is not dense. The walk reads the original only through own enumerable DATA properties
+ * (accessors are skipped — the serializer reads those), so it costs the input's own keys and elements and runs no caller
+ * code. Typed arrays carry fixed octets, and anything else exotic (a Map, a Date) is refused where a codec reads it.
+ * @param {unknown} root
+ * @param {string} what
+ */
+function boundClone(root, what) {
+	const seen = new Set(); // a self-referential value is walked once, never in circles
+	const stack = [[root, what]];
+	while (stack.length > 0) {
+		const [v, where] = stack.pop();
+		if (v === null || typeof v !== "object" || ArrayBuffer.isView(v)) continue;
+		if (seen.has(v)) continue;
+		seen.add(v);
+		if (Array.isArray(v) && v.length > MAX_LIST) {
+			// longer than any list the wire can carry: only a dense list costs bounded time to copy — a sparse one (the
+			// 2**32-1 repro) is refused here, before the serializer walks it by index. Denseness is checked over the
+			// list's own keys, which costs their count, never the length.
+			const keys = Object.keys(v);
+			if (keys.length !== v.length || keys.some((k) => `${k >>> 0}` !== k))
+				fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} holds ${v.length} entries; a list is at most ${MAX_LIST} dense entries (CLDMV/digby#39)`);
+		} else if (!Array.isArray(v)) {
+			const proto = Object.getPrototypeOf(v);
+			if (proto !== Object.prototype && proto !== null) continue; // a Map, a Set, a Date, ...: refused where a codec reads it
+		}
+		for (const k of Object.keys(v)) {
+			const d = Object.getOwnPropertyDescriptor(v, k);
+			if (d === undefined || !("value" in d)) continue; // an accessor: the serializer reads it; this guard does not
+			const e = d.value;
+			if (e !== null && typeof e === "object" && !ArrayBuffer.isView(e)) stack.push([e, `${where}.${k}`]);
+		}
+	}
+}
+
+/**
+ * Walk a {@link cloneInput} copy and refuse every list that is longer than {@link MAX_LIST} without being dense, and
+ * every hole, before the encode iterates anything (CLDMV/digby#39). Only arrays and plain objects are descended: typed
+ * arrays carry fixed octets with a real length, and anything else that survived the copy (a Map, a Date) is refused
+ * where a codec reads it as a field. A visited set bounds the walk on a copy that preserved a cycle.
+ * @param {unknown} root
+ * @param {string} what
+ */
+function checkClone(root, what) {
+	const seen = new Set();
+	const stack = [[root, what]];
+	while (stack.length > 0) {
+		const [v, where] = stack.pop();
+		if (v === null || typeof v !== "object" || ArrayBuffer.isView(v)) continue;
+		if (seen.has(v)) continue;
+		seen.add(v);
+		if (Array.isArray(v)) {
+			if (v.length > MAX_LIST) {
+				// longer than any list the wire can carry: only a dense list costs bounded time to walk — a sparse one
+				// (the 2**32-1 repro) is refused here, before anything iterates it. Denseness is checked over the copy's
+				// own keys, which costs their count, never the length.
+				const keys = Object.keys(v);
+				if (keys.length !== v.length || keys.some((k) => `${k >>> 0}` !== k))
+					fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} holds ${v.length} entries; a list is at most ${MAX_LIST} dense entries (CLDMV/digby#39)`);
+			} else {
+				for (let i = 0; i < v.length; i++)
+					if (!(i in v)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} has a hole at index ${i}; lists are dense (CLDMV/digby#39)`);
+			}
+			for (let i = 0; i < v.length; i++) {
+				const e = v[i];
+				if (e !== null && typeof e === "object" && !ArrayBuffer.isView(e)) stack.push([e, `${where}[${i}]`]);
+			}
+		} else {
+			const proto = Object.getPrototypeOf(v);
+			if (proto !== Object.prototype && proto !== null) continue; // a Map, a Set, a Date, ...: refused where a codec reads it
+			for (const k of Object.keys(v)) {
+				const e = v[k];
+				if (e !== null && typeof e === "object" && !ArrayBuffer.isView(e)) stack.push([e, `${where}.${k}`]);
+			}
+		}
+	}
 }

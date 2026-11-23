@@ -20,16 +20,23 @@
  *
  * Decode never allocates from a claimed count: each section's array grows only as records are actually read from the bytes,
  * and every read is bounded by the input. A TTL with the top bit set reads as 0 (RFC 2181 8).
+ *
+ * Input contract (CLDMV/digby#39): the encode entries copy their input once with structuredClone ({@link cloneInput}) and
+ * validate and write only the copy — structured-clone data, own enumerable properties only. Prototype getters are not read
+ * (flags built on a class with prototype getters encode as absent); no caller method, iterator or `Symbol.species` runs; a
+ * typed-array subclass arrives as a plain Uint8Array of its real octets. Anything the serializer refuses — a function, a
+ * Proxy, a cycle — is a `WireError` NOT_CLONEABLE, and so is a list longer than 65,535 entries that is not dense, or a list
+ * with a hole.
  */
 
 import { MAX_MESSAGE, Reader, Writer, asBytes, checkInt } from "./buffer.mjs";
 import { CLASS, OPCODE, TYPE, classToString, typeToString } from "./constants.mjs";
 import { joinOptTtl, readOptions, splitOptTtl, writeOptions } from "./edns.mjs";
-import { WireError, WireErrorCode, fail } from "./errors.mjs";
+import { WireError, WireErrorCode, cloneInput, fail } from "./errors.mjs";
 import { HEADER_SIZE, TC_BIT, packFlags, unpackFlags } from "./header.mjs";
 import { MAX_NAME_OCTETS, nameKey, readName, writeName } from "./names.mjs";
 import { array, obj, string } from "./rdata/common.mjs";
-import { decodeRdata, encodeRdata, snapshotRdata } from "./rdata/index.mjs";
+import { decodeRdata, encodeRdata } from "./rdata/index.mjs";
 
 const SECTIONS = ["answers", "authorities", "additionals"];
 const MAX_TTL = 0x7fffffff;
@@ -155,7 +162,8 @@ function readRecord(r) {
  * are written exactly in the order given: record order is meaning (a transfer's SOA bookends, an IXFR's SOA-diff structure,
  * an update's interleaved adds and deletes), so nothing is regrouped (CLDMV/digby#36).
  *
- * @param {object} message - shape above; `flags`, the section arrays and `edns` may be omitted
+ * @param {object} message - shape above; `flags`, the section arrays and `edns` may be omitted. The input is copied once
+ *   with structuredClone and only the copy is validated and written (see the module's input contract, CLDMV/digby#39).
  * @param {object} [options]
  * @param {number} [options.maxSize=65535] - fail MESSAGE_TOO_LARGE rather than produce more octets than this
  * @param {boolean} [options.compress=true]
@@ -164,13 +172,13 @@ function readRecord(r) {
  */
 export function encodeMessage(message, { maxSize = MAX_MESSAGE, compress = true } = {}) {
 	checkInt(maxSize, MAX_MESSAGE, "maxSize");
-	return encodeCappedRaw(snapshotMessage(message), { limit: maxSize, truncate: false, compress }).bytes;
+	return encodeCappedRaw(snapshotMessage(cloneInput(message, "a message")), { limit: maxSize, truncate: false, compress }).bytes;
 }
 
 /**
- * Validate a record or question type when the caller's object is copied (CLDMV/digby#39): an integer in 0..0xffff, and
- * neither reserved value (RFC 6895; CLDMV/digby#38). Because the copy is what the encode writes, there is never a
- * `type ?? rec.type` fallback read anywhere.
+ * Validate a record or question type on the copy (CLDMV/digby#39): an integer in 0..0xffff, and neither reserved value
+ * (RFC 6895; CLDMV/digby#38). Because the copy is what the encode writes, there is never a `type ?? rec.type` fallback read
+ * anywhere, and the message's stringifications see only cloned values.
  * @param {unknown} t
  * @param {string} what
  * @returns {number}
@@ -182,8 +190,8 @@ function checkType(t, what) {
 }
 
 /**
- * Copy a question into a plain object, once (CLDMV/digby#39): every field is read exactly once from the caller's object and
- * the encode writes the copy, so a getter cannot show the checks one value and the writer another.
+ * Validate a question of the {@link cloneInput} copy (CLDMV/digby#39): the copy is plain data, so every field is read once
+ * and the encode writes the copy — a getter cannot show the checks one value and the writer another.
  * @param {object} q
  * @returns {object}
  */
@@ -193,9 +201,9 @@ function snapshotQuestion(q) {
 }
 
 /**
- * Copy a record into a plain object, once (CLDMV/digby#39): every field is read exactly once, the type is validated on the
- * copy, and the rdata value is copied one level past the deepest field the codecs read (see {@link snapshotRdata}). `what`
- * names the record in the refusal ("a record", "TSIG record").
+ * Validate a record of the {@link cloneInput} copy (CLDMV/digby#39): the copy is plain data throughout, so every field is
+ * read once, the type is validated on the copy, and the rdata value the codecs write is the copy's. `what` names the record
+ * in the refusal ("a record", "TSIG record").
  * @param {object} rec
  * @param {string} [what]
  * @returns {object}
@@ -207,13 +215,13 @@ function snapshotRecord(rec, what = "a record") {
 		type: checkType(rec.type, "record type"),
 		class: rec.class ?? CLASS.IN,
 		ttl: rec.ttl,
-		data: snapshotRdata(rec.data)
+		data: rec.data
 	};
 }
 
 /**
- * Copy the EDNS fields into a plain object, once (CLDMV/digby#39). A falsy `edns` stays absent, exactly as the encode skips
- * it. Each option is copied shallowly: its fields are plain values and octets, which the option writers read once.
+ * Validate the EDNS fields of the {@link cloneInput} copy (CLDMV/digby#39). A falsy `edns` stays absent, exactly as the
+ * encode skips it.
  * @param {object} edns
  * @returns {object | null}
  */
@@ -222,22 +230,21 @@ function snapshotEdns(edns) {
 	obj(edns, "edns");
 	const options = array(edns.options ?? [], "EDNS options").map((o) => {
 		obj(o, "an EDNS option");
-		return { ...o };
+		return o;
 	});
 	return { udpSize: edns.udpSize, version: edns.version, dnssecOk: edns.dnssecOk, z: edns.z, options };
 }
 
 /**
- * Copy the message envelope into a plain object, once (CLDMV/digby#39): the header fields, EDNS and every question and record
- * of every section are read exactly once from the caller's object, and the encode acts on the copy only — a getter can
- * neither slip a TSIG past the TSIG-present check nor show the writer another value.
+ * Validate the message envelope of the {@link cloneInput} copy (CLDMV/digby#39): the header fields, EDNS and every question
+ * and record of every section are read once from the copy, and the encode acts on the copy only — a getter can neither slip
+ * a TSIG past the TSIG-present check nor show the writer another value.
  * @param {object} message
  * @returns {object}
  */
 function snapshotMessage(message) {
 	obj(message, "message");
 	const flags = message.flags;
-	const edns = message.edns;
 	return {
 		id: message.id,
 		flags: flags !== null && typeof flags === "object" ? { ...flags } : flags,
@@ -246,7 +253,7 @@ function snapshotMessage(message) {
 		answers: array(message.answers ?? [], "answers").map((rec) => snapshotRecord(rec)),
 		authorities: array(message.authorities ?? [], "authorities").map((rec) => snapshotRecord(rec)),
 		additionals: array(message.additionals ?? [], "additionals").map((rec) => snapshotRecord(rec)),
-		edns: snapshotEdns(edns)
+		edns: snapshotEdns(message.edns)
 	};
 }
 
@@ -270,7 +277,7 @@ const reservedEncodes = new WeakMap();
  * with `reserveTsig` set to the TSIG record's size, sign exactly the bytes that come back, then append the signed record with
  * {@link appendTsig}.
  *
- * @param {object} message
+ * @param {object} message - copied once with structuredClone and only the copy validated and written (CLDMV/digby#39)
  * @param {object} options
  * @param {number} options.limit - the size cap in octets (at least 12)
  * @param {number} [options.reserveTsig=0] - octets to leave free for a TSIG record appended afterwards: the result plus this
@@ -287,10 +294,10 @@ export function encodeCapped(message, { limit, truncate = true, compress = true,
 	checkInt(limit, MAX_MESSAGE, "limit");
 	checkInt(reserveTsig, MAX_MESSAGE, "reserveTsig");
 	if (reserveTsig > limit) fail(WireErrorCode.MESSAGE_TOO_LARGE, `reserving ${reserveTsig} octets of the ${limit}-octet limit leaves no room for a message`);
-	// one snapshot of the caller's input (CLDMV/digby#39): the TSIG-present check and the encode act on the same copied
-	// records, whose types were validated at the copy — a getter can neither slip a TSIG past the check nor show the encode
+	// one copy of the caller's input (CLDMV/digby#39): the TSIG-present check and the encode act on the same cloned
+	// records, whose types were validated on the copy — a getter can neither slip a TSIG past the check nor show the encode
 	// another type
-	const snap = snapshotMessage(message);
+	const snap = snapshotMessage(cloneInput(message, "a message"));
 	for (const section of [snap.answers, snap.authorities, snap.additionals])
 		for (const rec of section)
 			if (rec.type === TYPE.TSIG)
@@ -313,7 +320,8 @@ export function encodeCapped(message, { limit, truncate = true, compress = true,
  *
  * @param {{ bytes: Uint8Array, truncated: boolean, reserved: number }} capped - the object `encodeCapped` returned with
  *   `reserveTsig` set
- * @param {object} tsigRecord - the signed TSIG record (`name`, `type` TYPE.TSIG, `class`, `ttl`, `data` per rdata/tsig.mjs)
+ * @param {object} tsigRecord - the signed TSIG record (`name`, `type` TYPE.TSIG, `class`, `ttl`, `data` per rdata/tsig.mjs);
+ *   copied once with structuredClone and only the copy validated and written (CLDMV/digby#39)
  * @returns {Uint8Array} the signed message, still within the limit `encodeCapped` was given
  * @throws {WireError} VALUE_OUT_OF_RANGE for anything that is not a fresh, untouched, matching reservation
  */
@@ -321,13 +329,14 @@ export function appendTsig(capped, tsigRecord) {
 	const state = typeof capped === "object" && capped !== null ? reservedEncodes.get(capped) : undefined;
 	if (state === undefined) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "appendTsig takes the object encodeCapped returned with reserveTsig set (CLDMV/digby#39)");
 	const { snapshot: bytes, reserved } = state;
-	// The caller's bytes are read once and compared element by element — never through a method the array could override
-	// (a Uint8Array subclass's .some() would lie, CLDMV/digby#39) — and the message is written from the codec's own copy, so
-	// a getter cannot hand the comparison one message and the write another, and the ID and arcount come from the copy too.
-	const given = capped.bytes;
+	// The caller's bytes are copied once and compared element by element against the codec's own snapshot — the copy's
+	// length is the real octet count (a Uint8Array subclass's length getter does not survive the copy), the comparison never
+	// goes through a method the array could override, and the message is written from the codec's snapshot, so the bytes
+	// written are exactly the bytes compared (CLDMV/digby#39).
+	const given = cloneInput(capped.bytes, "the unsigned bytes");
 	if (!(given instanceof Uint8Array) || given.length !== bytes.length) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
 	for (let i = 0; i < bytes.length; i++) if (given[i] !== bytes[i]) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "the unsigned bytes were changed after encodeCapped returned");
-	const rec = snapshotRecord(tsigRecord, "TSIG record");
+	const rec = snapshotRecord(cloneInput(tsigRecord, "TSIG record"), "TSIG record");
 	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `appendTsig appends a TSIG record, got type ${String(rec.type)}`);
 	// a TSIG record carries class ANY and TTL 0 on the wire (RFC 8945 4.1.1) (CLDMV/digby#39)
 	if (rec.class !== CLASS.ANY) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `a TSIG record has class ANY (RFC 8945 4.1.1), got ${classToString(rec.class)}`);
@@ -355,6 +364,9 @@ export function appendTsig(capped, tsigRecord) {
 	const arcount = ((bytes[10] << 8) | bytes[11]) + 1;
 	out[10] = arcount >>> 8;
 	out[11] = arcount & 0xff;
+	// the reservation is spent: a second appendTsig against the same encodeCapped result is refused, so one reservation
+	// cannot carry two TSIG records (CLDMV/digby#39)
+	reservedEncodes.delete(capped);
 	return out;
 }
 
@@ -363,12 +375,13 @@ export function appendTsig(capped, tsigRecord) {
  * uncompressed, exactly as the space `encodeCapped`'s `reserveTsig` reserves is filled (CLDMV/digby#39). The record is
  * validated the same way encoding it is, so a record that cannot go on the wire fails here.
  *
- * @param {object} tsigRecord - a TSIG record (`name`, `type` TYPE.TSIG, `class`, `ttl`, `data` per rdata/tsig.mjs)
+ * @param {object} tsigRecord - a TSIG record (`name`, `type` TYPE.TSIG, `class`, `ttl`, `data` per rdata/tsig.mjs); copied
+ *   once with structuredClone and only the copy measured (CLDMV/digby#39)
  * @returns {number}
  * @throws {WireError} VALUE_OUT_OF_RANGE for anything that is not a TSIG record; whatever encoding the record raises
  */
 export function tsigRecordSize(tsigRecord) {
-	const rec = snapshotRecord(tsigRecord, "TSIG record");
+	const rec = snapshotRecord(cloneInput(tsigRecord, "TSIG record"), "TSIG record");
 	if (rec.type !== TYPE.TSIG) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `tsigRecordSize measures a TSIG record, got type ${String(rec.type)}`);
 	const w = new Writer({ max: MAX_MESSAGE, compress: false });
 	writeRecord(w, rec);
