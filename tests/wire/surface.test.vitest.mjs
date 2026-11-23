@@ -312,8 +312,10 @@ describe("every SharedArrayBuffer form is refused at every byte-taking entry (CL
 });
 
 describe("parseRecord validates its default ttl and class like parsed values (CLDMV/digby#39, round 6)", () => {
-	it("a default TTL out of range or of the wrong type is refused", () => {
-		for (const ttl of ["abc", -5, 2 ** 31, 1.5, { x: 1 }]) expect(code(() => parseRecord("a.example. IN A 10.0.0.1", { ttl }))).toBe("BAD_PRESENTATION");
+	it("a default TTL out of range or of the wrong type is refused (CLDMV/digby#39, round 7: one code with the default class)", () => {
+		// the default is a caller-supplied number, not presentation text: VALUE_OUT_OF_RANGE, the same code as the
+		// default class and as every other out-of-range numeric argument
+		for (const ttl of ["abc", -5, 2 ** 31, 1.5, { x: 1 }]) expect(code(() => parseRecord("a.example. IN A 10.0.0.1", { ttl }))).toBe("VALUE_OUT_OF_RANGE");
 	});
 
 	it("a default class out of range or of the wrong type is refused", () => {
