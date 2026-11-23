@@ -612,11 +612,15 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 		// measures 62 octets shorter, the keep decision flips, and the encode goes out 16,531 octets over its
 		// 16,500-octet limit — this golden is the failure evidence for that mutant (tmp/agents/r5-capped/mutant.log
 		// in the round-5 work area holds the pod run).
+		// g is the filler size at which the registration lands exactly on the boundary, found empirically (the
+		// hand arithmetic for a 16 KB stream is not trustworthy — see tmp/agents/r5-capped/findg.out in the round-5
+		// work area)
+		const g = 231;
 		const m = {
 			id: 1,
 			flags: { qr: true },
 			questions: [{ name: "example.", type: TYPE.A, class: CLASS.IN }],
-			answers: [bigTxt("a.test.", 16000), ns("b.test.", "n0.example."), bigTxt("a.test.", 230), ns("b.test.", `n1.${x63}.example.`), ns("b.test.", `n2.${x63}.example.`)]
+			answers: [bigTxt("a.test.", 16000), ns("b.test.", "n0.example."), bigTxt("a.test.", g), ns("b.test.", `n1.${x63}.example.`), ns("b.test.", `n2.${x63}.example.`)]
 		};
 		// the limit sits inside the flip window: the whole message does not fit, set 1 does not fit either under the
 		// correct boundary (the record at position 4 writes the shared suffix in full), but does under the mutant
@@ -625,13 +629,15 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 		const capped = encodeCapped(m, { limit: full - 30 });
 		expect(capped.truncated, "the truncation flag").toBe(true);
 		expect(capped.bytes.length, "within the limit").toBeLessThanOrEqual(full - 30);
-		// the kept stream: header + the whole a.test. TXT set at its positions + the first b.test. NS record
-		expect(capped.bytes.length, "the b.test. NS set dropped whole").toBe(full - 162);
+		// the kept stream: header + the whole a.test. TXT set at its positions — all three b.test. NS records are
+		// ONE RRset (position 1 among them), so the drop takes b0 with its set, and the kept records sit before every
+		// dropped one, so their own whole-message encode is byte for byte what the truncating encode kept
+		const kept = [m.answers[0], m.answers[2]];
+		expect(capped.bytes.length, "the b.test. NS set dropped whole").toBe(encodeMessage({ ...m, answers: kept }).length);
 		const d = decodeMessage(capped.bytes);
 		expect(d.flags.tc, "TC set").toBe(true);
-		expect(d.answers.map((r) => r.name)).toEqual(["a.test.", "b.test.", "a.test."]);
+		expect(d.answers.map((r) => r.name)).toEqual(["a.test.", "a.test."]);
 		expect(d.answers[0].data.strings.reduce((n, s) => n + s.length, 0)).toBe(16000);
-		expect(d.answers[1].data.target).toBe("n0.example.");
-		expect(d.answers[2].data.strings.reduce((n, s) => n + s.length, 0)).toBe(230);
+		expect(d.answers[1].data.strings.reduce((n, s) => n + s.length, 0)).toBe(g);
 	});
 });
