@@ -878,3 +878,125 @@ describe("encodeCapped matches the best-fit reference on 0x4000-straddling inter
 		expect(landingOf(c1xCenter)).toBe(0x4000);
 	});
 });
+
+describe("encodeCapped: in-flight registrations and the 0x4000 drift window (CLDMV/digby#43, round 9)", () => {
+	const txtFiller = (n) => {
+		const strings = [];
+		let left = n;
+		while (left > 255) {
+			strings.push(new Uint8Array(255).fill(0x78));
+			left -= 255;
+		}
+		if (left > 0) strings.push(new Uint8Array(left).fill(0x78));
+		return { strings };
+	};
+	const bigTxt = (name, n) => ({ name, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: txtFiller(n) });
+	const ns = (name, target) => ({ name, type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target } });
+	const srv = (name, target) => ({ name, type: TYPE.SRV, class: CLASS.IN, ttl: 60, data: { priority: 1, weight: 2, port: 3, target } });
+	const compare = (m, limit, tag) => {
+		const capped = encodeCapped(m, { limit });
+		expect(capped.bytes.length, `${tag}: within the limit`).toBeLessThanOrEqual(limit);
+		const reference = oracleCapped(m, { limit });
+		expect(capped.truncated, `${tag}: the truncation flag matches the best-fit reference`).toBe(reference.truncated);
+		expect(hex.to(capped.bytes), `${tag}: the bytes match the best-fit reference`).toBe(hex.to(reference.bytes));
+	};
+
+	// R9-1 (CLDMV/digby#43): the model's scoping check placed a registration by its offset in the tree as it stands —
+	// but the set being measured is not in the tree yet, so a later record's registration lands before the in-flight
+	// write position and the probe sees a target the real stream does not have yet. An SRV target (written
+	// uncompressed but registering) then never records its registration, the examiner's stored octets stay
+	// stale-high, the model overcounts ~12 octets, and a fitting prefix is hidden. The shape: an SRV whose target a
+	// LATER record of an EARLIER set repeats, so the registering write comes after the examiner in the section.
+	const r9Shape = (i) => {
+		const T = `t${i}.${"l".repeat(60)}.example.`;
+		const U = `u${i}.${"l".repeat(60)}.example.`;
+		return {
+			id: 1,
+			flags: { qr: true },
+			questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }],
+			answers: [
+				bigTxt("f.t.", 16040 + (i % 4) * 60),
+				ns("a.t.", "s.q."),
+				srv("b.t.", T),
+				ns("a.t.", T),
+				ns("c.t.", U),
+				srv("d.t.", U),
+				ns("c.t.", U),
+				bigTxt("z.t.", 700 + (i % 5) * 60)
+			]
+		};
+	};
+	it("matches the best-fit reference when an uncompressed-but-registering name precedes a later record of an earlier set (CLDMV/digby#43)", () => {
+		for (let i = 0; i < 12; i++) {
+			const m = r9Shape(i);
+			// every first-appearance set boundary of the answers, ± 1: the windows the scoping lie opens
+			const keys = [];
+			const setOf = m.answers.map((r) => {
+				const k = `${r.name.toLowerCase()}|${r.type}|${r.class}`;
+				if (!keys.includes(k)) keys.push(k);
+				return keys.indexOf(k);
+			});
+			for (let k = 0; k < keys.length; k++) {
+				const size = encodeMessage({ ...m, answers: m.answers.filter((_, j) => setOf[j] <= k) }).length;
+				for (const limit of [size - 1, size, size + 1]) compare(m, limit, `r9 seed=${i} k=${k} limit=${limit}`);
+			}
+		}
+	}, 600_000);
+
+	// R9-2 (CLDMV/digby#43): the probe measured a registration with its own write position as the gate, but the real
+	// stream's gate is the registration's real offset — the two differ by the kept octets between the measured
+	// records. A re-measured record that wrote a key in full (its real offset sat exactly on 0x4000 at that instant)
+	// registered a phantom the real stream never makes, and the adopt replaced the true registration — the one whose
+	// drift back under 0x4000 (a pure-negative shift from a shrink in the same re-measure batch) the drift-in heap
+	// exists to catch. The phantom never drifts, the examiners keep stale-high octets, the model overcounts, and the
+	// frozen point — which trusts its totals — hides the fitting prefix outright (no trial ever runs). The family:
+	// the filler centres Y2's K registration exactly on 0x4000 in the transient state right after its set folds,
+	// X1's shrink (compressing against Y1's N) pulls it under, and C — which measured K absent — is its examiner.
+	const m2Shape = (filler, nLen, kLen, variant = 0) => {
+		const N = `${"n".repeat(nLen)}.example.`;
+		const K = `${"k".repeat(kLen)}.kk.`;
+		const answers = [
+			bigTxt("f.t.", filler),
+			ns("l.t.", "s.q."),
+			ns("y.t.", N),
+			ns("l.t.", `a.${N}`),
+			ns("y.t.", K),
+			ns("l.t.", `c.${K}`)
+		];
+		if (variant === 1) answers.push(ns("l.t.", `d.${K}`));
+		answers.push(bigTxt("z.t.", 3000));
+		return { id: 1, flags: { qr: true }, questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }], answers };
+	};
+	const m2Prefix2 = (filler, nLen, kLen, variant) => ({ ...m2Shape(filler, nLen, kLen, 3000, variant), answers: m2Shape(filler, nLen, kLen, 3000, variant).answers.filter((r) => r.name !== "z.t.") });
+	const kOffsetOf = (bytes, kLen) => {
+		for (let i = 0; i < bytes.length - kLen; i++) if (bytes[i] === kLen && bytes[i + 1] === 0x6b && bytes[i + kLen] === 0x6b) return i;
+		return -1;
+	};
+	// the filler that puts K's final offset at 0x4000 - (wire octets of N - 2): transiently, before X1's shrink, K
+	// sits exactly on 0x4000 (the harness that found the residual, tmp/agents/r8-capped/m2kill.mjs, centres the same
+	// way — S = the octets X1 loses when it compresses against Y1's N)
+	const m2Center = (nLen, kLen) => {
+		let center = 15000;
+		for (let it = 0; it < 20; it++) {
+			const d = 0x4000 - (nLen + 1 + 8 + 1 - 2) - kOffsetOf(encodeMessage(m2Prefix2(center, nLen, kLen, 0)), kLen);
+			if (d === 0) break;
+			center += d > 0 ? Math.max(1, d - Math.floor(d / 256)) : Math.min(-1, d - Math.ceil(d / 256));
+		}
+		return center;
+	};
+	it("matches the best-fit reference when a registration lands exactly on 0x4000 and drifts back under (CLDMV/digby#43)", () => {
+		for (const [nLen, kLen] of [
+			[20, 20],
+			[20, 63],
+			[63, 20],
+			[63, 63]
+		]) {
+			const center = m2Center(nLen, kLen);
+			for (const filler of [center - 8, center, center + 8]) {
+				const m = m2Shape(filler, nLen, kLen, 3000, 0);
+				const size2 = encodeMessage(m2Prefix2(filler, nLen, kLen, 0)).length;
+				for (let limit = size2 - 3; limit <= size2 + 12; limit++) compare(m, limit, `m2 n=${nLen} k=${kLen} filler=${filler} limit=${limit}`);
+			}
+		}
+	}, 600_000);
+});
