@@ -3,6 +3,7 @@
  *	@Filename: /tests/wire/rdata.test.vitest.mjs
  */
 
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { TYPE, typeFromString } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
@@ -485,5 +486,22 @@ describe("decodeRdataBytes reads the octets through the intrinsic view (CLDMV/di
 		const swapped = new Uint8Array(new SharedArrayBuffer(4));
 		Object.setPrototypeOf(swapped.buffer, ArrayBuffer.prototype);
 		expect(code(() => decodeRdataBytes(TYPE.TXT, swapped))).toBe("NOT_CLONEABLE");
+	});
+
+	it("a SAB-backed octet input is NOT_CLONEABLE whatever its realm or prototype, and a cross-realm Uint8Array is accepted (CLDMV/digby#39, round 9)", () => {
+		// the `instanceof Uint8Array` check ran before the SAB brand check, so a bare or cross-realm SharedArrayBuffer
+		// and a DataView over one failed the type check and were reported VALUE_OUT_OF_RANGE — the wrong-type refusal —
+		// instead of NOT_CLONEABLE
+		for (const make of [
+			() => new SharedArrayBuffer(4),
+			() => runInNewContext("new SharedArrayBuffer(4)"),
+			() => new DataView(new SharedArrayBuffer(4)),
+			() => runInNewContext("new DataView(new SharedArrayBuffer(4))"),
+			() => runInNewContext("new Uint8Array(new SharedArrayBuffer(4))")
+		])
+			expect(code(() => decodeRdataBytes(TYPE.A, make()))).toBe("NOT_CLONEABLE");
+		// a cross-realm non-SAB Uint8Array is accepted, exactly as decodeMessage and formatGeneric accept its octets:
+		// the type check is the intrinsic TypedArray brand getter, never `instanceof`
+		expect(decodeRdataBytes(TYPE.A, runInNewContext("new Uint8Array([10, 0, 0, 1])"))).toEqual({ address: "10.0.0.1" });
 	});
 });

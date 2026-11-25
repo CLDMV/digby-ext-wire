@@ -466,6 +466,23 @@ describe("every SharedArrayBuffer form is refused at every byte-taking entry (CL
 		expect(code(() => decodeMessage(runInNewContext("new Uint8Array(new SharedArrayBuffer(12))")))).toBe("NOT_CLONEABLE");
 		expect(code(() => frameTcp(runInNewContext("new DataView(new SharedArrayBuffer(12))")))).toBe("NOT_CLONEABLE");
 	});
+
+	it("a SAB-backed label is NOT_CLONEABLE whatever its realm or prototype, and a cross-realm label is accepted (CLDMV/digby#39, round 9)", () => {
+		// the label check ran `instanceof Uint8Array` BEFORE the SAB brand check, so a bare SharedArrayBuffer and every
+		// cross-realm form failed the type check and were reported VALUE_OUT_OF_RANGE — the wrong-type refusal —
+		// instead of NOT_CLONEABLE
+		for (const make of [
+			() => new SharedArrayBuffer(4),
+			() => runInNewContext("new SharedArrayBuffer(4)"),
+			() => new DataView(new SharedArrayBuffer(4)),
+			() => runInNewContext("new DataView(new SharedArrayBuffer(4))"),
+			() => runInNewContext("new Uint8Array(new SharedArrayBuffer(4))")
+		])
+			expect(code(() => formatName([make()]))).toBe("NOT_CLONEABLE");
+		// a cross-realm non-SAB Uint8Array label is accepted, exactly as decodeMessage accepts its octets: the type
+		// check is the intrinsic TypedArray brand getter, never `instanceof`
+		expect(formatName([runInNewContext("new Uint8Array([97])")])).toBe("a.");
+	});
 });
 
 describe("parseRecord validates its default ttl and class like parsed values (CLDMV/digby#39, round 6)", () => {

@@ -782,7 +782,9 @@ describe("the public surface throws only WireError, for any value in any argumen
 		expect(escapes).toEqual([]);
 	});
 
-	it("every SharedArrayBuffer form at every derived byte-taking position, nested included, is a WireError", () => {
+	it("every SharedArrayBuffer form at every derived byte-taking position, nested included, is refused NOT_CLONEABLE", () => {
+		// the exact code, not just "is a WireError" (CLDMV/digby#39, round 9): a SAB form is never a shape question,
+		// so the wrong-type VALUE_OUT_OF_RANGE the old instanceof-first orders could report is a failure here too
 		const escapes = [];
 		for (const [name, path] of bytePaths)
 			for (const [form, make] of sabForms) {
@@ -793,10 +795,12 @@ describe("the public surface throws only WireError, for any value in any argumen
 				} catch (err) {
 					outcome = err;
 				}
+				const at = `argument ${path[0]}, at ${path.slice(1).join(".") || "the argument itself"}`;
 				if (!(outcome instanceof WireError)) {
 					const shown = outcome instanceof Error ? outcome.constructor.name : String(outcome);
-					escapes.push(`${name} (argument ${path[0]}, at ${path.slice(1).join(".") || "the argument itself"}) with ${form} escaped as ${shown}`);
-				}
+					escapes.push(`${name} (${at}) with ${form} escaped as ${shown}`);
+				} else if (outcome.code !== "NOT_CLONEABLE")
+					escapes.push(`${name} (${at}) with ${form} refused as ${outcome.code}, not NOT_CLONEABLE`);
 			}
 		// the derivation itself must have found the byte-taking entries: a baseline that hides its bytes would sweep none
 		expect(bytePaths.length).toBeGreaterThan(0);

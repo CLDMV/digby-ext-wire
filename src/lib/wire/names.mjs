@@ -23,7 +23,7 @@
  * decode's walk, not the characters it materialises — see the cap's note.
  */
 
-import { MAX_MESSAGE, intrinsicView, isSharedBuffer } from "./buffer.mjs";
+import { MAX_MESSAGE, TYPED_ARRAY_TAG, intrinsicView, isSharedBuffer } from "./buffer.mjs";
 import { WireError, WireErrorCode, fail } from "./errors.mjs";
 
 /** The longest label (RFC 1035 2.3.4). */
@@ -149,19 +149,33 @@ export function formatName(labels) {
 		if (!Array.isArray(labels)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a name is an array of labels");
 		let n = 1;
 		for (const l of labels) {
-			if (!(l instanceof Uint8Array)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a name's labels are Uint8Arrays");
 			// the label's shape is read through the intrinsic getters and the octets are formatted from a fresh view
 			// built from them (CLDMV/digby#39): an own `length` property cannot shadow the wire length — a zero-length
 			// label with an own length of 5 printed five raw NULs and a 60-octet label with an own length of 3 printed
 			// only "aaa." — and a label over a SharedArrayBuffer is refused like every byte-taking entry (formatName was
 			// the only one without the rule; with a length-tracking view over a growable SAB the length was checked once
-			// and then read again). The buffer is brand-checked with the intrinsic getter, never `instanceof`
-			// (CLDMV/digby#39, round 8): a SharedArrayBuffer wearing `ArrayBuffer.prototype` passed the old check and its
-			// octets were read, and a cross-realm one failed `instanceof SharedArrayBuffer` from this realm outright.
+			// and then read again).
 			const view = intrinsicView(l);
-			if (view === null) fail(WireErrorCode.NOT_CLONEABLE, "a name's label is not a readable typed array");
-			if (isSharedBuffer(view.buffer))
-				fail(WireErrorCode.NOT_CLONEABLE, "a name's label is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+			// every SharedArrayBuffer form first (CLDMV/digby#39, round 9): the brand checks run no caller code, so a
+			// bare SharedArrayBuffer and a view over one — from any realm, under any prototype swap — are the
+			// NOT_CLONEABLE refusal before the old `instanceof`-first order could report them as the wrong type
+			if (isSharedBuffer(view === null ? l : view.buffer))
+				fail(WireErrorCode.NOT_CLONEABLE, "a name's label is a SharedArrayBuffer or a view over one; it would be read, not copied (CLDMV/digby#39, round 9)");
+			// the type check runs no caller code until the brand getter (CLDMV/digby#39, round 9): ArrayBuffer.isView is
+			// an internal-slot read, so a plain object — or a Proxy, which carries no slot of its own — is refused as
+			// the wrong type without firing a trap; a real view's Uint8Array-ness comes off the intrinsic TypedArray
+			// `Symbol.toStringTag` getter ({@link TYPED_ARRAY_TAG}), which verifies the TypedArray slot from any realm
+			// and under any prototype swap — a cross-realm Uint8Array label is accepted here exactly as decodeMessage
+			// accepts its octets, and a DataView wearing Uint8Array.prototype is refused (a DataView slot, not a
+			// TypedArray one)
+			if (!ArrayBuffer.isView(l)) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a name's labels are Uint8Arrays");
+			let tag = null;
+			try {
+				tag = TYPED_ARRAY_TAG.call(l);
+			} catch {}
+			if (tag !== "Uint8Array") fail(WireErrorCode.VALUE_OUT_OF_RANGE, "a name's labels are Uint8Arrays");
+			// tag === "Uint8Array" proves the TypedArray internal slot, so the view above cannot be null and the
+			// intrinsic reads below cannot fail
 			if (view.byteLength > MAX_LABEL) fail(WireErrorCode.LABEL_TOO_LONG, `a label is at most ${MAX_LABEL} octets, got ${view.byteLength}`);
 			n += view.byteLength + 1;
 			if (n > MAX_NAME) fail(WireErrorCode.NAME_TOO_LONG, `a name is at most ${MAX_NAME} octets in wire form, got ${n}`);
