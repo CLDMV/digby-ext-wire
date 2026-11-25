@@ -597,6 +597,28 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// the header, questions and tail records alone must fit: they are never dropped, so no RRset can make room for
 	// them
 	if (!tailFitsOn(w)) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the header, questions and tail records alone exceed ${limit} octets`);
+	// The plain attempt first (CLDMV/digby#43): a message whose full encode fits the limit is returned whole, without
+	// TC. The greedy keep below stops at the first RRset whose drop-here stream does not fit, and stream size is not
+	// monotone in the sets kept: the sets interleave, so a set decided later can register a compression target below
+	// 0x4000 that the already-kept records then compress against — a name an interleaved later record writes
+	// shortens an earlier kept record's encoding — and continuing past a non-fitting set can shrink the stream until
+	// everything fits. The greedy stop would truncate a message that would have fit whole. Encoding everything once
+	// and returning it when it fits answers fit-or-truncate exactly where it is cheapest to answer; only a message
+	// that does not fit whole reaches the model. The attempt's writes are counted work (recordWrites), not free —
+	// correctness first (CLDMV/digby#43).
+	const plainMark = w.checkpoint();
+	try {
+		writeAll(w, countAt, written);
+		return { bytes: w.finish(), truncated: false };
+	} catch (err) {
+		if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+		// the full encode does not fit: undo it — the compression targets it registered included — and decide by the
+		// model below. The head stays: it is the same head every path writes, and the tail gate above already held.
+		w.rollback(plainMark);
+		written[0] = 0;
+		written[1] = 0;
+		written[2] = 0;
+	}
 	let truncated = false;
 	let dropped = false; // any RRset dropped from any section — an additionals-only drop never sets TC, but it is still a drop (CLDMV/digby#43)
 	let modelBroken = false; // the cascade guard tripped: the rest of the section decides by exact trial
