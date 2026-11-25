@@ -35,6 +35,8 @@ const VIEW_GETTERS = [VIEW_BUFFER, VIEW_BYTE_OFFSET, VIEW_BYTE_LENGTH];
 const DATAVIEW_GETTERS = [DATAVIEW_BUFFER, DATAVIEW_BYTE_OFFSET, DATAVIEW_BYTE_LENGTH];
 /** The `byteLength` getter off `SharedArrayBuffer.prototype`: it succeeds only on a buffer carrying the SharedArrayBuffer internal slot, from any realm (CLDMV/digby#39). */
 const SAB_BYTE_LENGTH = Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength").get;
+/** The `byteLength` getter off `ArrayBuffer.prototype`: it throws on a SharedArrayBuffer, so it never accepts one (CLDMV/digby#39). */
+const AB_BYTE_LENGTH = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
 
 /**
  * A view's buffer, byteOffset and byteLength, read through the intrinsic getters so no own `buffer`, `byteOffset` or
@@ -110,7 +112,16 @@ export function asBytes(bytes) {
 			return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
 		}
 		if (isSharedBuffer(bytes)) fail(WireErrorCode.NOT_CLONEABLE, "byte input is a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
-		if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
+		// only a real ArrayBuffer carries the ArrayBuffer internal slot: a pod wearing `ArrayBuffer.prototype` with a
+		// hostile `length` (2e8 used to allocate 200 MB inside `new Uint8Array` before failing INPUT_TOO_LARGE, and at
+		// 2**32 the pod was OOM-killed) or an iterator over a SharedArrayBuffer view is refused here, before any
+		// allocation or iteration (CLDMV/digby#39, round 8)
+		try {
+			AB_BYTE_LENGTH.call(bytes);
+		} catch {
+			return fail(WireErrorCode.VALUE_OUT_OF_RANGE, "expected a Uint8Array, an ArrayBuffer or an ArrayBufferView");
+		}
+		return new Uint8Array(bytes);
 	} catch (err) {
 		if (err instanceof WireError) throw err;
 		// fall through to the refusal
