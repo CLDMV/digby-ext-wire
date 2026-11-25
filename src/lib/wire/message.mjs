@@ -575,11 +575,13 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// - `fen` holds the exact wire octets of every measured record at its position, so any record's offset in the
 	//   drop-here stream is `sectionBase + fen.prefix(position) + (its offset within its record)`; a running total
 	//   gives each prefix's stream size in O(1).
-	// - `model` holds, per compression target, the key and the registration's offset within its record. Every
-	//   registration a record makes is recorded, whether or not it sits in the pointer range — the model's validity
-	//   is computed on demand (`realOf < 0x4000`), so a later keep that shifts the registration is reflected without
-	//   touching the entry, and a registration that drifts back under the pointer range is detected instead of
-	//   silently overcounting (see the two heaps below).
+	// - `model` holds, per compression target, the key and the registration's offset within its record. A registration
+	//   is recorded exactly when it exists on the wire: its real offset in the drop-here stream is in the pointer
+	//   range (the probe gates on that real offset, not on its own write position, which sits below it by the kept
+	//   octets between the measured records — CLDMV/digby#43, round 9). The entry's validity is still computed on
+	//   demand (`realOf < 0x4000`), so a later keep that shifts the registration is reflected without touching the
+	//   entry, and a registration that crosses out of or drifts back under the pointer range is detected instead of
+	//   silently miscounting (see the two heaps below).
 	// - Measuring a set writes its records into a probe writer positioned at the set's first record's stream offset,
 	//   seeded with the model's targets, and each registration the probe makes is corrected by the exact shift — the
 	//   kept octets between the measured records, from the tree. The probe's lookups therefore hit and miss exactly
@@ -615,9 +617,12 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// never returns more octets than the limit by construction. The trials are what make the search exact under a
 	// model lie in the undercount direction: an understated total can only add candidates (a prefix whose real stream
 	// fits always passes the fit check), every candidate is trial-verified, and the first trial that fits is the
-	// largest fitting prefix whatever the model said. An overstated total could instead hide a fitting prefix, which
-	// no trial after the fact would find — that is the direction the model is kept exact in (the drift-in heap), with
-	// the exact trial as the last line of defence and the differential suite as the net.
+	// largest fitting prefix whatever the model said. An overstated total is the dangerous direction: it can hide a
+	// fitting prefix from the fit check, and past the frozen point no trial would ever run to correct it — so the
+	// overstated direction is the one kept exact, by record-order visibility (a target a later record makes cannot
+	// shorten an earlier name), by real-gated registrations (a phantom cannot displace a true one) and by the
+	// drift-in heap; the exact trial is the last line of defence in the understated direction and the differential
+	// suite is the net (CLDMV/digby#43, round 9).
 	//
 	// The frozen point (CLDMV/digby#43, round 8). Once the prefix total is over the budget AND every record a later
 	// keep would add sits at a stream offset at or above 0x4000, the search can stop: a record at offset >= 0x4000
@@ -741,7 +746,13 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			return top;
 		};
 		const drain = () => {
-			while (heapV.length > 0 && heapV[0].score < cumPos) {
+			// `<=` so a registration that lands EXACTLY on 0x4000 counts as crossed out — it is out of the pointer
+			// range there (writeName's own guard is `w.length < 0x4000`): popped, queued for its examiners and moved
+			// to the drift-in heap, where a later shift back under is watched. With `<` it would stay in this heap
+			// unwatched, and a later pure-negative shift would resurrect it without anybody re-measuring — stored
+			// octets stale-high, the one overcount the largest-fit search cannot self-correct (CLDMV/digby#43,
+			// round 9).
+			while (heapV.length > 0 && heapV[0].score <= cumPos) {
 				const entry = heapPop(heapV);
 				wireCounters.modelWork++;
 				if (model.get(entry.key) !== entry) continue; // removed or replaced since the push
@@ -803,20 +814,23 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			const m = model.get(key);
 			if (m !== undefined) {
 				const r = realOf(m);
-				// a target is visible only where the stream already has it: written before the name being measured, and
-				// inside the pointer range. A registration a LATER record makes — one writeName performs even for a name
-				// it never compresses, an SRV target, an RRSIG signer — is not on the wire when an earlier name is
-				// written, so it must not shorten one (CLDMV/digby#43).
-				return r < 0x4000 && r < curReal + (probe.length - recStart) ? r : undefined;
+				// a target is visible only where the stream already has it: written by an EARLIER record — record
+				// order, not an offset read off the tree, because the records being measured are not in the tree yet
+				// and an offset check would place a later record's registration before the in-flight write position
+				// (the probe then saw a target the real stream did not have yet, an uncompressed-but-registering name
+				// never recorded its registration, and the model overcounted — CLDMV/digby#43, round 9) — and inside
+				// the pointer range.
+				return r < 0x4000 && m.rec < curRec ? r : undefined;
 			}
 			return w.names.get(key);
 		};
 		// The probe's compression table: the model's targets at their stream offsets, the measurement's own
 		// registrations corrected by the shift, and every examined key recorded for the disturbance index. A
 		// registration whose real offset reaches 0x4000 does not exist as a pointer target (the real stream's
-		// write would be past the pointer range — writeName's own guard is `w.length < 0x4000`), but it is
-		// recorded all the same: the model's validity is computed on demand, and the out-of-range entry is
-		// what the drift-in heap watches (round 8).
+		// write would be past the pointer range — writeName's own guard is `w.length < 0x4000`), so it is not
+		// recorded: the probe's set gates on the real offset, not on the probe's own write position, which sits
+		// below the real offset by the kept octets between the measured records. Recording the phantom would let
+		// it displace the true registration — the one whose drift the drift-in heap watches (round 9).
 		probe.names = {
 			get(key) {
 				touched.push(key);
@@ -827,6 +841,14 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				return lookup(key) !== undefined;
 			},
 			set(key, at) {
+				// a registration exists on the wire only where the real stream's write position is in pointer range —
+				// writeName's own guard is `w.length < 0x4000` on the real stream, and the probe's length sits below
+				// the real offset by the kept octets between the measured records. Gate on the real offset, not the
+				// probe position: a registration the real stream would not make must not enter the model — it would
+				// displace the true registration (whose drift back under 0x4000 the drift-in heap watches) with a
+				// phantom that never drifts, and the examiners' staleness would then be permanent (CLDMV/digby#43,
+				// round 9).
+				if (at + curShift >= 0x4000) return;
 				overlay.set(key, { rec: curRec, rel: at - recStart, real: at + curShift });
 			},
 			delete(key) {
@@ -968,8 +990,8 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			// registration its own previous measurement made — in the stream it is being re-measured for, it
 			// writes that name itself. Only the record's OWN model entries come out: an entry another record's
 			// re-registration replaced is that record's target now, and the re-measure may compress against it
-			// (the in-flight visibility check in `lookup` keeps a record from compressing against a target at or
-			// past its own write position).
+			// (the record-order visibility check in `lookup` keeps a record from compressing against a target
+			// registered by a record at or past its own position).
 			const removed = new Map();
 			for (const at of positions) {
 				const keys = state.byRec.get(at);
