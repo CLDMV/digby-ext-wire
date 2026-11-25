@@ -91,6 +91,30 @@ export function isSharedBuffer(b) {
 }
 
 /**
+ * Whether `o` is a plain object, by shape rather than realm (CLDMV/digby#39, round 8): its prototype is `null`, or is some
+ * realm's `Object.prototype` — an object whose own `constructor` is a function named `Object` whose `prototype` is that
+ * object. Prototype identity against this realm's `Object.prototype` refuses options `structuredClone`d, JSON-parsed or
+ * built in another realm (a `vm` context's `Object.prototype` is a different object), and `instanceof Object` fails for
+ * null-prototype objects. The reads (`Object.getPrototypeOf`, `getOwnPropertyDescriptor`, and the `constructor`, `name` and
+ * `prototype` property reads off the descriptor's value) run no caller code on a plain object; on a Proxy or anything
+ * hostile they may throw, and false is returned — the caller refuses a non-plain value anyway.
+ * @param {unknown} o
+ * @returns {boolean}
+ */
+export function isPlainObject(o) {
+	try {
+		if (o === null || typeof o !== "object") return false;
+		const proto = Object.getPrototypeOf(o);
+		if (proto === null) return true;
+		const d = Object.getOwnPropertyDescriptor(proto, "constructor");
+		const ctor = d !== undefined && "value" in d ? d.value : undefined;
+		return typeof ctor === "function" && ctor.name === "Object" && ctor.prototype === proto;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * View any byte source as a plain Uint8Array without copying.
  * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes
  * @returns {Uint8Array}
@@ -140,13 +164,12 @@ export function asBytes(bytes) {
  */
 export function cloneOptions(options, what) {
 	if (options === null || options === undefined) return {};
-	// `typeof` and `Object.getPrototypeOf` run no caller code on a plain object, but the walk and the copy below can
-	// (a revoked Proxy's Object.keys throws) — all sit inside the refusal they feed
+	// `typeof` runs no caller code on any value (a revoked Proxy throws even for it) — it sits inside the refusal it
+	// feeds. The walk and the copy below can run caller code (a Proxy's traps, a throwing getter) — they sit inside
+	// the refusals they feed too.
 	let tag;
-	let proto;
 	try {
 		tag = typeof options;
-		proto = Object.getPrototypeOf(options);
 	} catch {
 		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
 	}
@@ -154,9 +177,10 @@ export function cloneOptions(options, what) {
 	// structuredClone copies own enumerable properties only, so an option that lives on the prototype — a size or
 	// name bound among them — would silently vanish into the copy: encodeMessage(big, Object.create({ maxSize: 40 }))
 	// encoded the whole message, udpLimit read the default cap, decodeMessage decoded without its name cap. Refuse
-	// every prototype that is neither Object.prototype nor null (a class instance, a Map, Object.create(proto)) —
-	// silently dropping a bound is not allowed (CLDMV/digby#39).
-	if (proto !== Object.prototype && proto !== null)
+	// every non-plain object, by shape rather than realm (CLDMV/digby#39, round 8): a class instance, a Map,
+	// Object.create(proto) — and the check is the null prototype or some realm's Object.prototype ({@link
+	// isPlainObject}), never identity with this realm's, so plain options from another realm still work.
+	if (!isPlainObject(options))
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object; an option on the prototype would be silently dropped by the copy (CLDMV/digby#39)`);
 	// structuredClone copies own enumerable STRING-keyed properties only, so a non-enumerable own option or a
 	// symbol-keyed one would be silently dropped by the copy: encodeMessage(big, Object.defineProperty({}, "maxSize",
