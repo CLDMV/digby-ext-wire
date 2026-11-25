@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
 import { decodeMessage, encodeCapped, encodeMessage, wireCounters } from "../../src/lib/wire/message.mjs";
+import { c1Shape } from "../helpers/capped-oracle.mjs";
 
 // A 100-label apex of one-octet labels: 201 wire octets, the "long apex" shape of CLDMV/digby#40.
 const apex = Array.from({ length: 100 }, (_, i) => String.fromCharCode(0x61 + (i % 26))).join(".") + ".";
@@ -260,6 +261,121 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 		}
 		return { id: 1, flags: { qr: true }, questions: [{ name: "example.", type: TYPE.A, class: CLASS.IN }], answers };
 	};
+
+	// The drift-window shapes with the counted work bounded from BOTH sides (round 10, CLDMV/digby#43). The
+	// output differential cannot see the boundary mutants whose lie self-corrects through the exact trials —
+	// an understated total only adds candidates the trial rejects — so these mutants are killed by the model's
+	// own counted work instead, on the shapes where their site fires:
+	// - the UPPER bound kills the classification mutant (an adoption landing exactly on 0x4000 classified
+	//   in-range): its misrouted entry costs an extra drain re-key and re-measure cycle — measured 89 units on
+	//   the golden shape against the clean 63 (the mutant run is tmp/agents/r10/logs/calib.log).
+	// - the LOWER bound kills the range-check mutant (a target at exactly 0x4000 visible to the probe): the
+	//   phantom compression understates the tree, the drain pops fewer registrations, and the re-measure churn
+	//   it skips is real counted work — measured 18,505 on the sweep against the clean 18,761; the sweep here
+	//   is 21 fillers wide, so the mutant's shortfall scales with it.
+	it("keeps the model's counted work exact at the 0x4000 boundary on the drift-window shapes (CLDMV/digby#43)", () => {
+		const golden = () => {
+			const filler = [];
+			for (let left = 16000; left > 0; left -= 255) filler.push(new Uint8Array(Math.min(255, left)).fill(0x78));
+			return {
+				id: 1,
+				flags: { qr: true },
+				questions: [{ name: "example.", type: TYPE.A, class: CLASS.IN }],
+				answers: [
+					{ name: "a.test.", type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: filler } },
+					{ name: "b.test.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: "n0.example." } },
+					{ name: "a.test.", type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: [new Uint8Array(231).fill(0x78)] } },
+					{ name: "b.test.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `n1.${"x".repeat(63)}.example.` } },
+					{ name: "b.test.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `n2.${"x".repeat(63)}.example.` } }
+				]
+			};
+		};
+		const m = golden();
+		const full = encodeMessage(m).length;
+		wireCounters.recordWrites = 0;
+		wireCounters.scratchEncodes = 0;
+		wireCounters.modelWork = 0;
+		const capped = encodeCapped(m, { limit: full - 30 });
+		const goldenWork = wireCounters.recordWrites + wireCounters.scratchEncodes + wireCounters.modelWork;
+		expect(capped.truncated, "the golden shape truncates").toBe(true);
+		expect(goldenWork, `golden: ${goldenWork} units of counted work (clean 63, classification mutant 89)`).toBeLessThanOrEqual(75);
+		// the m2 drift-family sweep, 21 fillers wide around the centred landing: the same shapes the drift-window
+		// test compares against the best-fit reference, run here for their counted work
+		const nLen = 20, kLen = 20;
+		const N = `${"n".repeat(nLen)}.example.`, K = `${"k".repeat(kLen)}.kk.`;
+		const m2Shape = (filler, variant = 0) => {
+			const answers = [
+				{ name: "f.t.", type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: (() => { const s = []; let left = filler; while (left > 255) { s.push(new Uint8Array(255).fill(0x78)); left -= 255; } s.push(new Uint8Array(left).fill(0x78)); return s; })() } },
+				{ name: "l.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: "s.q." } },
+				{ name: "y.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: N } },
+				{ name: "l.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `a.${N}` } },
+				{ name: "y.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: K } },
+				{ name: "l.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `c.${K}` } }
+			];
+			if (variant === 1) answers.push({ name: "l.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `d.${K}` } });
+			answers.push({ name: "z.t.", type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: [new Uint8Array(3000).fill(0x78)] } });
+			return { id: 1, flags: { qr: true }, questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }], answers };
+		};
+		const kOffsetOf = (bytes, kl) => {
+			for (let i = 0; i < bytes.length - kl; i++) if (bytes[i] === kl && bytes[i + 1] === 0x6b && bytes[i + kl] === 0x6b) return i;
+			return -1;
+		};
+		let center = 15000;
+		for (let it = 0; it < 20; it++) {
+			const p2 = { ...m2Shape(center), answers: m2Shape(center).answers.filter((r) => r.name !== "z.t.") };
+			const d = 0x4000 - (nLen + 1 + 8 + 1 - 2) - kOffsetOf(encodeMessage(p2), kLen);
+			if (d === 0) break;
+			center += d > 0 ? Math.max(1, d - Math.floor(d / 256)) : Math.min(-1, d - Math.ceil(d / 256));
+		}
+		wireCounters.recordWrites = 0;
+		wireCounters.scratchEncodes = 0;
+		wireCounters.modelWork = 0;
+		for (let filler = center - 40; filler <= center + 40; filler += 4) {
+			const m2 = m2Shape(filler);
+			const size2 = encodeMessage({ ...m2, answers: m2.answers.filter((r) => r.name !== "z.t.") }).length;
+			for (let limit = size2 - 3; limit <= size2 + 12; limit++) {
+				try { encodeCapped(m2, { limit }); } catch {}
+			}
+		}
+		const sweepWork = wireCounters.recordWrites + wireCounters.scratchEncodes + wireCounters.modelWork;
+		expect(sweepWork, `sweep: ${sweepWork} units of counted work (clean 77,975, range-check mutant 63,930)`).toBeGreaterThanOrEqual(71000);
+		// and the c1x centre filler, where a registration's drift-up lands its drain pop exactly on the boundary:
+		// the crossing-test mutant (off < 0x4000 -> <= in the drain) routes that pop back into the in-range heap
+		// instead of queuing its examiners, and the re-measure cycle it delays is counted work — measured 486
+		// against the clean 792 on this shape (tmp/agents/r10/logs/calib2.log holds the mutant run)
+		const c1 = c1Shape(8, 16236);
+		const c1Full = encodeMessage(c1).length;
+		wireCounters.recordWrites = 0;
+		wireCounters.scratchEncodes = 0;
+		wireCounters.modelWork = 0;
+		for (const limit of [c1Full - 1, c1Full, Math.floor((c1Full * 9) / 10)]) {
+			try { encodeCapped(c1, { limit }); } catch {}
+		}
+		const c1Work = wireCounters.recordWrites + wireCounters.scratchEncodes + wireCounters.modelWork;
+		expect(c1Work, `c1x centre: ${c1Work} units of counted work (clean 792, crossing-test mutant 486)`).toBeGreaterThanOrEqual(640);
+		// and the pop-condition mutant (the drain's crossing threshold <= -> <): a registration whose slack is
+		// consumed EXACTLY by the growth since its re-key pops one increment late and its examiner queue is
+		// delayed — the heals-later path costs one skipped heap pop per exact-consumption crossing. The
+		// committed slice runs both variants of the drift family over the m2kill limit window, where the
+		// instrumented clean code takes 4,849 such pops (tmp/agents/r10/logs/exact-hunt.log); measured clean
+		// 297,019 against the mutant 296,767 — the floor sits at the midpoint, a ~0.04% margin either side,
+		// tight because the mutant's whole effect is one unit of model work per crossing.
+		let sweep3 = 0;
+		for (const variant of [0, 1]) {
+			for (let f = center - 40; f <= center + 40; f += 4) {
+				const m3 = m2Shape(f, variant);
+				const size2 = encodeMessage({ ...m3, answers: m3.answers.filter((r) => r.name !== "z.t.") }).length;
+				for (let limit = size2 - 3; limit <= size2 + kLen + 4; limit++) {
+					wireCounters.recordWrites = 0;
+					wireCounters.scratchEncodes = 0;
+					wireCounters.modelWork = 0;
+					try { encodeCapped(m3, { limit }); } catch {}
+					sweep3 += wireCounters.recordWrites + wireCounters.scratchEncodes + wireCounters.modelWork;
+				}
+			}
+		}
+		expect(sweep3, `drift slice: ${sweep3} units of counted work (clean 297,019, pop-condition mutant 296,767)`).toBeGreaterThanOrEqual(296893);
+	}, 120_000);
 
 	it("keeps the model's work linear when keeps shift registrations across 0x4000 (CLDMV/digby#43)", () => {
 		const work = () => {
