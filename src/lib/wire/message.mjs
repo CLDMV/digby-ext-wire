@@ -1202,19 +1202,33 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		const kept = selectKept({
 			count: sets.length,
 			isCandidate: (k) => k < frozenAt && (k < brokenFrom ? sectionBase + totals[k] + tailBound <= limit : true),
+			firstPos: (k) => (k < sets.length ? sets[k][0] : Number.POSITIVE_INFINITY),
+			ownerAt: (pos) => owner[pos],
 			trial: (k) => {
 				// the candidate's drop-here stream, written for real at its original positions against the state the
-				// winner's stream will be sent in — on success the writes stay: they ARE the output
+				// winner's stream will be sent in — on success the writes stay: they ARE the output. `failPos` is the
+				// position of the record whose write hit the limit (-1 when the failure was not a record write, e.g.
+				// the tail check) — the fallback's cost bound reads it (round 10, CLDMV/digby#43).
 				const mark = w.checkpoint();
 				const before = written[s];
 				let fits = true;
+				let failPos = -1;
 				try {
-					for (let i = 0; i < list.length; i++)
-						if (owner[i] <= k) {
+					for (let i = 0; i < list.length; i++) {
+						if (owner[i] > k) continue;
+						try {
 							writeRecord(w, list[i]);
-							written[s]++;
+						} catch (err) {
+							if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE) {
+								fits = false;
+								failPos = i;
+								break;
+							}
+							throw err;
 						}
-					fits = w.length <= limit && tailFitsOn(w);
+						written[s]++;
+					}
+					if (fits) fits = w.length <= limit && tailFitsOn(w);
 				} catch (err) {
 					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
 					fits = false;
@@ -1223,7 +1237,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 					w.rollback(mark);
 					written[s] = before;
 				}
-				return fits;
+				return { fits, failPos };
 			}
 		});
 		if (kept < sets.length - 1) {
@@ -1271,13 +1285,33 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
  * rule would change what the scan must place in the model and what a trial verifies, but the shape of this
  * decision — candidates newest-first, exact-trial-verified, largest wins — stays.
  *
- * @param {{ count: number, isCandidate: (k: number) => boolean, trial: (k: number) => boolean }} search
+ * The failed-trial skip (round 10, CLDMV/digby#43) bounds the exact-trial fallback's cost: after trial(j) failed at
+ * record position q, the trials for the candidates below j would rewrite the same stream and fail at the same record
+ * for as long as every set between them owns no record before q — a record's bytes depend only on the records before
+ * it (pointers reach backwards), so if none of the sets j, j-1, .., k+1 has a record at a position < q, the candidate
+ * k's stream up to q is byte for byte trial(j)'s, record q is attempted (it belongs to a set ≤ k) and fails
+ * identically. Skipping it costs one comparison instead of a full rewrite — on a message of n independent records
+ * whose fitting prefix is a fraction of the input, that is the difference between O(n) failed trials that each write
+ * the output-size stream (quadratic) and O(n) one-comparison skips plus O(output) rewrites (linear in the records
+ * actually written). A candidate whose sets DO own records before q changes the compression state of everything
+ * after them, so its trial runs for real. The chain tracks the smallest first-position of the sets between the
+ * candidate and the last run trial; a failure that is not a record write (the tail check) leaves no positional
+ * evidence, so the chain resets and the next candidate runs.
+ *
+ * @param {{ count: number, isCandidate: (k: number) => boolean, firstPos: (k: number) => number, ownerAt: (pos: number) => number, trial: (k: number) => { fits: boolean, failPos: number } }} search
  * @returns {number} the last kept set's index (the largest fitting prefix is sets 0..k), or -1 when no set fits
  */
-function selectKept({ count, isCandidate, trial }) {
+function selectKept({ count, isCandidate, firstPos, ownerAt, trial }) {
+	let failPos = -1; // the record position where the last run trial failed (-1: none yet, or the failure left no positional evidence)
+	let minAbove = Number.POSITIVE_INFINITY; // the smallest first-position among the sets between the candidate and the last run trial
 	for (let k = count - 1; k >= 0; k--) {
+		minAbove = Math.min(minAbove, firstPos(k + 1));
 		if (!isCandidate(k)) continue;
-		if (trial(k)) return k;
+		if (failPos >= 0 && minAbove >= failPos && ownerAt(failPos) <= k) continue;
+		const r = trial(k);
+		if (r.fits) return k;
+		failPos = r.failPos;
+		minAbove = Number.POSITIVE_INFINITY;
 	}
 	return -1;
 }
