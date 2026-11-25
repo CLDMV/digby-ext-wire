@@ -293,6 +293,19 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		expect(code(() => decodeMessage(bytes, runInNewContext("Object.create({ maxNameOctets: 5 })")))).toBe("VALUE_OUT_OF_RANGE");
 		expect(() => decodeMessage(bytes, runInNewContext("Object.freeze({ allowTrailing: true })"))).not.toThrow();
 	});
+
+	it("the round-9 refusal mappings are pinned: SAB forms and revoked Proxies in the options are NOT_CLONEABLE (CLDMV/digby#39, round 9)", () => {
+		// round 8 refused a SharedArrayBuffer form inside the options with VALUE_OUT_OF_RANGE — the plain-shape
+		// refusal answered before any SAB check — and a revoked Proxy with VALUE_OUT_OF_RANGE too, because
+		// isPlainObject swallowed its throw. Round 9 maps both to NOT_CLONEABLE: a SAB form is not a shape question,
+		// and a shape read that throws means the value is not cloneable data. Round 8's unknown-key refusals are kept
+		// and pinned: a non-plain value under ANY option key, known or not, is VALUE_OUT_OF_RANGE.
+		expect(code(() => decodeMessage(bytes, { x: new SharedArrayBuffer(4) }))).toBe("NOT_CLONEABLE");
+		expect(code(() => decodeMessage(bytes, { x: new Uint8Array(new SharedArrayBuffer(4)) }))).toBe("NOT_CLONEABLE");
+		expect(code(() => encodeMessage(message(), revokedProxy))).toBe("NOT_CLONEABLE");
+		expect(code(() => encodeMessage(message(), { maxSize: 40, extra: new Date() }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeMessage(message(), { maxSize: 40, extra: new Uint8Array(1) }))).toBe("VALUE_OUT_OF_RANGE");
+	});
 });
 
 describe("udpLimit reads the query's EDNS size once and validates it (CLDMV/digby#39, round 6)", () => {
