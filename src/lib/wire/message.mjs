@@ -575,13 +575,14 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// - `fen` holds the exact wire octets of every measured record at its position, so any record's offset in the
 	//   drop-here stream is `sectionBase + fen.prefix(position) + (its offset within its record)`; a running total
 	//   gives each prefix's stream size in O(1).
-	// - `model` holds, per compression target, the key and the registration's offset within its record. A registration
-	//   is recorded exactly when it exists on the wire: its real offset in the drop-here stream is in the pointer
-	//   range (the probe gates on that real offset, not on its own write position, which sits below it by the kept
-	//   octets between the measured records — CLDMV/digby#43, round 9). The entry's validity is still computed on
-	//   demand (`realOf < 0x4000`), so a later keep that shifts the registration is reflected without touching the
-	//   entry, and a registration that crosses out of or drifts back under the pointer range is detected instead of
-	//   silently miscounting (see the two heaps below).
+	// - `model` holds, per compression target, the key and the registration's offset within its record. Every
+	//   registration the probe's writes make is recorded, in pointer range or not (round 10): an out-of-range one is
+	//   not a pointer target yet, but its real offset — the probe gates on the real offset, not on its own write
+	//   position, which sits below it by the kept octets between the measured records (CLDMV/digby#43, round 9) — is
+	//   watched by the drift-in heap, because a later shrink can pull it back under 0x4000 and make it real. The
+	//   entry's validity is still computed on demand (`realOf < 0x4000`), so a later keep that shifts the registration
+	//   is reflected without touching the entry, and a registration that crosses out of or drifts back under the
+	//   pointer range is detected instead of silently miscounting (see the two heaps below).
 	// - Measuring a set writes its records into a probe writer positioned at the set's first record's stream offset,
 	//   seeded with the model's targets, and each registration the probe makes is corrected by the exact shift — the
 	//   kept octets between the measured records, from the tree. The probe's lookups therefore hit and miss exactly
@@ -620,9 +621,11 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	// largest fitting prefix whatever the model said. An overstated total is the dangerous direction: it can hide a
 	// fitting prefix from the fit check, and past the frozen point no trial would ever run to correct it — so the
 	// overstated direction is the one kept exact, by record-order visibility (a target a later record makes cannot
-	// shorten an earlier name), by real-gated registrations (a phantom cannot displace a true one) and by the
-	// drift-in heap; the exact trial is the last line of defence in the understated direction and the differential
-	// suite is the net (CLDMV/digby#43, round 9).
+	// shorten an earlier name), by recording every registration and watching the out-of-range ones in the drift-in
+	// heap (a registration that drifts back under 0x4000 re-measures its examiners instead of leaving their stored
+	// octets stale-high), and by the no-displacement rule (an out-of-range registration never replaces an in-range
+	// one, so a phantom can never make the model lose a target the stream has); the exact trial is the last line of
+	// defence in the understated direction and the differential suite is the net (CLDMV/digby#43, rounds 9-10).
 	//
 	// The frozen point (CLDMV/digby#43, round 8). Once the prefix total is over the budget AND every record a later
 	// keep would add sits at a stream offset at or above 0x4000, the search can stop: a record at offset >= 0x4000
@@ -687,8 +690,8 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		// a total. The buffer grows on demand, so the cap costs nothing until a shape that large actually arrives.
 		const probe = new Writer({ max: 0x80000000, compress });
 		const overlay = new Map(); // key -> { rec, rel, real } — the measurement's own registrations, in range or not
-		const heapV = []; // the model's in-range registrations, by (slack + the cumulative positive shift at push)
-		const heapI = []; // the model's out-of-range registrations, by (deficit + the cumulative negative shift at push)
+		const heapV = []; // every in-range registration (the model's entry for its key, or a displaced one still watched), by (slack + the cumulative positive shift at push)
+		const heapI = []; // every out-of-range registration, by (deficit + the cumulative negative shift at push)
 		let cumPos = 0; // every positive octet the tree ever gained: a registration's slack shrank by at most this since its push
 		let cumNeg = 0; // every negative octet the tree ever lost: an out-of-range registration's deficit shrank by at most this since its push
 		let runTotal = 0; // fen.total() maintained incrementally: the kept octets of every set folded so far
@@ -714,7 +717,9 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		// lie the largest-fit search cannot self-correct (an understated total only adds candidates, and every
 		// candidate is exact-trial-verified; an overstated one can hide a fitting prefix from the fit check). Round 7
 		// left that direction unwatched and settled it by exact-trialling every refused set; the largest-fit search
-		// has no refused set to trial, so the drift is watched instead.
+		// has no refused set to trial, so the drift is watched instead. Round 10 widens it to every out-of-range
+		// registration, including ones born out of range: the round-9 gate dropped those outright, so a shrink that
+		// pulled one back under 0x4000 went unwatched and its examiners stayed stale-high (CLDMV/digby#43).
 		const heapPush = (h, entry) => {
 			wireCounters.modelWork++;
 			h.push(entry);
@@ -755,7 +760,21 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			while (heapV.length > 0 && heapV[0].score <= cumPos) {
 				const entry = heapPop(heapV);
 				wireCounters.modelWork++;
-				if (model.get(entry.key) !== entry) continue; // removed or replaced since the push
+				if (model.get(entry.key) !== entry) {
+					// a watched registration that is not the model's entry for its key — displaced by a later
+					// adoption (round 10). Its crossing out cannot make the key absent while the primary entry is
+					// in range, and if the primary is out of range the drift-in heap watches the comeback — so it
+					// is only re-keyed here, never queued.
+					const off = realOf(entry);
+					if (off < 0x4000) {
+						entry.score = 0x4000 - off + cumPos;
+						heapPush(heapV, entry);
+					} else {
+						entry.score = off - 0x4000 + cumNeg;
+						heapPush(heapI, entry);
+					}
+					continue;
+				}
 				const off = realOf(entry);
 				if (off < 0x4000) {
 					// still in range: re-key with the fresh slack and wait for the next shift
@@ -775,7 +794,28 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			while (heapI.length > 0 && heapI[0].score < cumNeg) {
 				const entry = heapPop(heapI);
 				wireCounters.modelWork++;
-				if (model.get(entry.key) !== entry) continue; // removed or replaced since the push
+				if (model.get(entry.key) !== entry) {
+					// a watched registration that is not the model's entry for its key (round 10): re-keyed while it
+					// stays out of range; when it drifts back under and the primary entry is absent or still out of
+					// range, it is ADOPTED as the primary — the real stream's registration is the first write of the
+					// key in stream order, so the drifted-in watcher is what the stream compresses against, and the
+					// examiners' stored octets are stale-high until they are re-measured
+					const off = realOf(entry);
+					if (off >= 0x4000) {
+						entry.score = off - 0x4000 + cumNeg;
+						heapPush(heapI, entry);
+						continue;
+					}
+					const cur = model.get(entry.key);
+					if (cur === undefined || realOf(cur) >= 0x4000) {
+						model.set(entry.key, entry);
+						const ix = index.get(entry.key);
+						if (ix !== undefined) for (const q of ix) queuePush(q, entry.key, undefined);
+					}
+					entry.score = 0x4000 - off + cumPos;
+					heapPush(heapV, entry);
+					continue;
+				}
 				const off = realOf(entry);
 				if (off >= 0x4000) {
 					// still out of range: re-key with the fresh deficit and wait for the next shift
@@ -810,7 +850,9 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		};
 		const lookup = (key) => {
 			const o = overlay.get(key);
-			if (o !== undefined) return o.real;
+			// an out-of-range registration is not a pointer target: recorded (round 10, watched by the drift-in
+			// heap), but the measurement writes the name in full while its real offset stays at or past 0x4000
+			if (o !== undefined) return o.real < 0x4000 ? o.real : undefined;
 			const m = model.get(key);
 			if (m !== undefined) {
 				const r = realOf(m);
@@ -825,12 +867,14 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			return w.names.get(key);
 		};
 		// The probe's compression table: the model's targets at their stream offsets, the measurement's own
-		// registrations corrected by the shift, and every examined key recorded for the disturbance index. A
-		// registration whose real offset reaches 0x4000 does not exist as a pointer target (the real stream's
-		// write would be past the pointer range — writeName's own guard is `w.length < 0x4000`), so it is not
-		// recorded: the probe's set gates on the real offset, not on the probe's own write position, which sits
-		// below the real offset by the kept octets between the measured records. Recording the phantom would let
-		// it displace the true registration — the one whose drift the drift-in heap watches (round 9).
+		// registrations corrected by the shift, and every examined key recorded for the disturbance index. Every
+		// registration is recorded, in pointer range or not (round 10): one whose real offset has reached 0x4000 is
+		// not a pointer target yet (the real stream's write would be past the range — writeName's own guard is
+		// `w.length < 0x4000`), but it is watched, because a later shrink can pull its real offset back under the
+		// boundary and make it real — the round-9 gate dropped it outright and left that comeback unwatched
+		// (CLDMV/digby#43). The first write of a key in stream order is the registration the real stream makes: the
+		// probe's real offsets grow across a measurement, so a later record's write of the same key never displaces
+		// an earlier record's.
 		probe.names = {
 			get(key) {
 				touched.push(key);
@@ -841,15 +885,10 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				return lookup(key) !== undefined;
 			},
 			set(key, at) {
-				// a registration exists on the wire only where the real stream's write position is in pointer range —
-				// writeName's own guard is `w.length < 0x4000` on the real stream, and the probe's length sits below
-				// the real offset by the kept octets between the measured records. Gate on the real offset, not the
-				// probe position: a registration the real stream would not make must not enter the model — it would
-				// displace the true registration (whose drift back under 0x4000 the drift-in heap watches) with a
-				// phantom that never drifts, and the examiners' staleness would then be permanent (CLDMV/digby#43,
-				// round 9).
-				if (at + curShift >= 0x4000) return;
-				overlay.set(key, { rec: curRec, rel: at - recStart, real: at + curShift });
+				const real = at + curShift;
+				const prev = overlay.get(key);
+				if (prev !== undefined && prev.real <= real) return;
+				overlay.set(key, { rec: curRec, rel: at - recStart, real });
 			},
 			delete(key) {
 				overlay.delete(key);
@@ -908,6 +947,14 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		// replaces another out-of-range one changes nothing visible — the key is absent to every examiner either
 		// way — so its examiners stay put. `except` keeps a set out of its own queue entry — the records a
 		// re-measure just re-measured are already done.
+		//
+		// The no-displacement rule (round 10, CLDMV/digby#43): an out-of-range registration never replaces the
+		// model's in-range entry for its key. The real stream's registration of a key is its first write in stream
+		// order; a registration recorded out of range is the candidate for that slot, watched by the drift-in heap,
+		// and when the in-range entry it could not displace later crosses out, the drifted-in watcher takes the
+		// slot (drainInvalid) instead of leaving the model blind to a target the stream compresses against. A
+		// displaced entry stays watched in the heap matching its own range, so its later crossings and comebacks
+		// still reach the examiners that measured against it.
 		const adopt = (key, e, except, prevKnown) => {
 			wireCounters.modelWork++;
 			// `prevKnown` is what the examiners last measured against when the caller already knows it (a
@@ -915,9 +962,35 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			// it); otherwise the model's current entry is the prev.
 			const prev = prevKnown !== undefined ? prevKnown : (model.get(key) ?? null);
 			const entry = { rec: e.rec, rel: e.rel, key, score: 0 };
-			model.set(key, entry);
 			const off = realOf(entry);
 			const prevOff = prev === null ? -1 : realOf(prev); // the tree is frozen while a measurement's overlay is adopted
+			if (prev !== null && prevOff < 0x4000 && off >= 0x4000) {
+				// out of range against an in-range entry: the key stays visible at the in-range entry — a pointer
+				// is two octets to either target, so the examiners' stored octets are unchanged and nobody
+				// re-measures. The out-of-range registration is still recorded, in the drift-in heap. A `prevKnown`
+				// prev was removed from the model before the measurement (a re-measured record's own registration),
+				// so it goes back in — and back into the in-range heap, where its own crossings stay watched.
+				if (model.get(key) !== prev) {
+					model.set(key, prev);
+					prev.score = 0x4000 - prevOff + cumPos;
+					heapPush(heapV, prev);
+				}
+				entry.score = off - 0x4000 + cumNeg;
+				heapPush(heapI, entry);
+				return;
+			}
+			model.set(key, entry);
+			if (prev !== null) {
+				// the displaced entry stays watched: its own offset moves with the same shifts, and a later
+				// crossing or comeback of it still reaches the examiners that measured against it (round 10)
+				if (prevOff < 0x4000) {
+					prev.score = 0x4000 - prevOff + cumPos;
+					heapPush(heapV, prev);
+				} else {
+					prev.score = prevOff - 0x4000 + cumNeg;
+					heapPush(heapI, prev);
+				}
+			}
 			if (off < 0x4000) {
 				entry.score = 0x4000 - off + cumPos;
 				heapPush(heapV, entry);
