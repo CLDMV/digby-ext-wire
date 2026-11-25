@@ -212,8 +212,16 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 				expect(r.bytes.length, `M=${M} ${tag}: within the limit`).toBeLessThanOrEqual(limit);
 				// every record is written a small constant number of times: the round-4 trials wrote each record
 				// ~24-200 times on this shape (a fresh exact trial per set, each re-encoding the kept second
-				// records sitting between the candidate's two), growing with M
-				expect(writes, `M=${M} ${tag}: ${writes} units of work for ${records} records`).toBeLessThanOrEqual(12 * records);
+				// records sitting between the candidate's two), growing with M. The constant is recalibrated for
+				// round 7 (CLDMV/digby#43): the counted work now includes the plain attempt's full pass (C1, ~1
+				// write per record the attempt covers) and the Fenwick operations the JSDoc always claimed (C4).
+				// Round 6 measured 5.0-5.5 per record here at M<=400, 10.0-10.5 at M=800 — the bump where the
+				// stream first crosses 0x4000 (crossing-driven re-measures) — and 7.8 at M=1600; round 7 counts
+				// the same work plus the two new components, so the bump amplifies (measured 13.5 per record at
+				// M=100 and 21.6 at M=800, limit one under full). The bound stays a constant multiple, which is
+				// what any quadratic regression blows through; 24 x records covers the amplified bump with the
+				// same margin round 6's 12 had over its own 10.5.
+				expect(writes, `M=${M} ${tag}: ${writes} units of work for ${records} records`).toBeLessThanOrEqual(24 * records);
 			}
 		}
 	}, 120_000);
@@ -224,6 +232,11 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 	// set's records for every flip — 49.6/97.6/190.9/191.6 writes per record at 301/601/1201/2401 records. The fix
 	// re-measures only the records the flip touches, and every unit of model work — the scans included — is counted
 	// in wireCounters.modelWork, so the bound below is on recordWrites + scratchEncodes + modelWork together.
+	// Round 7 (CLDMV/digby#43): modelWork now counts the Fenwick operations the JSDoc always claimed (one unit per
+	// set/prefix call, not per tree step), and recordWrites counts the plain attempt's full pass (C1), so the round-6
+	// absolute figures are not comparable — flatness in n is the invariant. What each counter counts, what it does
+	// not, and the reproducible harness: tmp/agents/r7-capped/measure-capped.mjs (gitignored scratch, run inside a
+	// test pod).
 	const boundaryShape = (n) => {
 		// 16,000 octets of filler as 63 character-strings (a character-string is at most 255 octets): the stream
 		// sits just under 0x4000 before the first keep, so the keeps cross the registration boundary immediately
