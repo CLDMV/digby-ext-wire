@@ -10,7 +10,7 @@
  * then decoded with the typed codec, so a malformed generic rdata is refused the same way as malformed wire.
  */
 
-import { MAX_MESSAGE, Reader, Writer, asBytes, intrinsicBuffer } from "../buffer.mjs";
+import { MAX_MESSAGE, Reader, Writer, asBytes, intrinsicView, isSharedBuffer } from "../buffer.mjs";
 import { CLASS, TYPE, typeToString } from "../constants.mjs";
 import { readOptions, writeOptions } from "../edns.mjs";
 import { WireError, WireErrorCode, cloneInput, describe, fail } from "../errors.mjs";
@@ -116,27 +116,30 @@ export function decodeRdataBytes(type, octets) {
 	// the standalone type rules, the same ones formatRdata, encodeRdataBytes and parseRdata apply (CLDMV/digby#38):
 	// reserved and non-integer types are refused — SIG stays a legal type (SIG(0) needs typeCovered 0, RFC 2931)
 	checkRdataType(type);
-	// the octets are copied once, before the decode reads them (CLDMV/digby#39): the length comes off the caller's
+	// the octets are copied once, before the decode reads them (CLDMV/digby#39): the length comes off the intrinsic
 	// view a single time and the decode reads the copy — a Proxy over a typed array (whose traps can throw or lie), a
-	// faked brand, or a view over shared memory is never consulted again while decoding. The instanceof and the
+	// faked brand, or a view over shared memory is never consulted again while decoding. The byteLength comes through
+	// {@link intrinsicView}, the same path as every other byte entry (CLDMV/digby#39, round 8): the caller's own
+	// `byteLength` property used to be read here — a value of 20 on a 4-octet array decoded 16 phantom empty strings,
+	// and a throwing own getter was refused while formatGeneric, going through the intrinsic getters, accepted the
+	// same value. The buffer is brand-checked with the intrinsic getter, never `instanceof` (CLDMV/digby#39, round 8):
+	// a SharedArrayBuffer wearing `ArrayBuffer.prototype` passed the old check and its octets were read, and a
+	// cross-realm one failed `instanceof SharedArrayBuffer` from this realm outright. The instanceof and the
 	// buffer/byteLength reads can fire the caller's traps, so they sit inside the refusal they feed.
-	let src;
+	let copy;
 	try {
-		src = bytes(octets, "rdata");
+		const src = bytes(octets, "rdata");
+		const view = intrinsicView(src);
+		if (view === null) fail(WireErrorCode.VALUE_OUT_OF_RANGE, "rdata must be a plain Uint8Array of octets");
 		// a view over a SharedArrayBuffer is refused like any entry's input: the decode must not read memory the
 		// caller can change. The buffer is read through the intrinsic getter, so an own `buffer` property cannot
 		// shadow the refusal (CLDMV/digby#39)
-		if (intrinsicBuffer(src) instanceof SharedArrayBuffer)
+		if (isSharedBuffer(view.buffer))
 			fail(WireErrorCode.NOT_CLONEABLE, "rdata is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+		copy = new Uint8Array(view.byteLength);
+		copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
 	} catch (err) {
 		if (err instanceof WireError) throw err;
-		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "rdata must be a plain Uint8Array of octets");
-	}
-	let copy;
-	try {
-		copy = new Uint8Array(src.byteLength);
-		copy.set(src);
-	} catch {
 		// a Proxy whose traps throw, or a faked brand whose byteLength lies: the octets cannot be read as data
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, "rdata must be a plain Uint8Array of octets");
 	}
