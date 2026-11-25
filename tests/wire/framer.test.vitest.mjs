@@ -215,12 +215,11 @@ describe("TcpFramer one-octet segments (CLDMV/digby#35)", () => {
 		// runner): the pre-fix framer re-concatenated `pending + chunk` on every push — quadratic in the frame size, so
 		// quadrupling 16 KB → 64 KB multiplies the time by ~16 (measured ~592 ms vs ~55 ms here). The fixed framer is linear —
 		// one buffer grown by doubling, one copy per octet — so the ratio is ~4. 8 sits 2x above linear and 2x below quadratic,
-		// failing only when the re-concatenation returns, regardless of machine speed.
+		// failing only when the re-concatenation returns, regardless of machine speed. This ratio is the test's ONLY timing
+		// guard: an absolute backstop (150 ms) stood here until it flaked under coverage instrumentation on shared runner
+		// pods four rounds running (150.26 / 154.2 / 160.8 vs 150) while the isolated file passed every time — the ratio,
+		// measured in the same run at the same instrumentation, cannot.
 		expect(t64 / t16).toBeLessThan(8);
-		// Absolute backstop with real headroom: 64 KB measured ~592 ms best-of-3 on the pre-fix framer and 55.6 ms worst on the
-		// fixed one (cold, contended runner pod, single sample; ~13 ms steady-state on a dev box). 150 ms keeps ~2.7x headroom
-		// over that worst observed run while the quadratic behaviour sits ~4x above it.
-		expect(t64).toBeLessThan(150);
 	});
 
 	it("delivers several frames back to back, all one octet at a time", () => {
