@@ -820,6 +820,38 @@ describe("encodeCapped matches the best-fit reference on 0x4000-straddling inter
 		}
 	}, 600_000);
 
+	// The four 0x4000 boundary sites, re-derived for the largest-fit contract (R8-2; each mutant applied alone to
+	// this suite ran 394/394 — tmp/agents/r8/mut-m{1,2,3,4}.log). The model's only output-bearing role is candidate
+	// selection: the winning prefix is verified by an exact trial, so a model lie matters only when it HIDES a
+	// fitting prefix. An understated total cannot: a prefix whose real stream fits always passes the fit check
+	// (stored octets <= real octets, and the tail bound is the OPT record's exact size — writeOpt writes the root as
+	// a raw octet, never a name), so every fitting prefix stays a candidate and the first trial that fits is the
+	// largest one whatever the totals said. An overstated total can hide one, and that is the direction the drift-in
+	// heap watches. Per site:
+	// - m1, the model lookup's range check (r < 0x4000 -> <=): a target at exactly 0x4000 compresses in the
+	//   measurement where the real writeName writes it in full (its own guard is w.length < 0x4000; a 14-bit
+	//   pointer cannot reach 0x4000). Stored octets go stale-LOW — undercount — self-correcting.
+	// - m3, the validity drain's crossing test (off < 0x4000 -> <=, round 7's slack > 0 -> >= 0): a registration
+	//   whose offset reaches exactly 0x4000 stays heap-valid, so its examiners are not re-measured and their stored
+	//   octets go stale-LOW (they compressed; a fresh measurement writes in full) — undercount — self-correcting.
+	//   Round 7 killed it through the greedy fit check; the greedy is gone and the trials arbitrate now.
+	// - m4, the lookup's earlier-target scoping (r < curReal + ... -> <=): compresses against a target at exactly
+	//   the in-flight write position, which the real stream has not written yet — stale-LOW — self-correcting.
+	// - m2, the registration classification (off < 0x4000 -> <= in adopt; the probe registration's own check is
+	//   gone — every registration is recorded now and this is where the boundary rule lives): a registration
+	//   landing exactly on 0x4000 is classified in-range, into the drift-OUT heap instead of the drift-IN one. At
+	//   adoption the examiners' octets are still correct (the real stream also refuses the pointer), and the lie
+	//   heals through four independent paths: any positive tree delta pops the entry and the drain's crossed branch
+	//   re-checks it, queues its examiners and migrates it to the drift-IN heap — clean behaviour from then on; a
+	//   re-registration of the key replaces the entry outright; the cascade seed queues the new key's examiners
+	//   regardless; and within one measurement offsets only increase, so a shrink source cannot sit after a phantom
+	//   registration. The residual window is a pure-negative shift (no positive delta, no re-registration) pulling
+	//   the phantom below 0x4000 after its examiners were already re-measured — their staleness would then be
+	//   permanent and could hide a fitting prefix. Neither the round-7 sweep (215,863 cases) nor this suite's
+	//   ~290,000 differential cases (the c1x landing sweep puts registrations exactly on 0x4000 and the keeps shift
+	//   them both ways) produced it; a shape threading that needle would keep fewer sets than the best-fit oracle —
+	//   output within the limit, whole RRsets, correct TC, only the truncation point different.
+	//
 	// The c1x family (round 8): the C1 shape with the filler swept so the y.t. record's registration of N lands on
 	// every offset around the pointer boundary — including exactly 0x4000, where the boundary rules differ — and the
 	// keeps around it shift and shrink the stream (l.t.'s records compress against N once it is registered, and
