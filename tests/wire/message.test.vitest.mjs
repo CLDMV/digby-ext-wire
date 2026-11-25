@@ -808,7 +808,7 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 			flags: { qr: true },
 			questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }],
 			answers: [
-				bigTxt("f.t.", 16176),
+				bigTxt("f.t.", 16236),
 				ns("e.t.", "s.q."),
 				ns("l.t.", "s.q."),
 				ns("y.t.", N),
