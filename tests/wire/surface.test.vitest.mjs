@@ -165,6 +165,28 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		// a null-prototype options object is still plain data and still works
 		expect(() => decodeMessage(bytes, Object.assign(Object.create(null), { allowTrailing: true }))).not.toThrow();
 	});
+
+	it("an own non-enumerable or symbol-keyed option is refused, never silently dropped (CLDMV/digby#39, round 8)", () => {
+		// structuredClone copies own enumerable string-keyed properties only: Object.defineProperty({}, "maxSize",
+		// { value: 40 }) used to encode the whole message — the bound silently gone. Every known bound hides the same
+		// way, and a symbol-keyed option is dropped by the copy too.
+		const big = {
+			...message(),
+			answers: [
+				{ name: "a.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.1" } },
+				{ name: "b.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.2" } }
+			]
+		};
+		expect(code(() => encodeMessage(big, Object.defineProperty({}, "maxSize", { value: 40 })))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeCapped(message(), Object.defineProperty({}, "limit", { value: 20 })))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => udpLimit({ edns: { udpSize: 4096 } }, Object.defineProperty({}, "cap", { value: 70000 })))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeMessage(bytes, Object.defineProperty({}, "maxNameOctets", { value: 5 })))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => decodeMessage(bytes, Object.defineProperty({}, "maxQuestions", { value: 0 })))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeMessage(big, Object.defineProperty({}, Symbol("maxSize"), { value: 40, enumerable: true })))).toBe("VALUE_OUT_OF_RANGE");
+		// frozen and JSON-parsed options still work: freezing changes no enumerability
+		expect(() => decodeMessage(bytes, Object.freeze({ allowTrailing: true }))).not.toThrow();
+		expect(() => decodeMessage(bytes, JSON.parse('{"allowTrailing":true}'))).not.toThrow();
+	});
 });
 
 describe("udpLimit reads the query's EDNS size once and validates it (CLDMV/digby#39, round 6)", () => {
