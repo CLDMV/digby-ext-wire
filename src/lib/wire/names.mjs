@@ -23,7 +23,7 @@
  * decode's walk, not the characters it materialises — see the cap's note.
  */
 
-import { MAX_MESSAGE, intrinsicView } from "./buffer.mjs";
+import { MAX_MESSAGE, intrinsicView, isSharedBuffer } from "./buffer.mjs";
 import { WireError, WireErrorCode, fail } from "./errors.mjs";
 
 /** The longest label (RFC 1035 2.3.4). */
@@ -155,10 +155,12 @@ export function formatName(labels) {
 			// label with an own length of 5 printed five raw NULs and a 60-octet label with an own length of 3 printed
 			// only "aaa." — and a label over a SharedArrayBuffer is refused like every byte-taking entry (formatName was
 			// the only one without the rule; with a length-tracking view over a growable SAB the length was checked once
-			// and then read again)
+			// and then read again). The buffer is brand-checked with the intrinsic getter, never `instanceof`
+			// (CLDMV/digby#39, round 8): a SharedArrayBuffer wearing `ArrayBuffer.prototype` passed the old check and its
+			// octets were read, and a cross-realm one failed `instanceof SharedArrayBuffer` from this realm outright.
 			const view = intrinsicView(l);
 			if (view === null) fail(WireErrorCode.NOT_CLONEABLE, "a name's label is not a readable typed array");
-			if (view.buffer instanceof SharedArrayBuffer)
+			if (isSharedBuffer(view.buffer))
 				fail(WireErrorCode.NOT_CLONEABLE, "a name's label is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
 			if (view.byteLength > MAX_LABEL) fail(WireErrorCode.LABEL_TOO_LONG, `a label is at most ${MAX_LABEL} octets, got ${view.byteLength}`);
 			n += view.byteLength + 1;

@@ -33,6 +33,8 @@ const DATAVIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(DataView.prototype,
 /** The getter sets per view kind: a typed array's (off the %TypedArray% prototype) and a DataView's. */
 const VIEW_GETTERS = [VIEW_BUFFER, VIEW_BYTE_OFFSET, VIEW_BYTE_LENGTH];
 const DATAVIEW_GETTERS = [DATAVIEW_BUFFER, DATAVIEW_BYTE_OFFSET, DATAVIEW_BYTE_LENGTH];
+/** The `byteLength` getter off `SharedArrayBuffer.prototype`: it succeeds only on a buffer carrying the SharedArrayBuffer internal slot, from any realm (CLDMV/digby#39). */
+const SAB_BYTE_LENGTH = Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength").get;
 
 /**
  * A view's buffer, byteOffset and byteLength, read through the intrinsic getters so no own `buffer`, `byteOffset` or
@@ -71,6 +73,22 @@ export function intrinsicBuffer(v) {
 }
 
 /**
+ * Whether `b` is a SharedArrayBuffer, by brand (CLDMV/digby#39, round 8): the intrinsic `SharedArrayBuffer.prototype.byteLength`
+ * getter succeeds only on a buffer carrying the SharedArrayBuffer internal slot, from any realm and under any prototype swap —
+ * `instanceof` tests the prototype chain, which `Object.setPrototypeOf(sab, ArrayBuffer.prototype)` fakes, and a cross-realm
+ * SharedArrayBuffer fails `instanceof SharedArrayBuffer` from this realm outright. The getter runs no caller code.
+ * @param {unknown} b
+ * @returns {boolean}
+ */
+export function isSharedBuffer(b) {
+	try {
+		SAB_BYTE_LENGTH.call(b);
+		return true;
+	} catch {}
+	return false;
+}
+
+/**
  * View any byte source as a plain Uint8Array without copying.
  * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes
  * @returns {Uint8Array}
@@ -81,15 +99,17 @@ export function asBytes(bytes) {
 	// (CLDMV/digby#39). The view is built only from the intrinsic buffer, byteOffset and byteLength (CLDMV/digby#39):
 	// every byte-taking entry — decodeMessage, frameTcp, TcpFramer.push, formatGeneric — refuses every SAB form here,
 	// bare SABs included, and no own `buffer`, `byteOffset` or `byteLength` property can shadow any of the three reads.
+	// The buffer itself is brand-checked with the intrinsic getters, never `instanceof` (CLDMV/digby#39, round 8): a
+	// SharedArrayBuffer wearing `ArrayBuffer.prototype` passed the old `instanceof` check and was copied, and a
+	// cross-realm one failed `instanceof SharedArrayBuffer` from this realm outright.
 	try {
 		const view = intrinsicView(bytes);
 		if (view !== null) {
-			if (view.buffer instanceof SharedArrayBuffer)
+			if (isSharedBuffer(view.buffer))
 				fail(WireErrorCode.NOT_CLONEABLE, "byte input is a view over a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
 			return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
 		}
-		if (bytes instanceof SharedArrayBuffer)
-			fail(WireErrorCode.NOT_CLONEABLE, "byte input is a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
+		if (isSharedBuffer(bytes)) fail(WireErrorCode.NOT_CLONEABLE, "byte input is a SharedArrayBuffer; it would be read, not copied (CLDMV/digby#39)");
 		if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
 	} catch (err) {
 		if (err instanceof WireError) throw err;

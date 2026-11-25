@@ -9,7 +9,7 @@
  * public functions. Callers map the code to an answer: a decode failure of a query is FORMERR, an encode failure is SERVFAIL.
  */
 
-import { intrinsicBuffer } from "./buffer.mjs";
+import { intrinsicBuffer, isSharedBuffer } from "./buffer.mjs";
 
 /**
  * The error codes, grouped by where they arise.
@@ -189,8 +189,11 @@ function boundClone(root, what) {
 	// an accessor returned, which this walk skips) (CLDMV/digby#39).
 	const refuseShared = (v, where) => {
 		// the buffer is read through the intrinsic getter (CLDMV/digby#39): an own `buffer` property on the view would
-		// otherwise shadow the SharedArrayBuffer and the copy would share it after all
-		if (intrinsicBuffer(v) instanceof SharedArrayBuffer)
+		// otherwise shadow the SharedArrayBuffer and the copy would share it after all. The buffer is brand-checked
+		// with the intrinsic getter, never `instanceof` (CLDMV/digby#39, round 8): a SharedArrayBuffer wearing
+		// `ArrayBuffer.prototype` passed the old check and the copy shared it, and a cross-realm one failed
+		// `instanceof SharedArrayBuffer` from this realm outright.
+		if (isSharedBuffer(intrinsicBuffer(v)))
 			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a view over a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 	};
 	while (stack.length > 0) {
@@ -200,8 +203,7 @@ function boundClone(root, what) {
 			refuseShared(v, where);
 			continue;
 		}
-		if (v instanceof SharedArrayBuffer)
-			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
+		if (isSharedBuffer(v)) fail(WireErrorCode.NOT_CLONEABLE, `${where} is a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 		if (seen.has(v)) continue;
 		seen.add(v);
 		if (Array.isArray(v) && v.length > MAX_LIST) {
@@ -243,8 +245,11 @@ function checkClone(root, what) {
 	// skips — the serializer read it, and the copy shares its buffer (CLDMV/digby#39)
 	const refuseShared = (v, where) => {
 		// the buffer is read through the intrinsic getter (CLDMV/digby#39): an own `buffer` property on the view would
-		// otherwise shadow the SharedArrayBuffer and the copy would share it after all
-		if (intrinsicBuffer(v) instanceof SharedArrayBuffer)
+		// otherwise shadow the SharedArrayBuffer and the copy would share it after all. The buffer is brand-checked
+		// with the intrinsic getter, never `instanceof` (CLDMV/digby#39, round 8): a SharedArrayBuffer wearing
+		// `ArrayBuffer.prototype` passed the old check and the copy shared it, and a cross-realm one failed
+		// `instanceof SharedArrayBuffer` from this realm outright.
+		if (isSharedBuffer(intrinsicBuffer(v)))
 			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a view over a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 	};
 	while (stack.length > 0) {
@@ -254,8 +259,7 @@ function checkClone(root, what) {
 			refuseShared(v, where);
 			continue;
 		}
-		if (v instanceof SharedArrayBuffer)
-			fail(WireErrorCode.NOT_CLONEABLE, `${where} is a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
+		if (isSharedBuffer(v)) fail(WireErrorCode.NOT_CLONEABLE, `${where} is a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
 		if (seen.has(v)) continue;
 		seen.add(v);
 		if (Array.isArray(v)) {
