@@ -260,6 +260,11 @@ describe("the constant converters, formatName and formatGeneric refuse hostile i
 		expect(svcKeyToString(9)).toBe("key9");
 		expect(svcKeyFromString("alpn")).toBe(1);
 		expect(svcKeyFromString("key9")).toBe(9);
+		// the generic form has no leading zeros (RFC 9460): "key00001" is not the presentation form of key 1, and key 0
+		// is registered as "mandatory", so its presentation is the mnemonic (CLDMV/digby#39, round 8)
+		expect(code(() => svcKeyFromString("key00001"))).toBe("BAD_SVCPARAM");
+		expect(code(() => svcKeyFromString("key0"))).toBe("BAD_SVCPARAM");
+		expect(svcKeyFromString("key65535")).toBe(0xffff);
 		expect(formatName(parseName("www.example."))).toBe("www.example.");
 		expect(formatName([])).toBe(".");
 		expect(formatGeneric(new Uint8Array([1, 2, 3]))).toBe("\\# 3 010203");
