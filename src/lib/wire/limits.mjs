@@ -38,14 +38,14 @@ export function udpLimit(query, options) {
 	// the query goes through the one guarded reader encodeForTransport's copy goes through too (CLDMV/digby#39, round
 	// 9): null and undefined mean "no query", any other non-object is refused instead of reading as one without EDNS
 	// (udpLimit("x") used to return 512), and the shape rules are the snapshot's, at every depth — a prototype-borne,
-	// hidden, symbol-keyed or non-index key is refused instead of being read here and silently dropped by
-	// encodeForTransport's copy, a SharedArrayBuffer form inside the query is refused NOT_CLONEABLE, a Proxy is
-	// refused NOT_CLONEABLE by the copy exactly as the transport encode refuses it, and the decoded query the contract
-	// names is accepted: a TypedArray or ArrayBuffer leaf (a COOKIE's client octets, a raw option's data, byte-valued
-	// rdata) is accepted by brand and copied, never walked (CLDMV/digby#39, round 10). Only the snapshot is read
-	// afterwards: the advertised size is validated, never coerced — Math.max's ToNumber on a BigInt, a Symbol, a
-	// hostile toString or a throwing Symbol.toPrimitive throws a raw TypeError, a sparse or deep array coerces to a
-	// wrong limit, and a missing udpSize produced a NaN
+	// hidden or symbol-keyed key is refused instead of being read here and silently dropped by encodeForTransport's
+	// copy, a SharedArrayBuffer form inside the query is refused NOT_CLONEABLE, a Proxy is refused NOT_CLONEABLE by the
+	// copy exactly as the transport encode refuses it, and the decoded query the contract names is accepted: a
+	// TypedArray or ArrayBuffer leaf (a COOKIE's client octets, a raw option's data, byte-valued rdata) is accepted by
+	// brand and copied, never walked (CLDMV/digby#39, round 10). Only the snapshot is read afterwards: the advertised
+	// size is validated, never coerced — Math.max's ToNumber on a BigInt, a Symbol, a hostile toString or a throwing
+	// Symbol.toPrimitive throws a raw TypeError, a sparse or deep array coerces to a wrong limit, and a missing udpSize
+	// produced a NaN
 	const q = snapshotQuery(query, "the query");
 	const edns = q === null ? undefined : q.edns;
 	let theirs = UDP_MIN;

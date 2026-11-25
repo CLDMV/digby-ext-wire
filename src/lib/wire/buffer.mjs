@@ -133,8 +133,9 @@ function hiddenOption(where, k) {
  * - an own non-enumerable key, a symbol-keyed own key and an inherited key — enumerable, or a known option key however
  *   hidden ({@link OPTION_KEYS}) — are all refused: the copy reads own enumerable properties only, so every one of
  *   them would silently vanish;
- * - an array keeps its length and its holes, so the copy's density checks see what the caller gave, and an own
- *   non-index property is refused, which the copy would drop;
+ * - an array keeps its length and its holes, so the copy's density checks see what the caller gave; its non-index own
+ *   keys are kept too — structuredClone keeps them, so the copy stays faithful (round 10 corrects round 9, which
+ *   refused them on the false claim that the copy would drop them);
  * - an accessor is read exactly once, here — the snapshot holds the value the checks saw, so a getter cannot show the
  *   guard one value and the copy another.
  *
@@ -199,8 +200,8 @@ function snapshotValue(v, where, memo, query = false) {
 		}
 		if (!d.enumerable)
 			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} hide the "${k}" option behind a non-enumerable own property; the copy would silently drop it (CLDMV/digby#39, round 8)`);
-		if (isArray && `${k >>> 0}` !== k)
-			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} carry the "${k}" property; a list holds indices only, and the copy would silently drop it (CLDMV/digby#39, round 9)`);
+		// a non-index own key on a list is kept: structuredClone keeps it, so the copy stays faithful (round 10
+		// corrects round 9, which refused it on the false claim that the copy would drop it)
 		let value;
 		if ("value" in d) value = d.value; // the descriptor's value: read once, never a second get
 		else
@@ -262,13 +263,13 @@ function snapshotGuarded(v, where, query = false) {
  * Guard and copy the query the two transport entries read (CLDMV/digby#39, round 9): the one guarded reader both
  * {@link udpLimit} and encodeForTransport go through — encodeForTransport passes its copy's query back through it — so
  * the two entries cannot disagree. `null` and `undefined` mean "no query"; any other non-object is refused
- * VALUE_OUT_OF_RANGE (udpLimit("x") used to return 512); an array is refused (its non-index properties would be
- * silently dropped by the copy); and the shape rules are {@link snapshotValue}'s, at every depth — prototype-borne,
- * hidden, symbol-keyed and non-index keys refused, a SharedArrayBuffer form refused NOT_CLONEABLE, a Proxy whose traps
- * throw or a revoked Proxy NOT_CLONEABLE — except that the decoded query the contract names is accepted: a TypedArray
- * or ArrayBuffer leaf (a COOKIE's client octets, a raw option's data, byte-valued rdata) is accepted by brand and
- * copied by the clone, never walked (CLDMV/digby#39, round 10). Only the snapshot is read afterwards: a getter is read
- * once, by the snapshot, so an object-then-undefined flip cannot split the check from the use.
+ * VALUE_OUT_OF_RANGE (udpLimit("x") used to return 512); an array is refused — a query is a plain object, not a list;
+ * and the shape rules are {@link snapshotValue}'s, at every depth — prototype-borne, hidden and symbol-keyed keys
+ * refused, a SharedArrayBuffer form refused NOT_CLONEABLE, a Proxy whose traps throw or a revoked Proxy NOT_CLONEABLE
+ * — except that the decoded query the contract names is accepted: a TypedArray or ArrayBuffer leaf (a COOKIE's client
+ * octets, a raw option's data, byte-valued rdata) is accepted by brand and copied by the clone, never walked
+ * (CLDMV/digby#39, round 10). Only the snapshot is read afterwards: a getter is read once, by the snapshot, so an
+ * object-then-undefined flip cannot split the check from the use.
  * @param {unknown} query
  * @param {string} what
  * @returns {object | null}
@@ -330,7 +331,8 @@ export function asBytes(bytes) {
  * non-object is refused VALUE_OUT_OF_RANGE; and the options are snapshotted once ({@link snapshotGuarded}) — every own
  * enumerable property read exactly once, a getter that throws, a Proxy whose traps throw and a revoked Proxy the
  * NOT_CLONEABLE refusal, never a raw TypeError, and every option the copy would silently drop — a prototype-borne,
- * hidden, symbol-keyed or non-index one — refused before the copy runs.
+ * hidden or symbol-keyed one — refused before the copy runs. A list under an option keeps its non-index own keys:
+ * structuredClone keeps them, so the copy stays faithful (CLDMV/digby#39, round 10).
  * @param {unknown} options
  * @param {string} what
  * @returns {object}

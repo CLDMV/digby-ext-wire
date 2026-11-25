@@ -203,6 +203,13 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		expect(() => decodeMessage(bytes, structuredClone({ allowTrailing: true }))).not.toThrow();
 	});
 
+	it("an array's non-index own key is kept, not refused: structuredClone keeps it (CLDMV/digby#39, round 10)", () => {
+		// round 9 refused a list with an own non-index key, claiming the copy would silently drop it — structuredClone
+		// keeps those keys, so the refusal was wrong; round 10 keeps the key and the copy stays faithful
+		expect(() => encodeMessage(message(), { maxSize: 40, extra: Object.assign([1], { x: 1 }) })).not.toThrow();
+		expect(udpLimit({ edns: { udpSize: 4096 }, list: Object.assign([1, 2], { x: 1 }) }, { cap: 4096 })).toBe(4096);
+	});
+
 	it("an own non-enumerable or symbol-keyed option is refused, never silently dropped (CLDMV/digby#39, round 8)", () => {
 		// structuredClone copies own enumerable string-keyed properties only: Object.defineProperty({}, "maxSize",
 		// { value: 40 }) used to encode the whole message — the bound silently gone. Every known bound hides the same
@@ -268,7 +275,7 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		// a bare SharedArrayBuffer inside the query: accepted by udpLimit (1232), refused by the copy — both refuse
 		expect(code(() => udpLimit({ edns: { udpSize: 4096, x: new SharedArrayBuffer(4) } }, { cap: 4096 }))).toBe("NOT_CLONEABLE");
 		expect(code(() => encodeForTransport(msg, { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096, x: new SharedArrayBuffer(4) } } }))).toBe("NOT_CLONEABLE");
-		// an array is not a query (its non-index properties would be dropped by the copy)
+		// an array is not a query: a query is a plain object, not a list
 		refuse(() => Object.assign([], { edns: { udpSize: 4096 } }), "array query");
 		// a cooperative Proxy query is snapshotted once — its data read through the traps — and reads the same at both
 		// entries (512 there was a NOT_CLONEABLE refusal before, a disagreement of a different kind)
