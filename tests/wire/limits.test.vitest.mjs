@@ -44,6 +44,17 @@ describe("UDP limits", () => {
 		expect(udpLimit(null)).toBe(512);
 		expect(udpLimit(undefined)).toBe(512);
 	});
+
+	it("the query must be a plain object, so both entries read the same fields (CLDMV/digby#39, round 8)", () => {
+		// today: a query built on a custom prototype read its EDNS here but lost it in encodeForTransport's copy —
+		// 512 there, 4096 here; both refuse the non-plain shape now
+		const q = Object.create({ edns: { udpSize: 4096 } });
+		expect(code(() => udpLimit(q, { cap: 4096 }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => encodeForTransport(response(), { transport: "udp", cap: 4096, query: q }))).toBe("VALUE_OUT_OF_RANGE");
+		// a plain query still works, directly and through the transport encode
+		expect(udpLimit({ edns: { udpSize: 4096 } }, { cap: 4096 })).toBe(4096);
+		expect(encodeForTransport(response(), { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096 } } }).limit).toBe(4096);
+	});
 });
 
 describe("truncation (RFC 2181 9)", () => {

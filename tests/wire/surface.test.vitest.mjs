@@ -187,6 +187,17 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		expect(() => decodeMessage(bytes, Object.freeze({ allowTrailing: true }))).not.toThrow();
 		expect(() => decodeMessage(bytes, JSON.parse('{"allowTrailing":true}'))).not.toThrow();
 	});
+
+	it("a nested option object must be plain too: the query's EDNS cannot live on a prototype (CLDMV/digby#39, round 8)", () => {
+		// today: Object.create({ edns: { udpSize: 4096 } }) read its EDNS in udpLimit but lost it in
+		// encodeForTransport's copy — 512 there, 4096 here; both entries refuse the non-plain shape now
+		const q = Object.create({ edns: { udpSize: 4096 } });
+		expect(code(() => encodeForTransport(message(), { transport: "udp", cap: 4096, query: q }))).toBe("VALUE_OUT_OF_RANGE");
+		expect(code(() => udpLimit(q, { cap: 4096 }))).toBe("VALUE_OUT_OF_RANGE");
+		// a plain nested object still works
+		expect(udpLimit({ edns: { udpSize: 4096 } }, { cap: 4096 })).toBe(4096);
+		expect(encodeForTransport(message(), { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096 } } }).limit).toBe(4096);
+	});
 });
 
 describe("udpLimit reads the query's EDNS size once and validates it (CLDMV/digby#39, round 6)", () => {
