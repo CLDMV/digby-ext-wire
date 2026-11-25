@@ -11,7 +11,7 @@
  * 6.2.3, 6.2.5). TCP: 65535 octets, each message prefixed with a 2-octet length (RFC 1035 4.2.2, RFC 7766 8).
  */
 
-import { MAX_MESSAGE, asBytes, checkInt, cloneOptions, isPlainObject, readField } from "./buffer.mjs";
+import { MAX_MESSAGE, asBytes, checkInt, cloneOptions, snapshotQuery } from "./buffer.mjs";
 import { WireErrorCode, describe, fail } from "./errors.mjs";
 import { encodeCapped } from "./message.mjs";
 
@@ -35,21 +35,20 @@ export function udpLimit(query, options) {
 	const o = cloneOptions(options, "the udpLimit options");
 	checkInt(o.cap ?? DEFAULT_UDP_CAP, MAX_MESSAGE, "UDP cap");
 	const ours = Math.max(UDP_MIN, o.cap ?? DEFAULT_UDP_CAP);
-	// the query is guarded like every other argument (CLDMV/digby#39): null and undefined mean "no query", and any
-	// other non-object is refused instead of reading as one without EDNS — udpLimit("x") used to return 512. The
-	// query must be a plain object, by the same shape rule the options carry (CLDMV/digby#39, round 8): a query built
-	// on a custom prototype — Object.create({ edns: { udpSize: 4096 } }) — reads its EDNS here, but
-	// encodeForTransport's copy silently drops prototype-borne fields, so the two entries would disagree; both refuse
-	// the non-plain shape instead.
-	if (query !== null && query !== undefined && !isPlainObject(query))
-		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `the query must be a plain object, got ${describe(query)}`);
-	// the query's EDNS is read once, through the guarded field read (CLDMV/digby#39): the advertised size is validated,
-	// never coerced — Math.max's ToNumber on a BigInt, a Symbol, a hostile toString or a throwing Symbol.toPrimitive
-	// throws a raw TypeError, a sparse or deep array coerces to a wrong limit, and a missing udpSize produced a NaN
-	const edns = readField(query, "edns");
+	// the query goes through the one guarded reader encodeForTransport's copy goes through too (CLDMV/digby#39, round
+	// 9): null and undefined mean "no query", any other non-object is refused instead of reading as one without EDNS
+	// (udpLimit("x") used to return 512), and the shape rules are the snapshot's, at every depth — a prototype-borne,
+	// hidden, symbol-keyed or non-index key is refused instead of being read here and silently dropped by
+	// encodeForTransport's copy, a SharedArrayBuffer form inside the query is refused NOT_CLONEABLE, and a Proxy is
+	// refused NOT_CLONEABLE by the copy exactly as the transport encode refuses it. Only the snapshot is read
+	// afterwards: the advertised size is validated, never coerced — Math.max's ToNumber on a BigInt, a Symbol, a
+	// hostile toString or a throwing Symbol.toPrimitive throws a raw TypeError, a sparse or deep array coerces to a
+	// wrong limit, and a missing udpSize produced a NaN
+	const q = snapshotQuery(query, "the query");
+	const edns = q === null ? undefined : q.edns;
 	let theirs = UDP_MIN;
 	if (edns) {
-		theirs = readField(edns, "udpSize");
+		theirs = edns.udpSize;
 		checkInt(theirs, 0xffff, "the query's EDNS udpSize");
 	}
 	return Math.min(ours, Math.max(UDP_MIN, theirs));

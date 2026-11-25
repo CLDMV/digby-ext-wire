@@ -225,15 +225,64 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		expect(() => decodeMessage(bytes, JSON.parse('{"allowTrailing":true}'))).not.toThrow();
 	});
 
-	it("a nested option object must be plain too: the query's EDNS cannot live on a prototype (CLDMV/digby#39, round 8)", () => {
+	it("a nested option object's keys must be its own: the query's EDNS cannot live on a prototype (CLDMV/digby#39, round 9)", () => {
 		// today: Object.create({ edns: { udpSize: 4096 } }) read its EDNS in udpLimit but lost it in
-		// encodeForTransport's copy — 512 there, 4096 here; both entries refuse the non-plain shape now
+		// encodeForTransport's copy — 512 there, 4096 here; both entries refuse the prototype-borne shape now
 		const q = Object.create({ edns: { udpSize: 4096 } });
 		expect(code(() => encodeForTransport(message(), { transport: "udp", cap: 4096, query: q }))).toBe("VALUE_OUT_OF_RANGE");
 		expect(code(() => udpLimit(q, { cap: 4096 }))).toBe("VALUE_OUT_OF_RANGE");
 		// a plain nested object still works
 		expect(udpLimit({ edns: { udpSize: 4096 } }, { cap: 4096 })).toBe(4096);
 		expect(encodeForTransport(message(), { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096 } } }).limit).toBe(4096);
+	});
+
+	it("both transport entries read the one guarded snapshot of the query (CLDMV/digby#39, round 9)", () => {
+		// R8-7 closed only half of the gap: udpLimit still read the query through readField — non-enumerable and
+		// inherited fields included — while encodeForTransport read the copy, so the two entries could answer
+		// different limits for the same query, or refuse it with different codes. Both now take the one guarded
+		// snapshot ({@link snapshotQuery}) and read only it.
+		const msg = message();
+		const refuse = (make, what) => {
+			expect(code(() => udpLimit(make(), { cap: 4096 })), what).toBe("VALUE_OUT_OF_RANGE");
+			expect(code(() => encodeForTransport(msg, { transport: "udp", cap: 4096, query: make() })), what).toBe("VALUE_OUT_OF_RANGE");
+		};
+		// a non-enumerable edns: udpLimit read it (4096) where the copy silently dropped it (512)
+		refuse(() => Object.defineProperty({}, "edns", { value: { udpSize: 4096 } }), "non-enumerable edns");
+		// depth 2: an inherited udpSize, a non-enumerable udpSize and a class-borne getter — each read here, dropped there
+		refuse(() => ({ edns: Object.create({ udpSize: 4096 }) }), "inherited udpSize");
+		refuse(() => ({ edns: Object.defineProperty({}, "udpSize", { value: 4096 }) }), "non-enumerable udpSize");
+		class UdpSize {
+			get udpSize() {
+				return 4096;
+			}
+		}
+		refuse(() => ({ edns: new UdpSize() }), "class getter udpSize");
+		// the query itself on a custom prototype — 4096 here, silently 512 there; the forge of the round-9 options check
+		const Q = function Object() {};
+		Q.prototype.edns = { udpSize: 4096 };
+		refuse(() => new Q(), "forged-prototype query");
+		// and a getter option carrying such a query: the copy lost the prototype and answered 512
+		expect(
+			code(() => encodeForTransport(msg, { transport: "udp", cap: 4096, get query() { return Object.create({ edns: { udpSize: 4096 } }); } }))
+		).toBe("VALUE_OUT_OF_RANGE");
+		// a bare SharedArrayBuffer inside the query: accepted by udpLimit (1232), refused by the copy — both refuse
+		expect(code(() => udpLimit({ edns: { udpSize: 4096, x: new SharedArrayBuffer(4) } }, { cap: 4096 }))).toBe("NOT_CLONEABLE");
+		expect(code(() => encodeForTransport(msg, { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096, x: new SharedArrayBuffer(4) } } }))).toBe("NOT_CLONEABLE");
+		// an array is not a query (its non-index properties would be dropped by the copy)
+		refuse(() => Object.assign([], { edns: { udpSize: 4096 } }), "array query");
+		// a cooperative Proxy query is snapshotted once — its data read through the traps — and reads the same at both
+		// entries (512 there was a NOT_CLONEABLE refusal before, a disagreement of a different kind)
+		const proxyQuery = new Proxy({ edns: { udpSize: 4096 } }, {});
+		expect(udpLimit(proxyQuery, { cap: 4096 })).toBe(4096);
+		expect(encodeForTransport(msg, { transport: "udp", cap: 4096, query: proxyQuery }).limit).toBe(4096);
+		// plain, getter-edns and vm queries still read the same at both entries
+		expect(udpLimit({ edns: { udpSize: 4096 } }, { cap: 4096 })).toBe(4096);
+		expect(encodeForTransport(msg, { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096 } } }).limit).toBe(4096);
+		const getterQ = { get edns() { return { udpSize: 4096 }; } };
+		expect(udpLimit(getterQ, { cap: 4096 })).toBe(4096);
+		expect(encodeForTransport(msg, { transport: "udp", cap: 4096, query: getterQ }).limit).toBe(4096);
+		expect(udpLimit(runInNewContext("({ edns: { udpSize: 4096 } })"), { cap: 4096 })).toBe(4096);
+		expect(encodeForTransport(msg, { transport: "udp", cap: 4096, query: runInNewContext("({ edns: { udpSize: 4096 } })") }).limit).toBe(4096);
 	});
 
 	it("options from another realm are plain data too (CLDMV/digby#39, round 8)", () => {

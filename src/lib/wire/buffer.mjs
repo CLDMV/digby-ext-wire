@@ -37,6 +37,8 @@ const DATAVIEW_GETTERS = [DATAVIEW_BUFFER, DATAVIEW_BYTE_OFFSET, DATAVIEW_BYTE_L
 const SAB_BYTE_LENGTH = Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength").get;
 /** The `byteLength` getter off `ArrayBuffer.prototype`: it throws on a SharedArrayBuffer, so it never accepts one (CLDMV/digby#39). */
 const AB_BYTE_LENGTH = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
+/** The typed-array `Symbol.toStringTag` getter, off `%TypedArray%.prototype`: it succeeds only on an object carrying the TypedArray internal slot — from any realm, under any prototype swap — and answers with that array's tag, so a Uint8Array is recognised by brand, never by `instanceof` (CLDMV/digby#39, round 9). */
+export const TYPED_ARRAY_TAG = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
 
 /**
  * A view's buffer, byteOffset and byteLength, read through the intrinsic getters so no own `buffer`, `byteOffset` or
@@ -217,25 +219,29 @@ function snapshotGuarded(v, where) {
 }
 
 /**
- * Whether `o` is a plain object, by shape rather than realm (CLDMV/digby#39, round 8): its prototype is `null`, or is some
- * realm's `Object.prototype` — an object whose own `constructor` is a function named `Object` whose `prototype` is that
- * object. Forgeable (round 9): any prototype whose own `constructor` is such a function passes it, and a bound on that
- * prototype is silently dropped by the copy — the options path no longer uses it, and udpLimit's query stops using it
- * when its guarded reader lands; kept until then for that one caller.
- * @param {unknown} o
- * @returns {boolean}
+ * Guard and copy the query the two transport entries read (CLDMV/digby#39, round 9): the one guarded reader both
+ * {@link udpLimit} and encodeForTransport go through — encodeForTransport passes its copy's query back through it — so
+ * the two entries cannot disagree. `null` and `undefined` mean "no query"; any other non-object is refused
+ * VALUE_OUT_OF_RANGE (udpLimit("x") used to return 512); an array is refused (its non-index properties would be
+ * silently dropped by the copy); and the shape rules are {@link snapshotValue}'s, at every depth — prototype-borne,
+ * hidden, symbol-keyed and non-index keys refused, a SharedArrayBuffer form refused NOT_CLONEABLE, a Proxy whose traps
+ * throw or a revoked Proxy NOT_CLONEABLE — and only the snapshot is read afterwards: a getter is read once, by the
+ * snapshot, so an object-then-undefined flip cannot split the check from the use.
+ * @param {unknown} query
+ * @param {string} what
+ * @returns {object | null}
  */
-export function isPlainObject(o) {
+export function snapshotQuery(query, what) {
+	if (query === null || query === undefined) return null;
+	if (typeof query !== "object") fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object, got ${describe(query)}`);
+	let isArray;
 	try {
-		if (o === null || typeof o !== "object") return false;
-		const proto = Object.getPrototypeOf(o);
-		if (proto === null) return true;
-		const d = Object.getOwnPropertyDescriptor(proto, "constructor");
-		const ctor = d !== undefined && "value" in d ? d.value : undefined;
-		return typeof ctor === "function" && ctor.name === "Object" && ctor.prototype === proto;
+		isArray = Array.isArray(query);
 	} catch {
-		return false;
+		fail(WireErrorCode.NOT_CLONEABLE, `${what} is not structured-clone data (CLDMV/digby#39)`);
 	}
+	if (isArray) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object, not an array`);
+	return cloneInput(snapshotGuarded(query, what), what);
 }
 
 /**
@@ -308,23 +314,6 @@ export function cloneOptions(options, what) {
 	// and its bound was silently dropped — and once only own keys are read, the realm of the prototype does not
 	// matter: plain options from another realm, JSON-parsed, frozen, structuredClone'd or null-prototype ones all work.
 	return cloneInput(snapshotGuarded(options, what), what);
-}
-
-/**
- * Read one field of a caller object without ever throwing (CLDMV/digby#39): a getter that throws, a Proxy whose traps
- * throw, and a revoked Proxy are the NOT_CLONEABLE refusal; a missing property reads as undefined. Each call reads the
- * field exactly once, so a getter cannot show the check one value and the use another.
- * @param {unknown} o
- * @param {string} key
- * @returns {unknown}
- */
-export function readField(o, key) {
-	try {
-		return o?.[key];
-	} catch (err) {
-		if (err instanceof WireError) throw err;
-		fail(WireErrorCode.NOT_CLONEABLE, "the input is not structured-clone data (CLDMV/digby#39)");
-	}
 }
 
 /** A forward-only reader over a message, bounded by `end`. */
