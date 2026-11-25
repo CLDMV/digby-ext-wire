@@ -139,6 +139,28 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 		}
 	}, 120_000);
 
+	// CLDMV/digby#44: a message that already fits must cost exactly one plain encode — the per-set trial
+	// machinery never runs — and a message that fits EXACTLY at its limit takes that same single pass. The
+	// count is of writes (`wireCounters.recordWrites`), not time.
+	it("costs one plain encode when the message fits: record writes equal the record count (CLDMV/digby#44)", () => {
+		const sets = 50;
+		const perSet = 20;
+		const m = interleaved(sets, perSet);
+		// a fitting encode: the plain attempt IS the output, so each record is written exactly once
+		wireCounters.recordWrites = 0;
+		const r = encodeCapped(m, { limit: 65535 });
+		expect(r.truncated).toBe(false);
+		expect(wireCounters.recordWrites, `${wireCounters.recordWrites} writes for ${sets * perSet} records`).toBe(sets * perSet);
+		// the fitting output is byte-identical to the plain encode (nothing drops, so nothing can differ)
+		expect(r.bytes).toEqual(encodeMessage(m));
+		// a message that fits EXACTLY at its limit still takes the single-pass path
+		const full = encodeMessage(m).length;
+		wireCounters.recordWrites = 0;
+		const exact = encodeCapped(m, { limit: full });
+		expect(exact.truncated).toBe(false);
+		expect(wireCounters.recordWrites, `exactly at the limit: ${wireCounters.recordWrites} writes for ${sets * perSet} records`).toBe(sets * perSet);
+	}, 120_000);
+
 	it("keeps the truncating encode's record writes flat from 5,000 to 320,000 records (CLDMV/digby#43)", () => {
 		// the scratch encodes are part of the counted work: the counter must exist on the codec's counters surface,
 		// not be conjured by this test's own reset assignment
