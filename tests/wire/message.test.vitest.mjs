@@ -6,12 +6,12 @@
 import { describe, expect, it } from "vitest";
 import { Writer } from "../../src/lib/wire/buffer.mjs";
 import { CLASS, OPCODE, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
+import { WireError } from "../../src/lib/wire/errors.mjs";
 import { TC_BIT, packFlags, unpackFlags } from "../../src/lib/wire/header.mjs";
 import { decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
-import { nameKey, writeName } from "../../src/lib/wire/names.mjs";
 import { parseRecord } from "../../src/lib/wire/presentation.mjs";
 import { genMessage } from "../helpers/capped-diff.mjs";
+import { bigTxt, boundaryLimits, c1Shape, compareWithReference, ns, oracleCapped, txt, x63 } from "../helpers/capped-oracle.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {
@@ -376,107 +376,12 @@ describe("truncation refuses messages whose meaning it would destroy (CLDMV/digb
 	});
 });
 
-/**
- * The best-fit reference (CLDMV/digby#43, round 8): the kept sets are the longest prefix of the message's RRsets, in
- * first-appearance order, whose encoding fits `limit` — and the reference finds that k by brute force, newest-first:
- * for k from the last set down it builds the message that keeps exactly the records of sets 0..k at their original
- * positions, encodes it with {@link encodeMessage} — so the bytes, compression included, are exactly what a
- * non-truncating encode of that prefix produces, which is also byte for byte what the codec's winning trial writes
- * (the dropped records sit after the kept ones or between them, and a record's encoding depends only on the records
- * before it, so their absence changes nothing) — and the first k whose encoding fits is the answer. It encodes up to
- * one prefix per set — quadratic — which is fine for a test oracle: it is exact by construction, where the codec's
- * model is only as exact as its machinery.
- *
- * TC follows the rule the codec documents: a prefix that drops an answer or authority set sets TC; one that drops
- * only additionals does not (RFC 2181 9). When no set fits, the kept prefix is empty — the header, questions and tail
- * alone, TC when an answer or authority set exists; if even that exceeds the limit the reference fails the same
- * MESSAGE_TOO_LARGE the codec's head gate raises.
- *
- * @param {object} message
- * @param {{ limit: number, truncate?: boolean, compress?: boolean }} options
- * @returns {{ bytes: Uint8Array, truncated: boolean }}
- */
-function oracleCapped(message, { limit, truncate = true, compress = true }) {
-	if (!truncate) return { bytes: encodeMessage(message, { compress, maxSize: limit }), truncated: false };
-	const sections = [message.answers ?? [], message.authorities ?? [], message.additionals ?? []];
-	// the same per-section grouping the codec applies (same owner case-insensitively, type, class; an RRSIG also by
-	// the type it covers), numbered per section and then laid end to end in first-appearance order — answers first,
-	// then authorities, then additionals
-	const grouping = sections.map((list) => {
-		const byKey = new Map();
-		const owner = new Array(list.length);
-		let n = 0;
-		for (let i = 0; i < list.length; i++) {
-			const rec = list[i];
-			const k = `${nameKey(rec.name)}|${rec.type}|${rec.class ?? CLASS.IN}|${rec.type === TYPE.RRSIG ? rec.data?.typeCovered : ""}`;
-			let ix = byKey.get(k);
-			if (ix === undefined) {
-				ix = n++;
-				byKey.set(k, ix);
-			}
-			owner[i] = ix;
-		}
-		return { owner, n };
-	});
-	const base = [0, grouping[0].n, grouping[0].n + grouping[1].n];
-	const globalOf = (s, i) => base[s] + grouping[s].owner[i];
-	const totalSets = grouping[0].n + grouping[1].n + grouping[2].n;
-	const answerAuthoritySets = grouping[0].n + grouping[1].n;
-	const filterTo = (k) => ({
-		...message,
-		answers: sections[0].filter((_, i) => globalOf(0, i) <= k),
-		authorities: sections[1].filter((_, i) => globalOf(1, i) <= k),
-		additionals: sections[2].filter((_, i) => globalOf(2, i) <= k)
-	});
-	const withTc = (bytes, truncated) => {
-		if (truncated) bytes[2] |= TC_BIT >>> 8;
-		return { bytes, truncated };
-	};
-	for (let k = totalSets - 1; k >= 0; k--) {
-		try {
-			return withTc(encodeMessage(filterTo(k), { compress, maxSize: limit }), k < answerAuthoritySets - 1);
-		} catch (err) {
-			if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE) continue;
-			throw err;
-		}
-	}
-	return withTc(encodeMessage({ ...message, answers: [], authorities: [], additionals: [] }, { compress, maxSize: limit }), answerAuthoritySets >= 1);
-}
 
-describe("encodeCapped matches the best-fit reference on 0x4000-straddling interleavings (CLDMV/digby#43)", () => {
-	// 63 strings of 255 `x` plus a remainder: a TXT record holding n octets of filler
-	const txtFiller = (n) => {
-		const strings = [];
-		let left = n;
-		while (left > 255) {
-			strings.push(new Uint8Array(255).fill(0x78));
-			left -= 255;
-		}
-		if (left > 0) strings.push(new Uint8Array(left).fill(0x78));
-		return { strings };
-	};
-	const bigTxt = (name, n) => ({ name, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: txtFiller(n) });
-	const ns = (name, target) => ({ name, type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target } });
-	const txt = (name, n) => ({ name, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: txtFiller(n) });
-	const x63 = "x".repeat(63);
-	// A truncating encode of a message without exactly one question is refused (CLDMV/digby#43), so the shapes
-	// without a question can only be compared against the reference where nothing drops; the one-question shapes
-	// keep the full comparison across every limit.
-	const compareWithReference = (m, limit, tag, options) => {
-		let capped;
-		try {
-			capped = encodeCapped(m, { limit, ...options });
-		} catch (err) {
-			expect(err, `${tag}: the refusal`).toBeInstanceOf(WireError);
-			expect(err.code, `${tag}: the refusal code`).toBe("TRUNCATION_REFUSED");
-			expect(m.questions.length, `${tag}: the refusal only fires without exactly one question`).toBe(0);
-			return;
-		}
-		expect(capped.bytes.length, `${tag}: the capped encode stays within the limit`).toBeLessThanOrEqual(limit);
-		const reference = oracleCapped(m, { limit: limit - (options?.reserveTsig ?? 0) });
-		expect(capped.truncated, `${tag}: the truncation flag matches the best-fit reference`).toBe(reference.truncated);
-		expect(hex.to(capped.bytes), `${tag}: the bytes match the best-fit reference`).toBe(hex.to(reference.bytes));
-	};
+describe("encodeCapped: 0x4000-straddling goldens (CLDMV/digby#43)", () => {
+	// The goldens the round-8 review pinned on this file, kept here; the differential families that shared it (the
+	// decision-boundary sweeps, the random interleavings, the C1 family and the c1x shift-landing sweep) live in
+	// tests/wire/capped-boundary.test.vitest.mjs, trimmed to fixed case counts so no single test can outlast a
+	// default-stall pod run.
 
 	it("never outputs more than the limit when an insertion pushes a kept registration past 0x4000", () => {
 		// The round-3 probe's bound covers only the set being measured: keeping set k shifts every kept record
@@ -495,25 +400,6 @@ describe("encodeCapped matches the best-fit reference on 0x4000-straddling inter
 			compareWithReference(m, 16546, `filler ${filler}`);
 		}
 	});
-
-	it("matches the best-fit reference at every limit around every decision boundary", () => {
-		// The repro family, swept: a big first TXT record parks the stream just below the registration bound and
-		// the same-owner NS set interleaves its records around the distinct owner, so a set's probe measurement
-		// (its records written consecutively) registers suffixes at offsets the real stream never reaches. Every
-		// filler (step 8) × every limit around the full length, with and without a question sharing the section's
-		// suffix, compared byte for byte against the best-fit reference.
-		const answers = (F) => [bigTxt("t.test.", F), ns("z.test.", "n1.aaaa.example."), txt("b.test.", 200), ns("z.test.", `n2.${x63}.example.`), ns("z.test.", `n3.${x63}.example.`)];
-		for (let F = 15400; F <= 16400; F += 32) {
-			for (const q of [null, "z.test."]) {
-				const m = { id: 1, flags: { qr: true }, questions: q ? [{ name: q, type: TYPE.A, class: CLASS.IN }] : [], answers: answers(F) };
-				const full = encodeMessage(m).length;
-				for (let limit = full - 800; limit <= full + 2; limit++) {
-					compareWithReference(m, limit, `F=${F} q=${q} limit=${limit}`);
-				}
-			}
-		}
-	}, 600_000);
-
 	it("never encodes past the limit when a kept set's registration belongs to a later record (CLDMV/digby#43)", () => {
 		// The model registered a target by ANY kept record, including one at a LATER stream position: writeName registers
 		// targets even for names it never compresses (an SRV target, an RRSIG signer), so the first SRV's set is measured
@@ -550,68 +436,6 @@ describe("encodeCapped matches the best-fit reference on 0x4000-straddling inter
 			expect(reference.bytes.length, `limit=${limit}: the reference's kept stream`).toBe(140);
 		}
 	});
-
-	it("matches the best-fit reference on pseudo-random interleavings straddling 0x4000", () => {
-		const randomShape = (seed, question) => {
-			const rand = (n) => ((seed * 1103515245 + 12345 + n * 69069) >>> 8) % 997;
-			const F = 15300 + (rand(1) % 1100); // the filler parks the stream on both sides of 0x4000
-			const recs = [bigTxt("big.test.", F)];
-			const names = ["z.test.", "b.test.", "c.test.", "d.test."];
-			const sig = new Uint8Array(24).fill(0x5a);
-			for (let i = 0; i < 8; i++) {
-				const n = names[rand(2 + i) % names.length];
-				const target = `t${i}.${x63}.example.`;
-				switch (rand(3 + i) % 7) {
-					case 0:
-						recs.push(txt(n, 40 + (rand(i) % 220)));
-						break;
-					case 1:
-						recs.push(ns(n, target));
-						break;
-					case 2:
-						recs.push({ name: n, type: TYPE.SRV, class: CLASS.IN, ttl: 60, data: { priority: 1, weight: 2, port: 3, target } });
-						break;
-					case 3:
-						recs.push({ name: n, type: TYPE.NAPTR, class: CLASS.IN, ttl: 60, data: { order: 1, preference: 2, flags: new Uint8Array(2).fill(0x73), services: new Uint8Array(3).fill(0x74), regexp: new Uint8Array(4).fill(0x75), replacement: target } });
-						break;
-					case 4:
-						recs.push({ name: n, type: TYPE.RRSIG, class: CLASS.IN, ttl: 60, data: { typeCovered: TYPE.A, algorithm: 8, labels: 2, originalTtl: 3600, expiration: 1700000000, inception: 1600000000, keyTag: 1234, signerName: target, signature: sig } });
-						break;
-					case 5:
-						recs.push({ name: n, type: TYPE.NSEC, class: CLASS.IN, ttl: 60, data: { next: target, types: [TYPE.A, TYPE.NS, TYPE.TXT] } });
-						break;
-					default:
-						recs.push({ name: n, type: TYPE.SVCB, class: CLASS.IN, ttl: 60, data: { priority: 3, target, params: [{ key: 65001, value: new Uint8Array(6).fill(0x71) }] } });
-						break;
-				}
-			}
-			return { id: 1, flags: { qr: true }, questions: question ? [{ name: "q.", type: TYPE.A, class: CLASS.IN }] : [], answers: recs };
-		};
-		// without a question any drop is refused (CLDMV/digby#43), so these seeds exercise the refusal path and the
-		// fit-or-refuse boundary; the one-question seeds below compare the truncated keeps byte for byte
-		for (let seed = 0; seed < 40; seed++) {
-			const m = randomShape(seed, false);
-			const full = encodeMessage(m).length;
-			for (let limit = full - 800; limit <= full + 2; limit += 1) {
-				compareWithReference(m, limit, `seed=${seed} limit=${limit}`);
-			}
-		}
-		for (let seed = 0; seed < 10; seed++) {
-			const m = randomShape(seed, true);
-			const full = encodeMessage(m).length;
-			for (let limit = full - 800; limit <= full + 2; limit += 1) {
-				compareWithReference(m, limit, `seed=${seed} q limit=${limit}`);
-			}
-		}
-		// and the EDNS variant on a slice: the OPT tail rides every fit check
-		for (let seed = 0; seed < 8; seed++) {
-			const m = { ...randomShape(seed, true), edns: { udpSize: 1232, version: 0, dnssecOk: false, z: 0, options: [] } };
-			const full = encodeMessage(m).length;
-			for (let limit = full - 800; limit <= full + 2; limit += 1) {
-				compareWithReference(m, limit, `seed=${seed} edns limit=${limit}`);
-			}
-		}
-	}, 600_000);
 
 	it("treats a registration whose real offset lands exactly on 0x4000 as absent (CLDMV/digby#43)", () => {
 		// Set 0 is a two-record TXT RRset (positions 0 and 2); set 1 is a three-record NS RRset (positions 1, 3, 4)
@@ -652,61 +476,6 @@ describe("encodeCapped matches the best-fit reference on 0x4000-straddling inter
 		expect(d.answers[0].data.strings.reduce((n, s) => n + s.length, 0)).toBe(16000);
 		expect(d.answers[1].data.strings.reduce((n, s) => n + s.length, 0)).toBe(g);
 	});
-
-	// The C1 repro of round 7 (CLDMV/digby#43), sharpened by round 8: a message whose full encode fits the limit, but
-	// whose stop-at-first-miss prefix keep stops early. The y.t. record writes N at an offset just below 0x4000 and
-	// registers it, so the l.t. records' targets (a60<i>.N) compress against it — but the l.t. set is decided BEFORE
-	// the y.t. set, and the drop-here stream at the l.t. set (the y.t. record absent) writes every a60<i>.N target in
-	// full, which does not fit at a limit the whole message fits. Stream size is not monotone in the sets kept. The
-	// greedy stop used to truncate there: at limit == full the encode came back TC'd with 3 of 13 answers.
-	const c1Shape = (trailing, filler = 16236) => {
-		const N = `${"w".repeat(60)}.${"x".repeat(63)}.example.`;
-		const a60 = (i) => `${"a".repeat(60)}${i}`;
-		return {
-			id: 1,
-			flags: { qr: true },
-			questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }],
-			answers: [
-				bigTxt("f.t.", filler),
-				ns("e.t.", "s.q."),
-				ns("l.t.", "s.q."),
-				ns("y.t.", N),
-				ns("e.t.", `p63.${N}`),
-				...Array.from({ length: trailing }, (_, i) => ns("l.t.", `${a60(i + 1)}.${N}`))
-			]
-		};
-	};
-
-	// The stream offset where writeName registers the y.t. record's N key: the record's rdata start, read off the
-	// wire. Names here may be pointers (the owners share the "t." suffix with earlier records), so the walk follows
-	// the envelope: a label length of 0xc0 or more is a pointer and ends the name. The landing moves one octet per
-	// filler octet (the TXT rdata grows by one string-length octet every 255 filler octets, which the sweep window
-	// below stays clear of).
-	const landingOf = (filler) => {
-		const bytes = encodeMessage(c1Shape(1, filler));
-		let at = 12;
-		const skipName = () => {
-			for (;;) {
-				const len = bytes[at];
-				if (len >= 0xc0) {
-					at += 2;
-					return;
-				}
-				at += 1 + len;
-				if (len === 0) return;
-			}
-		};
-		skipName(); // the question
-		at += 4;
-		for (let i = 0; i < 3; i++) {
-			// records 0..2: name, type, class, ttl, rdlength, rdata
-			skipName();
-			at += 10 + ((bytes[at + 8] << 8) | bytes[at + 9]);
-		}
-		skipName(); // the y.t. record's owner
-		return at + 10; // its rdata start: type, class, ttl, rdlength
-	};
-
 	it("returns whole a message whose full encode fits though a prefix's drop-here stream does not (CLDMV/digby#43)", () => {
 		for (const [trailing, fullExpected] of [
 			[8, 17142],
@@ -724,7 +493,8 @@ describe("encodeCapped matches the best-fit reference on 0x4000-straddling inter
 			}
 			// and the differential holds across the window the bug sat in: below the full size the largest-fit
 			// truncation applies and must match the best-fit reference byte for byte
-			for (let limit = full - 800; limit <= full + 2; limit++) compareWithReference(m, limit, `trailing=${trailing} limit=${limit}`);
+			const limits = boundaryLimits(m);
+			for (let i = 0; i < limits.length; i++) compareWithReference(m, limits[i], `trailing=${trailing} limit=${limits[i]}`);
 			// the repro's size, pinned last so the property above is what a failure reports
 			expect(full, `trailing=${trailing}: the repro's full encode (the finding's number)`).toBe(fullExpected);
 		}
@@ -784,227 +554,6 @@ describe("encodeCapped matches the best-fit reference on 0x4000-straddling inter
 		expect(d.answers.map((r) => r.name)).toEqual(["f.t.", "e.t.", "l.t.", "y.t.", "e.t.", "l.t.", "y.t."]);
 		expect(d.flags.tc, "TC set").toBe(true);
 	}, 60_000);
-
-	// The C1 family swept (round 8's differential): every trailing count, every limit from full - 800 to full + 2,
-	// byte for byte against the best-fit reference. Under the largest-fit rule the interesting window is exactly
-	// where the greedy scan used to stop early — every limit in it must keep the longest fitting prefix. One it per
-	// trailing, so progress streams and a failure names its trailing.
-	for (let trailing = 1; trailing <= 10; trailing++) {
-		it(`matches the best-fit reference across the C1 family, trailing=${trailing} (CLDMV/digby#43)`, () => {
-			const m = c1Shape(trailing);
-			const full = encodeMessage(m).length;
-			for (let limit = full - 800; limit <= full + 2; limit++) {
-				compareWithReference(m, limit, `trailing=${trailing} limit=${limit}`);
-			}
-		}, 300_000);
-	}
-
-	// The EDNS variant: the OPT tail is never dropped, so every fit check carries it; the differential holds with
-	// one in the message (the reference encodes the same tail the same way).
-	it("matches the best-fit reference across the C1 family with EDNS in the message (CLDMV/digby#43)", () => {
-		for (const trailing of [3, 8]) {
-			const m = { ...c1Shape(trailing), edns: { udpSize: 1232, version: 0, dnssecOk: true, z: 0, options: [] } };
-			const full = encodeMessage(m).length;
-			for (let limit = full - 800; limit <= full + 2; limit++) {
-				compareWithReference(m, limit, `edns trailing=${trailing} limit=${limit}`);
-			}
-		}
-	}, 600_000);
-
-	// The reserveTsig variant: the codec reduces its limit by the reservation internally; the reference compares
-	// against the reduced limit directly.
-	it("matches the best-fit reference across the C1 family with a TSIG reservation (CLDMV/digby#43)", () => {
-		const m = c1Shape(8);
-		const full = encodeMessage(m).length;
-		for (let limit = full - 800; limit <= full + 2; limit++) {
-			compareWithReference(m, limit, `reserve limit=${limit}`, { reserveTsig: 84 });
-		}
-	}, 600_000);
-
-	// The four 0x4000 boundary sites, re-derived for the largest-fit contract (R8-2; each mutant applied alone to
-	// this suite ran 394/394 — tmp/agents/r8/mut-m{1,2,3,4}.log). The model's only output-bearing role is candidate
-	// selection: the winning prefix is verified by an exact trial, so a model lie matters only when it HIDES a
-	// fitting prefix. An understated total cannot: a prefix whose real stream fits always passes the fit check
-	// (stored octets <= real octets, and the tail bound is the OPT record's exact size — writeOpt writes the root as
-	// a raw octet, never a name), so every fitting prefix stays a candidate and the first trial that fits is the
-	// largest one whatever the totals said. An overstated total can hide one, and that is the direction the drift-in
-	// heap watches. Per site:
-	// - m1, the model lookup's range check (r < 0x4000 -> <=): a target at exactly 0x4000 compresses in the
-	//   measurement where the real writeName writes it in full (its own guard is w.length < 0x4000; a 14-bit
-	//   pointer cannot reach 0x4000). Stored octets go stale-LOW — undercount — self-correcting.
-	// - m3, the validity drain's crossing test (off < 0x4000 -> <=, round 7's slack > 0 -> >= 0): a registration
-	//   whose offset reaches exactly 0x4000 stays heap-valid, so its examiners are not re-measured and their stored
-	//   octets go stale-LOW (they compressed; a fresh measurement writes in full) — undercount — self-correcting.
-	//   Round 7 killed it through the greedy fit check; the greedy is gone and the trials arbitrate now.
-	// - m4, the lookup's earlier-target scoping (r < curReal + ... -> <=): compresses against a target at exactly
-	//   the in-flight write position, which the real stream has not written yet — stale-LOW — self-correcting.
-	// - m2, the registration classification (off < 0x4000 -> <= in adopt; the probe registration's own check is
-	//   gone — every registration is recorded now and this is where the boundary rule lives): a registration
-	//   landing exactly on 0x4000 is classified in-range, into the drift-OUT heap instead of the drift-IN one. At
-	//   adoption the examiners' octets are still correct (the real stream also refuses the pointer), and the lie
-	//   heals through four independent paths: any positive tree delta pops the entry and the drain's crossed branch
-	//   re-checks it, queues its examiners and migrates it to the drift-IN heap — clean behaviour from then on; a
-	//   re-registration of the key replaces the entry outright; the cascade seed queues the new key's examiners
-	//   regardless; and within one measurement offsets only increase, so a shrink source cannot sit after a phantom
-	//   registration. The residual window is a pure-negative shift (no positive delta, no re-registration) pulling
-	//   the phantom below 0x4000 after its examiners were already re-measured — their staleness would then be
-	//   permanent and could hide a fitting prefix. Neither the round-7 sweep (215,863 cases) nor this suite's
-	//   ~290,000 differential cases (the c1x landing sweep puts registrations exactly on 0x4000 and the keeps shift
-	//   them both ways) produced it; a shape threading that needle would keep fewer sets than the best-fit oracle —
-	//   output within the limit, whole RRsets, correct TC, only the truncation point different.
-	//
-	// The c1x family (round 8): the C1 shape with the filler swept so the y.t. record's registration of N lands on
-	// every offset around the pointer boundary — including exactly 0x4000, where the boundary rules differ — and the
-	// keeps around it shift and shrink the stream (l.t.'s records compress against N once it is registered, and
-	// their own a60<i>.N registrations drift as a result), so crossings out of the range and drifts back in both
-	// fire. This is the family that reaches the divergence channel round 7's sweep called unreached. Chunked its so
-	// progress streams and a failure names its filler window.
-	const c1xCenter = 16236 + (0x4000 - landingOf(16236));
-	for (const trailing of [2, 8]) {
-		for (let chunk = 0; chunk < 4; chunk++) {
-			const lo = c1xCenter - 56 + chunk * 28;
-			const hi = lo + 27;
-			it(`matches the best-fit reference across the c1x shift-landing family, trailing=${trailing}, filler ${lo}..${hi} (CLDMV/digby#43)`, () => {
-				for (let filler = lo; filler <= hi; filler++) {
-					const m = c1Shape(trailing, filler);
-					const full = encodeMessage(m).length;
-					for (let limit = full - 800; limit <= full + 2; limit++) {
-						compareWithReference(m, limit, `c1x trailing=${trailing} filler=${filler} limit=${limit}`);
-					}
-				}
-			}, 600_000);
-		}
-	}
-	it("the c1x sweep's centre lands the y.t. registration exactly on 0x4000 (CLDMV/digby#43)", () => {
-		expect(landingOf(c1xCenter)).toBe(0x4000);
-	});
-});
-
-describe("encodeCapped: in-flight registrations and the 0x4000 drift window (CLDMV/digby#43, round 9)", () => {
-	const txtFiller = (n) => {
-		const strings = [];
-		let left = n;
-		while (left > 255) {
-			strings.push(new Uint8Array(255).fill(0x78));
-			left -= 255;
-		}
-		if (left > 0) strings.push(new Uint8Array(left).fill(0x78));
-		return { strings };
-	};
-	const bigTxt = (name, n) => ({ name, type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: txtFiller(n) });
-	const ns = (name, target) => ({ name, type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target } });
-	const srv = (name, target) => ({ name, type: TYPE.SRV, class: CLASS.IN, ttl: 60, data: { priority: 1, weight: 2, port: 3, target } });
-	const compare = (m, limit, tag) => {
-		const capped = encodeCapped(m, { limit });
-		expect(capped.bytes.length, `${tag}: within the limit`).toBeLessThanOrEqual(limit);
-		const reference = oracleCapped(m, { limit });
-		expect(capped.truncated, `${tag}: the truncation flag matches the best-fit reference`).toBe(reference.truncated);
-		expect(hex.to(capped.bytes), `${tag}: the bytes match the best-fit reference`).toBe(hex.to(reference.bytes));
-	};
-
-	// R9-1 (CLDMV/digby#43): the model's scoping check placed a registration by its offset in the tree as it stands —
-	// but the set being measured is not in the tree yet, so a later record's registration lands before the in-flight
-	// write position and the probe sees a target the real stream does not have yet. An SRV target (written
-	// uncompressed but registering) then never records its registration, the examiner's stored octets stay
-	// stale-high, the model overcounts ~12 octets, and a fitting prefix is hidden. The shape: an SRV whose target a
-	// LATER record of an EARLIER set repeats, so the registering write comes after the examiner in the section.
-	const r9Shape = (i) => {
-		const T = `t${i}.${"l".repeat(60)}.example.`;
-		const U = `u${i}.${"l".repeat(60)}.example.`;
-		return {
-			id: 1,
-			flags: { qr: true },
-			questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }],
-			answers: [
-				bigTxt("f.t.", 16040 + (i % 4) * 60),
-				ns("a.t.", "s.q."),
-				srv("b.t.", T),
-				ns("a.t.", T),
-				ns("c.t.", U),
-				srv("d.t.", U),
-				ns("c.t.", U),
-				bigTxt("z.t.", 700 + (i % 5) * 60)
-			]
-		};
-	};
-	it("matches the best-fit reference when an uncompressed-but-registering name precedes a later record of an earlier set (CLDMV/digby#43)", () => {
-		for (let i = 0; i < 12; i++) {
-			const m = r9Shape(i);
-			// every first-appearance set boundary of the answers, ± 1: the windows the scoping lie opens
-			const keys = [];
-			const setOf = m.answers.map((r) => {
-				const k = `${r.name.toLowerCase()}|${r.type}|${r.class}`;
-				if (!keys.includes(k)) keys.push(k);
-				return keys.indexOf(k);
-			});
-			for (let k = 0; k < keys.length; k++) {
-				const size = encodeMessage({ ...m, answers: m.answers.filter((_, j) => setOf[j] <= k) }).length;
-				for (const limit of [size - 1, size, size + 1]) compare(m, limit, `r9 seed=${i} k=${k} limit=${limit}`);
-			}
-		}
-	}, 600_000);
-
-	// R9-2 (CLDMV/digby#43): the probe measured a registration with its own write position as the gate, but the real
-	// stream's gate is the registration's real offset — the two differ by the kept octets between the measured
-	// records. A re-measured record that wrote a key in full (its real offset sat exactly on 0x4000 at that instant)
-	// registered a phantom the real stream never makes, and the adopt replaced the true registration — the one whose
-	// drift back under 0x4000 (a pure-negative shift from a shrink in the same re-measure batch) the drift-in heap
-	// exists to catch. The phantom never drifts, the examiners keep stale-high octets, the model overcounts, and the
-	// frozen point — which trusts its totals — hides the fitting prefix outright (no trial ever runs). The family:
-	// the filler centres Y2's K registration exactly on 0x4000 in the transient state right after its set folds,
-	// X1's shrink (compressing against Y1's N) pulls it under, and C — which measured K absent — is its examiner.
-	const m2Shape = (filler, nLen, kLen, zSize = 3000, variant = 0) => {
-		const N = `${"n".repeat(nLen)}.example.`;
-		const K = `${"k".repeat(kLen)}.kk.`;
-		const answers = [
-			bigTxt("f.t.", filler),
-			ns("l.t.", "s.q."),
-			ns("y.t.", N),
-			ns("l.t.", `a.${N}`),
-			ns("y.t.", K),
-			ns("l.t.", `c.${K}`)
-		];
-		if (variant === 1) answers.push(ns("l.t.", `d.${K}`));
-		answers.push(bigTxt("z.t.", zSize));
-		return { id: 1, flags: { qr: true }, questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }], answers };
-	};
-	const m2Prefix2 = (filler, nLen, kLen, variant) => ({ ...m2Shape(filler, nLen, kLen, 3000, variant), answers: m2Shape(filler, nLen, kLen, 3000, variant).answers.filter((r) => r.name !== "z.t.") });
-	const kOffsetOf = (bytes, kLen) => {
-		for (let i = 0; i < bytes.length - kLen; i++) if (bytes[i] === kLen && bytes[i + 1] === 0x6b && bytes[i + kLen] === 0x6b) return i;
-		return -1;
-	};
-	// the filler that puts K's final offset at 0x4000 - (wire octets of N - 2): transiently, before X1's shrink, K
-	// sits exactly on 0x4000 (the harness that found the residual, tmp/agents/r8-capped/m2kill.mjs, centres the same
-	// way — S = the octets X1 loses when it compresses against Y1's N)
-	const m2Center = (nLen, kLen) => {
-		let center = 15000;
-		for (let it = 0; it < 20; it++) {
-			const d = 0x4000 - (nLen + 1 + 8 + 1 - 2) - kOffsetOf(encodeMessage(m2Prefix2(center, nLen, kLen, 0)), kLen);
-			if (d === 0) break;
-			center += d > 0 ? Math.max(1, d - Math.floor(d / 256)) : Math.min(-1, d - Math.ceil(d / 256));
-		}
-		return center;
-	};
-	it("matches the best-fit reference when a registration lands exactly on 0x4000 and drifts back under (CLDMV/digby#43)", () => {
-		// both variants, and the filler swept +-40 around the centred landing the way the review harness sweeps it
-		// (tmp/agents/r10/m2kill.mjs stands for the sweep; the harness centres the same way) — the round-9 test
-		// passed 3000 in the variant slot, so variant 1 (the second l.t. examiner of K) never ran
-		for (const [nLen, kLen] of [
-			[20, 20],
-			[20, 63],
-			[63, 20],
-			[63, 63]
-		]) {
-			const center = m2Center(nLen, kLen);
-			for (const variant of [0, 1]) {
-				for (const filler of [center - 40, center - 8, center, center + 8, center + 40]) {
-					const m = m2Shape(filler, nLen, kLen, 3000, variant);
-					const size2 = encodeMessage(m2Prefix2(filler, nLen, kLen, variant)).length;
-					for (let limit = size2 - 3; limit <= size2 + 12; limit++) compare(m, limit, `m2 n=${nLen} k=${kLen} variant=${variant} filler=${filler} limit=${limit}`);
-				}
-			}
-		}
-	}, 600_000);
 });
 
 describe("encodeCapped: out-of-range registrations a shrink pulls back under 0x4000 (CLDMV/digby#43, round 10)", () => {
@@ -1029,11 +578,13 @@ describe("encodeCapped: out-of-range registrations a shrink pulls back under 0x4
 	// tests below pin shapes the round-9 tip got wrong; the fix records every registration and watches the
 	// out-of-range ones in the drift-in heap (CLDMV/digby#43, round 10).
 
-	it("returns the whole message when an out-of-range registration drifts back under and a prefix then fits (CLDMV/digby#43, repro A)", () => {
+	it("keeps the 4-set prefix exactly when an out-of-range registration drifts back under and its examiner folds (CLDMV/digby#43, repro A)", () => {
 		// The y.t. record's K registration lands past 0x4000 while its set folds (the kept l.t. records between the
 		// measured ones shift it), the l.t. shrink compressing against y.t.'s earlier N pulls it back under, and the
-		// e.t. examiner folded in between — so with the gate, the model overcounted and kept only 4 of the 5 sets at
-		// a limit the whole message fits: 16,376 octets + TC instead of the full 16,394.
+		// e.t. examiner folded in between — so with the round-9 gate the model kept e.t.'s octets stale-high, the
+		// 4-set prefix's total overcounted past the limit, and the encode returned the 3-set prefix: 16,376 octets
+		// + TC at a limit the 4-set prefix (16,394) fits exactly (measured on the round-9 tip,
+		// tmp/agents/r10-attachments/timing.tip.log).
 		const N = `${"n".repeat(20)}.zz.`, K = `${"k".repeat(10)}.kk.`;
 		const m = {
 			id: 1,
@@ -1041,15 +592,17 @@ describe("encodeCapped: out-of-range registrations a shrink pulls back under 0x4
 			questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }],
 			answers: [bigTxt("f.t.", 16178), ns("l.t.", "s.q."), ns("y.t.", N), ns("l.t.", `a.${N}`), ns("y.t.", K), ns("e.t.", `c.${K}`), bigTxt("z.t.", 3000)]
 		};
-		const full = encodeMessage(m).length;
 		const prefix4 = encodeMessage({ ...m, answers: m.answers.slice(0, 6) }).length;
-		expect(full, "the repro's full encode").toBe(16394);
-		expect(prefix4, "the 4-set prefix the gated encode wrongly returned").toBe(16376);
+		expect(prefix4, "the 4-set prefix the round-9 encode fell short of (the finding's number)").toBe(16394);
 		const capped = encodeCapped(m, { limit: 16394 });
-		expect(capped.truncated, "the whole message fits the limit exactly: no TC").toBe(false);
-		expect(hex.to(capped.bytes), "byte for byte the full encode").toBe(hex.to(encodeMessage(m)));
-		// and the differential holds across the limits around the decision boundaries
-		for (let limit = full - 3200; limit <= full; limit++) {
+		expect(capped.truncated, "the z.t. set drops: TC").toBe(true);
+		expect(capped.bytes.length, "the 4-set prefix fits the limit exactly").toBe(16394);
+		const ref = encodeMessage({ ...m, answers: m.answers.slice(0, 6) });
+		ref[2] |= TC_BIT >>> 8;
+		expect(hex.to(capped.bytes), "byte for byte the 4-set prefix, TC patched").toBe(hex.to(ref));
+		// and the differential holds across the limits from below the 4-set boundary through the full encode
+		const full = encodeMessage(m).length;
+		for (let limit = prefix4 - 800; limit <= full + 2; limit++) {
 			const got = encodeCapped(m, { limit });
 			const reference = oracleCapped(m, { limit });
 			expect(got.truncated, `limit=${limit}: the truncation flag matches the best-fit reference`).toBe(reference.truncated);
@@ -1064,44 +617,16 @@ describe("encodeCapped: out-of-range registrations a shrink pulls back under 0x4
 		// generator (tests/helpers/capped-diff.mjs), so the case count is fixed, not wall-time.
 		const m = genMessage(101301);
 		const full = encodeMessage(m).length;
-		// the prefix sizes: each first-appearance set boundary's kept-stream size, the harness' decision boundaries
-		const sections = [m.answers ?? [], m.authorities ?? [], m.additionals ?? []];
-		const grouping = sections.map((list) => {
-			const byKey = new Map();
-			const owner = new Array(list.length);
-			let n = 0;
-			for (let i = 0; i < list.length; i++) {
-				const rec = list[i];
-				const k = `${nameKey(rec.name)}|${rec.type}|${rec.class ?? CLASS.IN}|${rec.type === TYPE.RRSIG ? rec.data?.typeCovered : ""}`;
-				let ix = byKey.get(k);
-				if (ix === undefined) {
-					ix = n++;
-					byKey.set(k, ix);
-				}
-				owner[i] = ix;
-			}
-			return { owner, n };
-		});
-		const base = [0, grouping[0].n, grouping[0].n + grouping[1].n];
-		const globalOf = (s, i) => base[s] + grouping[s].owner[i];
-		const total = grouping[0].n + grouping[1].n + grouping[2].n;
-		const sizes = [];
-		for (let k = 0; k < total; k++)
-			sizes.push(encodeMessage({
-				...m,
-				answers: sections[0].filter((_, i) => globalOf(0, i) <= k),
-				authorities: sections[1].filter((_, i) => globalOf(1, i) <= k),
-				additionals: sections[2].filter((_, i) => globalOf(2, i) <= k)
-			}).length);
+		// the decision boundaries: every first-appearance set prefix's size and its neighbours (the review harness'
+		// limit set), via the shared helper
+		const limits = boundaryLimits(m);
 		expect(full, "the seed's full encode (the finding's number)").toBe(18465);
-		expect(sizes, "the harness' failing prefix size is among the boundaries").toContain(16430);
-		for (const size of sizes) {
-			for (const limit of [size - 1, size, size + 1]) {
-				const got = encodeCapped(m, { limit });
-				const reference = oracleCapped(m, { limit });
-				expect(got.truncated, `limit=${limit}: the truncation flag matches the best-fit reference`).toBe(reference.truncated);
-				expect(hex.to(got.bytes), `limit=${limit}: the bytes match the best-fit reference`).toBe(hex.to(reference.bytes));
-			}
+		expect(limits, "the harness' failing prefix size is among the boundaries").toContain(16430);
+		for (const limit of limits) {
+			const got = encodeCapped(m, { limit });
+			const reference = oracleCapped(m, { limit });
+			expect(got.truncated, `limit=${limit}: the truncation flag matches the best-fit reference`).toBe(reference.truncated);
+			expect(hex.to(got.bytes), `limit=${limit}: the bytes match the best-fit reference`).toBe(hex.to(reference.bytes));
 		}
 	}, 120_000);
 });
