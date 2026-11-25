@@ -60,7 +60,7 @@ const RESERVED_TYPE = 0xffff;
  * round 7). `scratchEncodes` counts the encodes that go through a scratch writer and are thrown away: the tail's
  * uncompressed size measurement and the near-boundary tail probes of {@link tailFitsOn} (a rolled-back OPT encode is
  * not a {@link writeRecord} call, so `recordWrites` alone would hide it). `modelWork` counts every unit of the
- * truncation model's own work: each Fenwick operation (every `set` and every `prefix`/`total` call, one unit per
+ * truncation model's own work: each Fenwick operation (every `set` and every `prefix` call, one unit per
  * call, not per tree step), each validity-heap push and pop, each registration, index and queue mutation, and each
  * record the re-measure bookkeeping visits — the round-5 flip scan over the whole model was uncounted work of
  * exactly this kind, and a bound that did not see it could be cheated by moving work out of `recordWrites`
@@ -659,7 +659,6 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		const list = sections[s];
 		const { sets, owner } = rrsets(list);
 		if (sets.length === 0) continue; // nothing to keep or drop here
-		const sectionMark = w.checkpoint(); // the state before this section wrote anything: every trial rolls back to here
 		// The model is per section by construction — the tree, the target table, the disturbance index and the heaps
 		// are all created fresh below — so the exact-trial fallback is per section too (CLDMV/digby#43): a section
 		// whose model fell back decides its own prefixes by exact trials, and the next section gets the model back.
@@ -695,464 +694,431 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		let curReal = 0; // the record's first octet's offset in the drop-here stream
 		const touched = [];
 		const realOf = (entry) => sectionBase + fen.prefix(entry.rec) + entry.rel;
-			// A registration is usable as a pointer target exactly while its stream offset stays below 0x4000, and shifts
-			// move registrations both ways — so validity has to be re-checked without scanning the model per round. The
-			// registrations currently in the range sit in a lazy min-heap keyed by slack + cumPos at push, the ones out of
-			// the range in a second keyed by deficit + cumNeg at push, where deficit = offset - 0x4000 and cumNeg counts
-			// every negative octet the tree ever lost. cumPos grows by every positive octet the tree gains, so popping
-			// while the key is below cumPos finds every crossing OUT of the range and only those (a negative octet can only
-			// delay a crossing, so `positiveSince > slack` is necessary for one — CLDMV/digby#43); symmetrically, cumNeg
-			// grows by every negative octet the tree loses, so popping the out-of-range heap while its key is below cumNeg
-			// finds every drift back IN and only those (a positive octet can only deepen a deficit). The drift-in heap is
-			// what keeps the model's totals from overstating the stream: a registration that crossed out re-measured its
-			// examiners with the target absent (their octets grew); if it then drifts back under 0x4000, a fresh
-			// measurement would compress against it and their stored octets are stale-high — an overcount, the one model
-			// lie the largest-fit search cannot self-correct (an understated total only adds candidates, and every
-			// candidate is exact-trial-verified; an overstated one can hide a fitting prefix from the fit check). Round 7
-			// left that direction unwatched and settled it by exact-trialling every refused set; the largest-fit search
-			// has no refused set to trial, so the drift is watched instead.
-			const heapPush = (h, entry) => {
+		// A registration is usable as a pointer target exactly while its stream offset stays below 0x4000, and shifts
+		// move registrations both ways — so validity has to be re-checked without scanning the model per round. The
+		// registrations currently in the range sit in a lazy min-heap keyed by slack + cumPos at push, the ones out of
+		// the range in a second keyed by deficit + cumNeg at push, where deficit = offset - 0x4000 and cumNeg counts
+		// every negative octet the tree ever lost. cumPos grows by every positive octet the tree gains, so popping
+		// while the key is below cumPos finds every crossing OUT of the range and only those (a negative octet can only
+		// delay a crossing, so `positiveSince > slack` is necessary for one — CLDMV/digby#43); symmetrically, cumNeg
+		// grows by every negative octet the tree loses, so popping the out-of-range heap while its key is below cumNeg
+		// finds every drift back IN and only those (a positive octet can only deepen a deficit). The drift-in heap is
+		// what keeps the model's totals from overstating the stream: a registration that crossed out re-measured its
+		// examiners with the target absent (their octets grew); if it then drifts back under 0x4000, a fresh
+		// measurement would compress against it and their stored octets are stale-high — an overcount, the one model
+		// lie the largest-fit search cannot self-correct (an understated total only adds candidates, and every
+		// candidate is exact-trial-verified; an overstated one can hide a fitting prefix from the fit check). Round 7
+		// left that direction unwatched and settled it by exact-trialling every refused set; the largest-fit search
+		// has no refused set to trial, so the drift is watched instead.
+		const heapPush = (h, entry) => {
+			wireCounters.modelWork++;
+			h.push(entry);
+			let i = h.length - 1;
+			while (i > 0) {
+				const p = (i - 1) >> 1;
+				if (h[p].score <= h[i].score) break;
+				[h[p], h[i]] = [h[i], h[p]];
+				i = p;
+			}
+		};
+		const heapPop = (h) => {
+			const top = h[0];
+			const last = h.pop();
+			if (h.length > 0) {
+				h[0] = last;
+				let i = 0;
+				for (;;) {
+					const l = 2 * i + 1;
+					const r = l + 1;
+					let m = i;
+					if (l < h.length && h[l].score < h[m].score) m = l;
+					if (r < h.length && h[r].score < h[m].score) m = r;
+					if (m === i) break;
+					[h[m], h[i]] = [h[i], h[m]];
+					i = m;
+				}
+			}
+			return top;
+		};
+		const drain = () => {
+			while (heapV.length > 0 && heapV[0].score < cumPos) {
+				const entry = heapPop(heapV);
 				wireCounters.modelWork++;
-				h.push(entry);
-				let i = h.length - 1;
-				while (i > 0) {
-					const p = (i - 1) >> 1;
-					if (h[p].score <= h[i].score) break;
-					[h[p], h[i]] = [h[i], h[p]];
-					i = p;
-				}
-			};
-			const heapPop = (h) => {
-				const top = h[0];
-				const last = h.pop();
-				if (h.length > 0) {
-					h[0] = last;
-					let i = 0;
-					for (;;) {
-						const l = 2 * i + 1;
-						const r = l + 1;
-						let m = i;
-						if (l < h.length && h[l].score < h[m].score) m = l;
-						if (r < h.length && h[r].score < h[m].score) m = r;
-						if (m === i) break;
-						[h[m], h[i]] = [h[i], h[m]];
-						i = m;
-					}
-				}
-				return top;
-			};
-			const drain = () => {
-				while (heapV.length > 0 && heapV[0].score < cumPos) {
-					const entry = heapPop(heapV);
-					wireCounters.modelWork++;
-					if (model.get(entry.key) !== entry) continue; // removed or replaced since the push
-					const off = realOf(entry);
-					if (off < 0x4000) {
-						// still in range: re-key with the fresh slack and wait for the next shift
-						entry.score = 0x4000 - off + cumPos;
-						heapPush(heapV, entry);
-						continue;
-					}
-					// the registration crossed out of the pointer range: whoever examined it may now write it in full —
-					// and the entry moves to the drift-in heap, where a later shift back under the range is caught
-					const ix = index.get(entry.key);
-					if (ix !== undefined) for (const q of ix) queuePush(q, entry.key, undefined);
-					entry.score = off - 0x4000 + cumNeg;
-					heapPush(heapI, entry);
-				}
-			};
-			const drainInvalid = () => {
-				while (heapI.length > 0 && heapI[0].score < cumNeg) {
-					const entry = heapPop(heapI);
-					wireCounters.modelWork++;
-					if (model.get(entry.key) !== entry) continue; // removed or replaced since the push
-					const off = realOf(entry);
-					if (off >= 0x4000) {
-						// still out of range: re-key with the fresh deficit and wait for the next shift
-						entry.score = off - 0x4000 + cumNeg;
-						heapPush(heapI, entry);
-						continue;
-					}
-					// the registration drifted back under the pointer range: whoever examined it while it was out may
-					// now compress against it — their stored octets are stale-high until they are re-measured
-					const ix = index.get(entry.key);
-					if (ix !== undefined) for (const q of ix) queuePush(q, entry.key, undefined);
+				if (model.get(entry.key) !== entry) continue; // removed or replaced since the push
+				const off = realOf(entry);
+				if (off < 0x4000) {
+					// still in range: re-key with the fresh slack and wait for the next shift
 					entry.score = 0x4000 - off + cumPos;
 					heapPush(heapV, entry);
+					continue;
 				}
-			};
-			const setFen = (i, v) => {
-				const d = fen.set(i, v);
-				if (d > 0) cumPos += d;
-				else if (d < 0) cumNeg -= d;
-				runTotal += d; // the running fen.total(): each prefix's stream total, read off in O(1)
-				return d;
-			};
-				const queuePush = (j, key, except) => {
-					wireCounters.modelWork++;
-					if (j === except || !setEntries.has(j)) return;
-					let keys = queue.get(j);
-					if (keys === undefined) {
-						keys = new Set();
-						queue.set(j, keys);
+				// the registration crossed out of the pointer range: whoever examined it may now write it in full —
+				// and the entry moves to the drift-in heap, where a later shift back under the range is caught
+				const ix = index.get(entry.key);
+				if (ix !== undefined) for (const q of ix) queuePush(q, entry.key, undefined);
+				entry.score = off - 0x4000 + cumNeg;
+				heapPush(heapI, entry);
+			}
+		};
+		const drainInvalid = () => {
+			while (heapI.length > 0 && heapI[0].score < cumNeg) {
+				const entry = heapPop(heapI);
+				wireCounters.modelWork++;
+				if (model.get(entry.key) !== entry) continue; // removed or replaced since the push
+				const off = realOf(entry);
+				if (off >= 0x4000) {
+					// still out of range: re-key with the fresh deficit and wait for the next shift
+					entry.score = off - 0x4000 + cumNeg;
+					heapPush(heapI, entry);
+					continue;
+				}
+				// the registration drifted back under the pointer range: whoever examined it while it was out may
+				// now compress against it — their stored octets are stale-high until they are re-measured
+				const ix = index.get(entry.key);
+				if (ix !== undefined) for (const q of ix) queuePush(q, entry.key, undefined);
+				entry.score = 0x4000 - off + cumPos;
+				heapPush(heapV, entry);
+			}
+		};
+		const setFen = (i, v) => {
+			const d = fen.set(i, v);
+			if (d > 0) cumPos += d;
+			else if (d < 0) cumNeg -= d;
+			runTotal += d; // the running fen.total(): each prefix's stream total, read off in O(1)
+			return d;
+		};
+		const queuePush = (j, key, except) => {
+			wireCounters.modelWork++;
+			if (j === except || !setEntries.has(j)) return;
+			let keys = queue.get(j);
+			if (keys === undefined) {
+				keys = new Set();
+				queue.set(j, keys);
+			}
+			keys.add(key);
+		};
+		const lookup = (key) => {
+			const o = overlay.get(key);
+			if (o !== undefined) return o.real;
+			const m = model.get(key);
+			if (m !== undefined) {
+				const r = realOf(m);
+				// a target is visible only where the stream already has it: written before the name being measured, and
+				// inside the pointer range. A registration a LATER record makes — one writeName performs even for a name
+				// it never compresses, an SRV target, an RRSIG signer — is not on the wire when an earlier name is
+				// written, so it must not shorten one (CLDMV/digby#43).
+				return r < 0x4000 && r < curReal + (probe.length - recStart) ? r : undefined;
+			}
+			return w.names.get(key);
+		};
+		// The probe's compression table: the model's targets at their stream offsets, the measurement's own
+		// registrations corrected by the shift, and every examined key recorded for the disturbance index. A
+		// registration whose real offset reaches 0x4000 does not exist as a pointer target (the real stream's
+		// write would be past the pointer range — writeName's own guard is `w.length < 0x4000`), but it is
+		// recorded all the same: the model's validity is computed on demand, and the out-of-range entry is
+		// what the drift-in heap watches (round 8).
+		probe.names = {
+			get(key) {
+				touched.push(key);
+				return lookup(key);
+			},
+			has(key) {
+				touched.push(key);
+				return lookup(key) !== undefined;
+			},
+			set(key, at) {
+				overlay.set(key, { rec: curRec, rel: at - recStart, real: at + curShift });
+			},
+			delete(key) {
+				overlay.delete(key);
+			}
+		};
+		// Measure the given open records of this section consecutively into the probe: each record's octets at its
+		// own position in the drop-here stream, plus the keys it examined. A candidate set is measured whole; a
+		// re-measure measures only the records a disturbance touched (CLDMV/digby#43).
+		const measureSet = (positions) => {
+			// validity crossings and drift-ins left over from the keeps and re-measures since the last cascade settle
+			// before anything is measured against the model
+			drain();
+			drainInvalid();
+			if (positions.length === 0) return { recs: [], contribution: 0, overflow: false };
+			const p1 = positions[0];
+			const probeBase = sectionBase + fen.prefix(p1);
+			probe.length = probeBase;
+			probe.added.length = 0;
+			overlay.clear();
+			const recs = [];
+			let overflow = false;
+			// the shift is the kept octets between the measured records: the tree's range minus the measured
+			// records' own octets in it (zero for a candidate, whose positions are not in the tree yet; their old
+			// octets on a re-measure, which the consecutive probe layout already carries)
+			let own = 0;
+			let ownNew = 0; // probe octets written for the measured records before the one being measured
+			for (const at of positions) {
+				curRec = at;
+				curShift = fen.prefix(at) - fen.prefix(p1) - own;
+				// the record's first octet sits at the kept octets before it plus its own measured records as the
+				// probe just wrote them (the tree still carries their old values)
+				curReal = sectionBase + fen.prefix(at) - own + ownNew;
+				own += fen.vals[at];
+				recStart = probe.length;
+				touched.length = 0;
+				const start = probe.length;
+				try {
+					writeRecord(probe, list[at]);
+				} catch (err) {
+					if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE) {
+						overflow = true;
+						break;
 					}
-					keys.add(key);
-				};
-				const lookup = (key) => {
-					const o = overlay.get(key);
-					if (o !== undefined) return o.real;
-					const m = model.get(key);
-					if (m !== undefined) {
-						const r = realOf(m);
-						// a target is visible only where the stream already has it: written before the name being measured, and
-						// inside the pointer range. A registration a LATER record makes — one writeName performs even for a name
-						// it never compresses, an SRV target, an RRSIG signer — is not on the wire when an earlier name is
-						// written, so it must not shorten one (CLDMV/digby#43).
-						return r < 0x4000 && r < curReal + (probe.length - recStart) ? r : undefined;
+					throw err;
+				}
+				recs.push({ at, oct: probe.length - start, examined: touched.splice(0) });
+				ownNew += probe.length - start;
+			}
+			return { recs, contribution: overflow ? Infinity : probe.length - probeBase, overflow };
+		};
+		// Fold one registration of a measurement into the model. The entry replaces whatever was there, and the
+		// examiners of a key whose model entry changed go back to the re-measure queue: a brand-new key that is in
+		// the pointer range shortens the records that examined it while it was absent; a replaced entry whose
+		// offset or validity moved can shorten (the target reappeared earlier in the stream than the record that
+		// measured against the old one assumed) or lengthen (it vanished) them. An out-of-range registration that
+		// replaces another out-of-range one changes nothing visible — the key is absent to every examiner either
+		// way — so its examiners stay put. `except` keeps a set out of its own queue entry — the records a
+		// re-measure just re-measured are already done.
+		const adopt = (key, e, except, prevKnown) => {
+			wireCounters.modelWork++;
+			// `prevKnown` is what the examiners last measured against when the caller already knows it (a
+			// re-measure deletes the record's own registration before re-measuring, so the model no longer holds
+			// it); otherwise the model's current entry is the prev.
+			const prev = prevKnown !== undefined ? prevKnown : (model.get(key) ?? null);
+			const entry = { rec: e.rec, rel: e.rel, key, score: 0 };
+			model.set(key, entry);
+			const off = realOf(entry);
+			const prevOff = prev === null ? -1 : realOf(prev); // the tree is frozen while a measurement's overlay is adopted
+			if (off < 0x4000) {
+				entry.score = 0x4000 - off + cumPos;
+				heapPush(heapV, entry);
+			} else {
+				entry.score = off - 0x4000 + cumNeg;
+				heapPush(heapI, entry);
+			}
+			const moved = prev !== null && off !== prevOff;
+			if ((prev === null && off < 0x4000) || (moved && (off < 0x4000 || prevOff < 0x4000))) {
+				const ix = index.get(key);
+				if (ix !== undefined) for (const q of ix) queuePush(q, key, except);
+			}
+		};
+		const keepSet = (k, m) => {
+			const byRec = new Map();
+			const byKey = new Map();
+			for (const { at, oct } of m.recs) setFen(at, oct);
+			for (const [key, e] of overlay) {
+				adopt(key, e);
+				let keys = byRec.get(e.rec);
+				if (keys === undefined) {
+					keys = [];
+					byRec.set(e.rec, keys);
+				}
+				keys.push(key);
+			}
+			for (const { at, examined } of m.recs) {
+				for (const key of examined) {
+					let ps = byKey.get(key);
+					if (ps === undefined) {
+						ps = new Set();
+						byKey.set(key, ps);
 					}
-					return w.names.get(key);
-				};
-				// The probe's compression table: the model's targets at their stream offsets, the measurement's own
-				// registrations corrected by the shift, and every examined key recorded for the disturbance index. A
-				// registration whose real offset reaches 0x4000 does not exist as a pointer target (the real stream's
-				// write would be past the pointer range — writeName's own guard is `w.length < 0x4000`), but it is
-				// recorded all the same: the model's validity is computed on demand, and the out-of-range entry is
-				// what the drift-in heap watches (round 8).
-				probe.names = {
-					get(key) {
-						touched.push(key);
-						return lookup(key);
-					},
-					has(key) {
-						touched.push(key);
-						return lookup(key) !== undefined;
-					},
-					set(key, at) {
-						overlay.set(key, { rec: curRec, rel: at - recStart, real: at + curShift });
-					},
-					delete(key) {
-						overlay.delete(key);
+					ps.add(at);
+					let ix = index.get(key);
+					if (ix === undefined) {
+						ix = new Set();
+						index.set(key, ix);
 					}
-				};
-				// Measure the given open records of this section consecutively into the probe: each record's octets at its
-				// own position in the drop-here stream, plus the keys it examined. A candidate set is measured whole; a
-				// re-measure measures only the records a disturbance touched (CLDMV/digby#43).
-			const measureSet = (positions) => {
-				// validity crossings and drift-ins left over from the keeps and re-measures since the last cascade settle
-				// before anything is measured against the model
+					ix.add(k);
+				}
+			}
+			setEntries.set(k, { byRec, byKey });
+		};
+		// Re-measure only the records of set j that the reason touches (CLDMV/digby#43): the records whose last
+		// measurement examined a key whose state changed — a registration added, removed, or shifted across the
+		// pointer range — plus, in turn, the records the re-measured ones' own registrations can no longer be
+		// trusted for. Re-measuring a record is always safe, so the selection may over-select; it must not
+		// under-select, or a stale octet count could understate the stream and keep a prefix that does not fit.
+		const remeasure = (j, reasonKeys) => {
+			const state = setEntries.get(j);
+			const affected = new Set();
+			const pending = [...reasonKeys];
+			const seen = new Set(reasonKeys);
+			while (pending.length > 0) {
+				const key = pending.pop();
+				for (const at of state.byKey.get(key) ?? []) {
+					if (affected.has(at)) continue;
+					affected.add(at);
+					for (const k2 of state.byRec.get(at) ?? [])
+						if (!seen.has(k2)) {
+							seen.add(k2);
+							pending.push(k2);
+						}
+				}
+			}
+			if (affected.size === 0) return;
+			const positions = [...affected].sort((a, b) => a - b);
+			// the affected records' own registrations come out first: a record must not compress against the
+			// registration its own previous measurement made — in the stream it is being re-measured for, it
+			// writes that name itself. Only the record's OWN model entries come out: an entry another record's
+			// re-registration replaced is that record's target now, and the re-measure may compress against it
+			// (the in-flight visibility check in `lookup` keeps a record from compressing against a target at or
+			// past its own write position).
+			const removed = new Map();
+			for (const at of positions) {
+				const keys = state.byRec.get(at);
+				wireCounters.modelWork++;
+				if (keys !== undefined) {
+					for (const key of keys) {
+						const old = model.get(key);
+						if (old !== undefined && old.rec === at) {
+							wireCounters.modelWork++;
+							model.delete(key);
+							removed.set(key, old);
+						}
+					}
+					state.byRec.delete(at);
+				}
+			}
+			const m = measureSet(positions);
+			for (const key of removed.keys()) {
+				if (!overlay.has(key)) {
+					// the registration is gone for good: whoever examined it may now write it in full
+					const ix = index.get(key);
+					if (ix !== undefined) for (const q of ix) queuePush(q, key, j);
+				}
+			}
+			for (const [key, e] of overlay) {
+				// a key removed above and registered again: the removed entry is what the examiners last measured
+				// against, so it is the `prev` the queue decision compares against — an equivalent re-registration
+				// queues nobody, a moved one does
+				adopt(key, e, j, removed.has(key) ? (removed.get(key) ?? null) : undefined);
+				let keys = state.byRec.get(e.rec);
+				if (keys === undefined) {
+					keys = [];
+					state.byRec.set(e.rec, keys);
+				}
+				keys.push(key);
+			}
+			for (const { at, oct } of m.recs) {
+				if (fen.vals[at] !== oct) setFen(at, oct);
+			}
+			for (const { at, examined } of m.recs) {
+				for (const key of examined) {
+					let ps = state.byKey.get(key);
+					if (ps === undefined) {
+						ps = new Set();
+						state.byKey.set(key, ps);
+					}
+					ps.add(at);
+					let ix = index.get(key);
+					if (ix === undefined) {
+						ix = new Set();
+						index.set(key, ix);
+					}
+					ix.add(j);
+				}
+			}
+		};
+		// Presence flips and re-measures until the model is consistent. The flip scan of the earlier rounds is
+		// gone: validity crossings come off the in-range heap (drain), drift-ins off the out-of-range one
+		// (drainInvalid), record-level disturbances come off the queue, and all three feed the same re-measure.
+		// There is no rollback any more: a keep is never provisional under the largest-fit rule (every prefix's
+		// total is read off the model, so every set stays folded), and when the guard trips the model is abandoned
+		// for the rest of the section outright. Returns false when the guard trips.
+		const cascade = (seedKeys, exceptSet) => {
+			if (seedKeys !== undefined)
+				for (const key of seedKeys) {
+					const ix = index.get(key);
+					if (ix !== undefined) for (const q of ix) queuePush(q, key, exceptSet);
+				}
+			let rounds = 0;
+			for (;;) {
 				drain();
 				drainInvalid();
-					if (positions.length === 0) return { recs: [], contribution: 0, overflow: false };
-					const p1 = positions[0];
-					const probeBase = sectionBase + fen.prefix(p1);
-					probe.length = probeBase;
-					probe.added.length = 0;
-					overlay.clear();
-					const recs = [];
-					let overflow = false;
-					// the shift is the kept octets between the measured records: the tree's range minus the measured
-					// records' own octets in it (zero for a candidate, whose positions are not in the tree yet; their old
-					// octets on a re-measure, which the consecutive probe layout already carries)
-					let own = 0;
-					let ownNew = 0; // probe octets written for the measured records before the one being measured
-					for (const at of positions) {
-						curRec = at;
-						curShift = fen.prefix(at) - fen.prefix(p1) - own;
-						// the record's first octet sits at the kept octets before it plus its own measured records as the
-						// probe just wrote them (the tree still carries their old values)
-						curReal = sectionBase + fen.prefix(at) - own + ownNew;
-						own += fen.vals[at];
-						recStart = probe.length;
-						touched.length = 0;
-						const start = probe.length;
-						try {
-							writeRecord(probe, list[at]);
-						} catch (err) {
-							if (err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE) {
-								overflow = true;
-								break;
-							}
-							throw err;
-						}
-						recs.push({ at, oct: probe.length - start, examined: touched.splice(0) });
-						ownNew += probe.length - start;
-					}
-					return { recs, contribution: overflow ? Infinity : probe.length - probeBase, overflow };
-				};
-			// Fold one registration of a measurement into the model. The entry replaces whatever was there, and the
-			// examiners of a key whose model entry changed go back to the re-measure queue: a brand-new key that is in
-			// the pointer range shortens the records that examined it while it was absent; a replaced entry whose
-			// offset or validity moved can shorten (the target reappeared earlier in the stream than the record that
-			// measured against the old one assumed) or lengthen (it vanished) them. An out-of-range registration that
-			// replaces another out-of-range one changes nothing visible — the key is absent to every examiner either
-			// way — so its examiners stay put. `except` keeps a set out of its own queue entry — the records a
-			// re-measure just re-measured are already done.
-			const adopt = (key, e, except, prevKnown) => {
-				wireCounters.modelWork++;
-				// `prevKnown` is what the examiners last measured against when the caller already knows it (a
-				// re-measure deletes the record's own registration before re-measuring, so the model no longer holds
-				// it); otherwise the model's current entry is the prev.
-				const prev = prevKnown !== undefined ? prevKnown : (model.get(key) ?? null);
-				const entry = { rec: e.rec, rel: e.rel, key, score: 0 };
-				model.set(key, entry);
-				const off = realOf(entry);
-				const prevOff = prev === null ? -1 : realOf(prev); // the tree is frozen while a measurement's overlay is adopted
-				if (off < 0x4000) {
-					entry.score = 0x4000 - off + cumPos;
-					heapPush(heapV, entry);
-				} else {
-					entry.score = off - 0x4000 + cumNeg;
-					heapPush(heapI, entry);
-				}
-				const moved = prev !== null && off !== prevOff;
-				if ((prev === null && off < 0x4000) || (moved && (off < 0x4000 || prevOff < 0x4000))) {
-					const ix = index.get(key);
-					if (ix !== undefined) for (const q of ix) queuePush(q, key, except);
-				}
-			};
-			const keepSet = (k, m) => {
-				const byRec = new Map();
-				const byKey = new Map();
-				for (const { at, oct } of m.recs) setFen(at, oct);
-				for (const [key, e] of overlay) {
-					adopt(key, e);
-					let keys = byRec.get(e.rec);
-					if (keys === undefined) {
-						keys = [];
-						byRec.set(e.rec, keys);
-					}
-					keys.push(key);
-				}
-				for (const { at, examined } of m.recs) {
-					for (const key of examined) {
-						let ps = byKey.get(key);
-						if (ps === undefined) {
-							ps = new Set();
-							byKey.set(key, ps);
-						}
-						ps.add(at);
-						let ix = index.get(key);
-						if (ix === undefined) {
-							ix = new Set();
-							index.set(key, ix);
-						}
-						ix.add(k);
-					}
-				}
-				setEntries.set(k, { byRec, byKey });
-			};
-			// Re-measure only the records of set j that the reason touches (CLDMV/digby#43): the records whose last
-			// measurement examined a key whose state changed — a registration added, removed, or shifted across the
-			// pointer range — plus, in turn, the records the re-measured ones' own registrations can no longer be
-			// trusted for. Re-measuring a record is always safe, so the selection may over-select; it must not
-			// under-select, or a stale octet count could understate the stream and keep a prefix that does not fit.
-			const remeasure = (j, reasonKeys) => {
-				const state = setEntries.get(j);
-				const affected = new Set();
-				const pending = [...reasonKeys];
-				const seen = new Set(reasonKeys);
-				while (pending.length > 0) {
-					const key = pending.pop();
-					for (const at of state.byKey.get(key) ?? []) {
-						if (affected.has(at)) continue;
-						affected.add(at);
-						for (const k2 of state.byRec.get(at) ?? [])
-							if (!seen.has(k2)) {
-								seen.add(k2);
-								pending.push(k2);
-							}
-					}
-				}
-				if (affected.size === 0) return;
-				const positions = [...affected].sort((a, b) => a - b);
-				// the affected records' own registrations come out first: a record must not compress against the
-				// registration its own previous measurement made — in the stream it is being re-measured for, it
-				// writes that name itself. Only the record's OWN model entries come out: an entry another record's
-				// re-registration replaced is that record's target now, and the re-measure may compress against it
-				// (the in-flight visibility check in `lookup` keeps a record from compressing against a target at or
-				// past its own write position).
-				const removed = new Map();
-				for (const at of positions) {
-					const keys = state.byRec.get(at);
-					wireCounters.modelWork++;
-					if (keys !== undefined) {
-						for (const key of keys) {
-							const old = model.get(key);
-							if (old !== undefined && old.rec === at) {
-								wireCounters.modelWork++;
-								model.delete(key);
-								removed.set(key, old);
-							}
-						}
-						state.byRec.delete(at);
-					}
-				}
-				const m = measureSet(positions);
-				for (const key of removed.keys()) {
-					if (!overlay.has(key)) {
-						// the registration is gone for good: whoever examined it may now write it in full
-						const ix = index.get(key);
-						if (ix !== undefined) for (const q of ix) queuePush(q, key, j);
-					}
-				}
-				for (const [key, e] of overlay) {
-					// a key removed above and registered again: the removed entry is what the examiners last measured
-					// against, so it is the `prev` the queue decision compares against — an equivalent re-registration
-					// queues nobody, a moved one does
-					adopt(key, e, j, removed.has(key) ? (removed.get(key) ?? null) : undefined);
-					let keys = state.byRec.get(e.rec);
-					if (keys === undefined) {
-						keys = [];
-						state.byRec.set(e.rec, keys);
-					}
-					keys.push(key);
-				}
-				for (const { at, oct } of m.recs) {
-					if (fen.vals[at] !== oct) setFen(at, oct);
-				}
-				for (const { at, examined } of m.recs) {
-					for (const key of examined) {
-						let ps = state.byKey.get(key);
-						if (ps === undefined) {
-							ps = new Set();
-							state.byKey.set(key, ps);
-						}
-						ps.add(at);
-						let ix = index.get(key);
-						if (ix === undefined) {
-							ix = new Set();
-							index.set(key, ix);
-						}
-						ix.add(j);
-					}
-				}
-			};
-			// Presence flips and re-measures until the model is consistent. The flip scan of the earlier rounds is
-			// gone: validity crossings come off the in-range heap (drain), drift-ins off the out-of-range one
-			// (drainInvalid), record-level disturbances come off the queue, and all three feed the same re-measure.
-			// There is no rollback any more: a keep is never provisional under the largest-fit rule (every prefix's
-			// total is read off the model, so every set stays folded), and when the guard trips the model is abandoned
-			// for the rest of the section outright. Returns false when the guard trips.
-			const cascade = (seedKeys, exceptSet) => {
-				if (seedKeys !== undefined)
-					for (const key of seedKeys) {
-						const ix = index.get(key);
-						if (ix !== undefined) for (const q of ix) queuePush(q, key, exceptSet);
-					}
-				let rounds = 0;
-				for (;;) {
-					drain();
-					drainInvalid();
-					if (queue.size === 0) return true;
-					if (++rounds > 64 + sets.length) return false;
-					const [j, keys] = queue.entries().next().value;
-					queue.delete(j);
-					if (setEntries.has(j)) remeasure(j, keys);
-				}
-			};
-				for (let k = 0; k < sets.length; k++) {
-					const first = sets[k][0];
-					// records before this set's first record belong to sets already decided as kept: write them for
-					// good — their compression targets become final (the real writer's table holds them now) and their
-					// model entries retire. A write past the cap means the model kept a stream that does not fit:
-					// abandon the section and redo it by exact trial.
-					try {
-						for (let i = pos; i < first; i++) {
-							const at = w.length;
+				if (queue.size === 0) return true;
+				if (++rounds > 64 + sets.length) return false;
+				const [j, keys] = queue.entries().next().value;
+				queue.delete(j);
+				if (setEntries.has(j)) remeasure(j, keys);
+			}
+		};
+		// The scan: fold every set into the model, in first-appearance order, recording each prefix's exact
+		// stream total. Nothing is written for good during the scan — a set is folded whether or not its prefix
+		// fits, because a longer prefix contains it and a longer prefix can fit where a shorter one does not (the
+		// non-monotonicity the keep rule exists for) — the winning prefix is materialised once, by its own trial,
+		// below.
+		const totals = new Float64Array(sets.length); // prefix k's exact drop-here stream octets (kept records only)
+		let frozenAt = sets.length; // past the frozen point no prefix fits: see the keep-rule comment
+		for (let k = 0; k < sets.length; k++) {
+			const m = measureSet(sets[k]);
+			if (m.overflow) {
+				// the measurement ran past the probe's scratch cap: the model cannot place this set, so its total
+				// and every later one are untrusted — the prefixes from here on are decided by exact trial
+				modelBroken = true;
+				brokenFrom = k;
+				break;
+			}
+			keepSet(k, m);
+			if (!cascade(overlay.keys(), k)) {
+				// the cascade guard tripped: the model is abandoned outright — every prefix of this section is
+				// decided by exact trial (quadratic within the section, contained here, unreached in clean code)
+				modelBroken = true;
+				brokenFrom = 0;
+				break;
+			}
+			totals[k] = runTotal;
+			// The frozen point: the prefix is over budget AND every record a later keep would add sits at a stream
+			// offset at or above the pointer range. Folding the later sets can add no compression target — no
+			// re-measure fires, no stored octet shrinks — so every longer prefix is this prefix's stream plus
+			// positive octets, and it cannot fit either. The sets past this point are never measured.
+			if (sectionBase + runTotal + tailBound > limit && k + 1 < sets.length && sectionBase + fen.prefix(sets[k + 1][0]) >= 0x4000) {
+				frozenAt = k;
+				break;
+			}
+		}
+		// The largest fitting prefix (see selectKept): candidates newest-first off the model's totals, the winner
+		// verified — and materialised — by an exact trial. Past the frozen point nothing is a candidate; past a
+		// model break every prefix from the break on is one (the trial decides it outright).
+		const kept = selectKept({
+			count: sets.length,
+			isCandidate: (k) => k < frozenAt && (k < brokenFrom ? sectionBase + totals[k] + tailBound <= limit : true),
+			trial: (k) => {
+				// the candidate's drop-here stream, written for real at its original positions against the state the
+				// winner's stream will be sent in — on success the writes stay: they ARE the output
+				const mark = w.checkpoint();
+				const before = written[s];
+				let fits = true;
+				try {
+					for (let i = 0; i < list.length; i++)
+						if (owner[i] <= k) {
 							writeRecord(w, list[i]);
 							written[s]++;
-							if (!modelBroken) setFen(i, w.length - at); // the tree carries the actual octets from here on
-							if (!modelBroken) {
-								const state = setEntries.get(owner[i]);
-								if (state !== undefined) {
-									const keys = state.byRec.get(i);
-									if (keys !== undefined) {
-										for (const key of keys) model.delete(key);
-										state.byRec.delete(i);
-									}
-									if (--state.open === 0 && state.byRec.size === 0) setEntries.delete(owner[i]);
-								}
-							}
 						}
-					} catch (err) {
-						if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
-						overflow = true;
-					}
-					if (overflow) break;
-					pos = first;
-					if (!modelBroken) {
-						const m = measureSet(openOf(k));
-						if (!m.overflow) {
-							const log = [];
-							keepSet(k, m, log);
-							if (cascade(log, overlay.keys(), k) && sectionBase + fen.total() + tailBound <= limit) {
-								continue;
-							}
-							rollback(log);
-						}
-					}
-					// the stream would not fit (or the model fell back): decide exactly, by writing the stream that
-					// would be sent (all kept sets plus this one, at their original positions, from `first` on —
-					// records before it are final) and rolling it back
-					const mark = w.checkpoint();
-					let fits = true;
-					try {
-						for (let i = first; i < list.length; i++) if (owner[i] <= k) writeRecord(w, list[i]);
-						fits = w.length <= limit && tailFitsOn(w);
-					} catch (err) {
-						if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
-						fits = false;
-					}
-					w.rollback(mark);
-					if (fits) {
-						// the trial decided the keep exactly — fold it into the model (the trial's stream is the
-						// drop-here stream, so the model's formulas reproduce its offsets)
-						if (!modelBroken) {
-							const m2 = measureSet(openOf(k));
-							if (!m2.overflow) {
-								const log2 = [];
-								keepSet(k, m2, log2);
-								if (!cascade(log2, overlay.keys(), k)) modelBroken = true;
-							} else modelBroken = true;
-						}
-						continue;
-					}
-					keptSets = k;
-					dropped = true;
-					if (s < 2) truncated = true;
-					break; // the truncation point: this set and everything after it, in every section, is dropped
+					fits = w.length <= limit && tailFitsOn(w);
+				} catch (err) {
+					if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+					fits = false;
 				}
+				if (!fits) {
+					w.rollback(mark);
+					written[s] = before;
+				}
+				return fits;
 			}
-			// the surviving records from `pos` on: all of them, or — after a drop — only the records of the sets kept
-			// so far, at their original positions, written for good once. A write past the cap here is the same signal
-			// as above, and so is the tail gate: the tail is never dropped, so the kept stream must leave room for it.
-			try {
-				for (let i = pos; i < list.length; i++)
-					if (owner[i] < keptSets) {
-						writeRecord(w, list[i]);
-						written[s]++;
-					}
-				if (!tailFitsOn(w)) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the kept stream leaves no room for the tail records within ${limit} octets`);
-			} catch (err) {
-				if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
-				overflow = true;
-			}
-			if (!overflow) break section;
-			// the model's answer did not fit when written: roll the section back and decide it by exact trials — even
-			// when the cascade guard had already tripped mid-section, because the keeps the model decided before it
-			// were never trial-verified and may be the ones that do not fit. The one-retry argument above is what
-			// makes the refusal below unreachable: after the retry every keep is trial-verified (CLDMV/digby#43).
-			if (retried) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the exact trials kept a stream that exceeds ${limit} octets`);
-			w.rollback(sectionMark);
-			written[s] = 0;
-			truncated = false;
-			dropped = false;
-			pos = 0;
-			keptSets = sets.length;
-			modelBroken = true;
-			retried = true;
+		});
+		if (kept < sets.length - 1) {
+			// the truncation point: this prefix and everything after it, in every section, is dropped
+			dropped = true;
+			if (s < 2) truncated = true;
+			break outer;
 		}
-		if (keptSets < sets.length) break outer;
 	}
 	if (dropped) {
 		// Truncating must not corrupt a message whose meaning lives in its record structure (CLDMV/digby#43): whole
@@ -1175,6 +1141,32 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	written.forEach((n, i) => w.patch16(countAt + i * 2, n));
 	if (truncated) w.patch16(2, ((w.bytes[2] << 8) | w.bytes[3]) | TC_BIT);
 	return { bytes: w.finish(), truncated };
+}
+
+/**
+ * The keep-selection rule, in one place (CLDMV/digby#43, round 8): the kept sets are the LONGEST PREFIX of the
+ * section's RRsets, in first-appearance order, whose drop-here stream fits the limit — the largest k whose k-set
+ * prefix fits. The caller supplies the candidate test (which prefixes the model says could fit — the search skips
+ * the rest without measuring them further) and the exact trial (which writes a candidate's drop-here stream for
+ * real and answers whether it fits; on success its bytes stay written — the trial IS the final write). Candidates
+ * are probed newest-first: the largest candidate is tried first, and the first trial that fits is the largest
+ * fitting prefix — under a model lie in the undercount direction a fitting prefix is always a candidate, so the
+ * trials self-correct whatever the totals said; the empty prefix (k = -1) always fits (the header, questions and
+ * tail alone were checked before the scan), so it needs no trial.
+ *
+ * Swapping the rule (the user is still deciding between prefix and best subset) is contained here: a best-subset
+ * rule would change what the scan must place in the model and what a trial verifies, but the shape of this
+ * decision — candidates newest-first, exact-trial-verified, largest wins — stays.
+ *
+ * @param {{ count: number, isCandidate: (k: number) => boolean, trial: (k: number) => boolean }} search
+ * @returns {number} the last kept set's index (the largest fitting prefix is sets 0..k), or -1 when no set fits
+ */
+function selectKept({ count, isCandidate, trial }) {
+	for (let k = count - 1; k >= 0; k--) {
+		if (!isCandidate(k)) continue;
+		if (trial(k)) return k;
+	}
+	return -1;
 }
 
 function checkedId(id) {
@@ -1210,11 +1202,6 @@ class Fenwick {
 		let sum = 0;
 		for (; i > 0; i -= i & -i) sum += this.tree[i];
 		return sum;
-	}
-
-	/** Sum over all positions. */
-	total() {
-		return this.prefix(this.n);
 	}
 }
 
