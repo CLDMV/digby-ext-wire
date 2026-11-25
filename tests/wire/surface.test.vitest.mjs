@@ -11,6 +11,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { CLASS, TYPE, classFromString, classToString, svcKeyFromString, svcKeyToString, typeFromString, typeToString } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
@@ -308,6 +309,29 @@ describe("every SharedArrayBuffer form is refused at every byte-taking entry (CL
 		const shadow = new Uint8Array(new SharedArrayBuffer(8));
 		Object.defineProperty(shadow, "buffer", { value: new ArrayBuffer(8) });
 		expect(code(() => encodeMessage({ id: 1, answers: [{ name: "x.example.", type: TYPE.TXT, class: 1, ttl: 60, data: { strings: [shadow] } }] }))).toBe("NOT_CLONEABLE");
+	});
+
+	it("a SharedArrayBuffer wearing ArrayBuffer.prototype is refused by brand, never by prototype (CLDMV/digby#39, round 8)", () => {
+		// today: `view.buffer instanceof SharedArrayBuffer` and `bytes instanceof ArrayBuffer` test the prototype chain,
+		// so a prototype swap made a SharedArrayBuffer pass as a plain one and its octets were read — and a cross-realm
+		// SharedArrayBuffer failed `instanceof SharedArrayBuffer` from this realm outright. The brand check is the
+		// intrinsic `SharedArrayBuffer.prototype.byteLength` getter, which verifies the internal slot from any realm.
+		const s = new SharedArrayBuffer(3);
+		new Uint8Array(s).set([1, 2, 3]);
+		Object.setPrototypeOf(s, ArrayBuffer.prototype);
+		for (const [what, shape] of [
+			["formatGeneric", (b) => () => formatGeneric(b)],
+			["decodeMessage", (b) => () => decodeMessage(b)],
+			["frameTcp", (b) => () => frameTcp(b)],
+			["TcpFramer.push", (b) => () => new TcpFramer().push(b)]
+		])
+			expect(code(shape(s)), what).toBe("NOT_CLONEABLE");
+		// the same for a view whose buffer wears the wrong prototype, and for every cross-realm form
+		expect(code(() => formatGeneric(new Uint8Array(s)))).toBe("NOT_CLONEABLE");
+		expect(code(() => formatGeneric(runInNewContext("new SharedArrayBuffer(3)")))).toBe("NOT_CLONEABLE");
+		expect(code(() => formatGeneric(runInNewContext("new Uint8Array(new SharedArrayBuffer(3))")))).toBe("NOT_CLONEABLE");
+		expect(code(() => decodeMessage(runInNewContext("new Uint8Array(new SharedArrayBuffer(12))")))).toBe("NOT_CLONEABLE");
+		expect(code(() => frameTcp(runInNewContext("new DataView(new SharedArrayBuffer(12))")))).toBe("NOT_CLONEABLE");
 	});
 });
 

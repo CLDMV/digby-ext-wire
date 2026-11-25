@@ -21,6 +21,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { Writer } from "../../src/lib/wire/buffer.mjs";
 import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
@@ -72,6 +73,8 @@ const message = (sections) => ({ id: 1, flags: { qr: true, opcode: 0, aa: false,
 /** A TSIG record's rdata for message id `originalId`. */
 const tsigData = (originalId) => ({ algorithm: "hmac-sha256.", timeSigned: 1, fudge: 300, mac: new Uint8Array(32), originalId, error: 0, otherData: new Uint8Array(0) });
 const tsigRecord = (originalId) => ({ name: "key.example.", type: TYPE.TSIG, class: CLASS.ANY, ttl: 0, data: tsigData(originalId) });
+/** An RRSIG record's rdata — its signature is octets, so the byte-position derivation below finds it (CLDMV/digby#39, round 8). */
+const rrsig = () => ({ typeCovered: TYPE.A, algorithm: 13, labels: 2, originalTtl: 3600, expiration: 0, inception: 0, keyTag: 1, signerName: "example.", signature: new Uint8Array([1, 2, 3]) });
 
 describe("one snapshot of the caller's input (CLDMV/digby#39)", () => {
 	it("encodeMessage reads each field of the message, its questions and its records exactly once", () => {
@@ -624,16 +627,24 @@ describe("the public surface throws only WireError, for any value in any argumen
 		parseName: () => ["www.example."],
 		appendTsig: () => [capped(), tsigRecord(1)],
 		decodeMessage: () => [validBytes, { allowTrailing: true }],
+		// the encode baselines carry byte-bearing records (a TXT's strings, a generic record's data, an RRSIG's
+		// signature), so the byte-path derivation below sweeps the encode side's nested positions too (CLDMV/digby#39,
+		// round 8)
 		encodeCapped: () => [message({}), { limit: 512 }],
-		encodeMessage: () => [message({}), { maxSize: 512 }],
+		encodeMessage: () => [
+			message({
+				answers: [TXT("x.example.", 3), { name: "y.example.", type: 999, class: 1, ttl: 60, data: { data: new Uint8Array([4, 5]) } }]
+			}),
+			{ maxSize: 512 }
+		],
 		tsigRecordSize: () => [tsigRecord(1)],
 		encodeForTransport: () => [message({}), { transport: "udp" }],
 		frameTcp: () => [validBytes],
 		udpLimit: () => [{ edns: { udpSize: 1232 } }, { cap: 1232 }],
 		decodeRdataBytes: () => [TYPE.A, new Uint8Array([10, 0, 0, 1])],
-		encodeRdataBytes: () => [TYPE.A, { address: "10.0.0.1" }],
+		encodeRdataBytes: () => [TYPE.RRSIG, rrsig()],
 		formatGeneric: () => [new Uint8Array([1, 2, 3])],
-		formatRdata: () => [TYPE.A, { address: "10.0.0.1" }],
+		formatRdata: () => [TYPE.RRSIG, rrsig()],
 		isTyped: () => [TYPE.A],
 		parseRdata: () => [TYPE.MX, "10 mail", "example."],
 		formatRecord: () => [A(1)],
@@ -688,21 +699,60 @@ describe("the public surface throws only WireError, for any value in any argumen
 			arity
 		]);
 	}
-	// the byte-taking argument positions, derived from the baselines (CLDMV/digby#39, round 7): any position whose
-	// baseline value is a view or an ArrayBuffer is swept with every SharedArrayBuffer form, so a byte-taking export is
-	// covered automatically and one missing from a hand-written list cannot happen
-	const bytePositions = [];
+	// the byte-taking argument positions, derived from the baselines (CLDMV/digby#39, rounds 7 and 8): any position
+	// whose baseline value is a view or an ArrayBuffer — at the top level or NESTED inside it (a record's strings, a
+	// generic record's data, a TSIG's MAC, formatName's labels) — is swept with every SharedArrayBuffer form, so a
+	// byte-taking export is covered automatically and one missing from a hand-written list cannot happen. Each entry
+	// is [name, path], where the path walks from the argument list into the value ([0] is the argument itself).
+	const bytePaths = [];
 	for (const [name, baseline] of Object.entries(baselines)) {
 		const args = baseline();
-		for (let at = 0; at < args.length; at++)
-			if (ArrayBuffer.isView(args[at]) || args[at] instanceof ArrayBuffer) bytePositions.push([name, at]);
+		const walk = (v, path) => {
+			if (v === null || typeof v !== "object") return;
+			if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) {
+				bytePaths.push([name, path]);
+				return; // a view's contents are octets, not structure
+			}
+			if (Array.isArray(v)) {
+				v.forEach((e, i) => walk(e, [...path, i]));
+				return;
+			}
+			for (const k of Object.keys(v)) walk(v[k], [...path, k]);
+		};
+		for (let at = 0; at < args.length; at++) walk(args[at], [at]);
 	}
+	// build the baseline's argument list with `value` put where `path` says (CLDMV/digby#39, round 8)
+	const setPath = (name, path, value) => {
+		const args = baselines[name]();
+		let at = args;
+		for (let i = 0; i < path.length - 1; i++) at = at[path[i]];
+		at[path[path.length - 1]] = value;
+		return args;
+	};
 	const sabForms = [
 		["a bare SharedArrayBuffer", () => new SharedArrayBuffer(12)],
 		["a Uint8Array over a SharedArrayBuffer", () => new Uint8Array(new SharedArrayBuffer(12))],
 		["a growable SharedArrayBuffer view", () => new Uint8Array(new SharedArrayBuffer(12, { maxByteLength: 24 }))],
+		["a length-tracking view over a growable SharedArrayBuffer", () => new Uint8Array(new SharedArrayBuffer(0, { maxByteLength: 24 }))],
 		["a DataView over a SharedArrayBuffer", () => new DataView(new SharedArrayBuffer(12))],
-		["a Buffer over a SharedArrayBuffer", () => Buffer.from(new SharedArrayBuffer(12))]
+		["a Buffer over a SharedArrayBuffer", () => Buffer.from(new SharedArrayBuffer(12))],
+		// the prototype and the realm are not the check (CLDMV/digby#39, round 8): a SharedArrayBuffer wearing
+		// ArrayBuffer.prototype passed the old `instanceof` and was copied, and a cross-realm one failed
+		// `instanceof SharedArrayBuffer` from this realm outright — the intrinsic getter verifies the internal slot,
+		// which neither can fake
+		["a SharedArrayBuffer wearing ArrayBuffer.prototype", () => Object.setPrototypeOf(new SharedArrayBuffer(12), ArrayBuffer.prototype)],
+		[
+			"a Uint8Array over a SharedArrayBuffer whose buffer wears ArrayBuffer.prototype",
+			() => {
+				const v = new Uint8Array(new SharedArrayBuffer(12));
+				Object.setPrototypeOf(v.buffer, ArrayBuffer.prototype);
+				return v;
+			}
+		],
+		["a cross-realm SharedArrayBuffer", () => runInNewContext("new SharedArrayBuffer(12)")],
+		["a cross-realm Uint8Array over a SharedArrayBuffer", () => runInNewContext("new Uint8Array(new SharedArrayBuffer(12))")],
+		["a cross-realm DataView over a SharedArrayBuffer", () => runInNewContext("new DataView(new SharedArrayBuffer(12))")],
+		["a cross-realm growable SharedArrayBuffer view", () => runInNewContext("new Uint8Array(new SharedArrayBuffer(12, { maxByteLength: 24 }))")]
 	];
 
 	it("every enumerated entry has a valid baseline, and an export without one fails here", () => {
@@ -732,35 +782,33 @@ describe("the public surface throws only WireError, for any value in any argumen
 		expect(escapes).toEqual([]);
 	});
 
-	it("every SharedArrayBuffer form at every derived byte-taking argument position is a WireError", () => {
+	it("every SharedArrayBuffer form at every derived byte-taking position, nested included, is a WireError", () => {
 		const escapes = [];
-		for (const [name, at] of bytePositions) {
-			const entry = entries.find(([n]) => n === name);
+		for (const [name, path] of bytePaths)
 			for (const [form, make] of sabForms) {
 				let outcome;
 				try {
-					entry[1](make(), at);
+					callBaseline(name, setPath(name, path, make()))();
 					outcome = "returned";
 				} catch (err) {
 					outcome = err;
 				}
 				if (!(outcome instanceof WireError)) {
 					const shown = outcome instanceof Error ? outcome.constructor.name : String(outcome);
-					escapes.push(`${name} (argument ${at}) with ${form} escaped as ${shown}`);
+					escapes.push(`${name} (argument ${path[0]}, at ${path.slice(1).join(".") || "the argument itself"}) with ${form} escaped as ${shown}`);
 				}
 			}
-		}
 		// the derivation itself must have found the byte-taking entries: a baseline that hides its bytes would sweep none
-		expect(bytePositions.length).toBeGreaterThan(0);
+		expect(bytePaths.length).toBeGreaterThan(0);
 		expect(escapes).toEqual([]);
 	});
 
 	it("the enumerated surface and the sweep's call counts are logged for the handback", () => {
 		const hostileCalls = entries.reduce((n, [, , arity]) => n + arity, 0) * hostiles.length;
-		const sabCalls = bytePositions.length * sabForms.length;
+		const sabCalls = bytePaths.length * sabForms.length;
 		console.log(`[surface] exports (${exportNames.length}): ${exportNames.join(", ")}`);
 		console.log(
-			`[surface] entries: ${entries.length}; derived byte positions: ${bytePositions.length}; hostile calls: ${hostileCalls}; SAB calls: ${sabCalls}; total: ${hostileCalls + sabCalls}`
+			`[surface] entries: ${entries.length}; derived byte positions (nested included): ${bytePaths.length}; hostile calls: ${hostileCalls}; SAB calls: ${sabCalls}; total: ${hostileCalls + sabCalls}`
 		);
 		expect(exportNames.length).toBeGreaterThan(0);
 	});
