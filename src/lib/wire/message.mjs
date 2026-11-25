@@ -621,16 +621,28 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 	}
 	let truncated = false;
 	let dropped = false; // any RRset dropped from any section — an additionals-only drop never sets TC, but it is still a drop (CLDMV/digby#43)
-	let modelBroken = false; // the cascade guard tripped: the rest of the section decides by exact trial
 	outer: for (let s = 0; s < 3; s++) {
 		const list = sections[s];
 		const { sets, owner } = rrsets(list);
 		const sectionMark = w.checkpoint(); // the state before this section wrote anything: a model overflow rolls back to here
+		// The model is per section by construction — the tree, the target table, the disturbance index and the heap
+		// are all created fresh inside the loop below — so the exact-trial fallback is per section too (CLDMV/digby#43):
+		// a section whose model fell back decides its own sets by exact trials, and the next section gets the model
+		// back. Carrying the fallback across sections would cost every later section the trial-per-set work —
+		// quadratic after a single model lie — with nothing gained: no state a later section reads is broken by an
+		// earlier section's lie.
+		let modelBroken = false; // the cascade guard tripped: the rest of this section decides by exact trial
+		let retried = false; // the section already re-decided by exact trial once — see the overflow path below
 		let pos = 0; // section positions below this are decided and finally written
 		let keptSets = sets.length;
 		// The model's keep decisions are trusted only as far as the final write confirms them: a MESSAGE_TOO_LARGE from
 		// the capped writer — a kept stream that does not actually fit — rolls the whole section back and decides it by
-		// exact trials, which are exact by construction. The trials cannot overflow, so a second overflow is a refusal.
+		// exact trials, which are exact by construction. One retry suffices: after it, every keep in the section comes
+		// from an exact trial, and a trial that keeps set k has written the drop-here stream of sets 0..k for real and
+		// watched it fit — so the final write, which is that same stream (the same records in the same order against
+		// the same compression state the trial saw), cannot exceed the limit. Only a keep the model decided can
+		// overflow, and after the retry the model decides none. A second overflow is therefore impossible by
+		// construction, never refused on (CLDMV/digby#43).
 		section: for (;;) {
 			let overflow = false;
 			if (sets.length > 0) {
@@ -1093,8 +1105,11 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				overflow = true;
 			}
 			if (!overflow) break section;
-			// the model's answer did not fit when written: roll the section back and decide it by exact trials
-			if (modelBroken) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the exact trials kept a stream that exceeds ${limit} octets`);
+			// the model's answer did not fit when written: roll the section back and decide it by exact trials — even
+			// when the cascade guard had already tripped mid-section, because the keeps the model decided before it
+			// were never trial-verified and may be the ones that do not fit. The one-retry argument above is what
+			// makes the refusal below unreachable: after the retry every keep is trial-verified (CLDMV/digby#43).
+			if (retried) fail(WireErrorCode.MESSAGE_TOO_LARGE, `the exact trials kept a stream that exceeds ${limit} octets`);
 			w.rollback(sectionMark);
 			written[s] = 0;
 			truncated = false;
@@ -1102,6 +1117,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			pos = 0;
 			keptSets = sets.length;
 			modelBroken = true;
+			retried = true;
 		}
 		if (keptSets < sets.length) break outer;
 	}
