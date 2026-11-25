@@ -177,7 +177,10 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 	});
 
 	it("bounds the work on interleaved pending sets whose second records share a suffix (CLDMV/digby#43)", () => {
-		for (const M of [100, 200, 400, 800, 1600]) {
+		// the peak of the r8 shape (M = 900..1250, 1,800..2,500 records — where the model scan crosses the pointer
+		// boundary and one registration's crossing unseats every set's second record) is sampled alongside 800 and
+		// 1,600 records (CLDMV/digby#43, round 9)
+		for (const M of [100, 200, 400, 800, 900, 1000, 1250, 1600]) {
 			const records = 2 * M;
 			const m = paired(M);
 			// "full" is the whole encode when it fits the largest message, and the largest message itself when the
@@ -213,15 +216,17 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 				// every record is written a small constant number of times: the round-4 trials wrote each record
 				// ~24-200 times on this shape (a fresh exact trial per set, each re-encoding the kept second
 				// records sitting between the candidate's two), growing with M. The constant is recalibrated for
-				// round 8 (CLDMV/digby#43): the largest-fit scan folds every set up to the frozen point — deeper
-				// than round 7's greedy stop, so the crossing-driven re-measures past 0x4000 cover more of the
-				// message — and the candidate scan plus the winning trial add their passes. Measured (the harness
-				// is tmp/agents/r8/measure-capped.mjs, run inside a test pod): 12.5 per record at M<=400 (the
-				// stream never reaches 0x4000 there — pure base machinery), 22.9 at M=800 and 31.9 at M=1600,
-				// limit full or one under — the growth across M is sublinear (the increments shrink as the
-				// crossing region's share of the message settles), flat within each M. The bound stays a constant
-				// multiple, which is what any quadratic regression blows through: a quadratic regression would
-				// blow straight through 40 x at M=800 and M=1600 both.
+				// round 9 (CLDMV/digby#43): the round-8 code spent one cascade round — one probe setup, one drain
+				// cycle — per re-measured set, and the drain's global cumPos pop re-keyed every near-boundary
+				// registration once per round, so the model work saturated at ~92,600 units and the peak (M=900,
+				// 1,800 records) measured 54.9 per record. The round-9 cascade re-measures every queued set's
+				// affected records in one merged probe pass per wave, so the per-set overhead and the drain churn
+				// collapse: measured (the harness is tmp/agents/r9/measure3.mjs, run inside a test pod) 12.5 per
+				// record at M<=400 (the stream never reaches 0x4000 there — pure base machinery), 22.0 at M=800,
+				// 30.1 at the peak M=900 and 21.8 at M=1250, limit full or one under — flat across the crossing
+				// regime's M, the same work per record everywhere. The bound stays a constant multiple, which is
+				// what any quadratic regression blows through: a quadratic regression would blow straight through
+				// 40 x at every sampled M.
 				expect(writes, `M=${M} ${tag}: ${writes} units of work for ${records} records`).toBeLessThanOrEqual(40 * records);
 			}
 		}

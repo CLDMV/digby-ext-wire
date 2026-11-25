@@ -962,26 +962,35 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			}
 			setEntries.set(k, { byRec, byKey });
 		};
-		// Re-measure only the records of set j that the reason touches (CLDMV/digby#43): the records whose last
+		// Re-measure the records of every queued set that its reason touches (CLDMV/digby#43): the records whose last
 		// measurement examined a key whose state changed — a registration added, removed, or shifted across the
 		// pointer range — plus, in turn, the records the re-measured ones' own registrations can no longer be
-		// trusted for. Re-measuring a record is always safe, so the selection may over-select; it must not
-		// under-select, or a stale octet count could understate the stream and keep a prefix that does not fit.
-		const remeasure = (j, reasonKeys) => {
-			const state = setEntries.get(j);
-			const affected = new Set();
-			const pending = [...reasonKeys];
-			const seen = new Set(reasonKeys);
-			while (pending.length > 0) {
-				const key = pending.pop();
-				for (const at of state.byKey.get(key) ?? []) {
-					if (affected.has(at)) continue;
-					affected.add(at);
-					for (const k2 of state.byRec.get(at) ?? [])
-						if (!seen.has(k2)) {
-							seen.add(k2);
-							pending.push(k2);
-						}
+		// trusted for. The wave's sets are collected and their affected records merged into ONE probe pass (round 9):
+		// a record's octets depend on the model's targets and on the records written before it — not on the other
+		// re-measured records' stored values — the probe corrects every record's position by the exact shift, and
+		// the tree stays frozen until every setFen lands, so one pass over the merged positions costs one probe
+		// setup and one drain cycle instead of one per set. Re-measuring a record is always safe, so the selection
+		// may over-select; it must not under-select, or a stale octet count could understate the stream and keep a
+		// prefix that does not fit.
+		const remeasureJobs = (jobs) => {
+			const affected = new Set(); // every affected record position, across the wave's sets
+			const setOfPosition = new Map(); // an affected position -> the index of the set owning it
+			for (const [j, reasonKeys] of jobs) {
+				const state = setEntries.get(j);
+				const pending = [...reasonKeys];
+				const seen = new Set(reasonKeys);
+				while (pending.length > 0) {
+					const key = pending.pop();
+					for (const at of state.byKey.get(key) ?? []) {
+						if (affected.has(at)) continue;
+						affected.add(at);
+						setOfPosition.set(at, j);
+						for (const k2 of state.byRec.get(at) ?? [])
+							if (!seen.has(k2)) {
+								seen.add(k2);
+								pending.push(k2);
+							}
+					}
 				}
 			}
 			if (affected.size === 0) return;
@@ -994,6 +1003,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			// registered by a record at or past its own position).
 			const removed = new Map();
 			for (const at of positions) {
+				const state = setEntries.get(setOfPosition.get(at));
 				const keys = state.byRec.get(at);
 				wireCounters.modelWork++;
 				if (keys !== undefined) {
@@ -1013,13 +1023,15 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				if (!overlay.has(key)) {
 					// the registration is gone for good: whoever examined it may now write it in full
 					const ix = index.get(key);
-					if (ix !== undefined) for (const q of ix) queuePush(q, key, j);
+					if (ix !== undefined) for (const q of ix) queuePush(q, key, setOfPosition.get(removed.get(key).rec));
 				}
 			}
 			for (const [key, e] of overlay) {
 				// a key removed above and registered again: the removed entry is what the examiners last measured
 				// against, so it is the `prev` the queue decision compares against — an equivalent re-registration
 				// queues nobody, a moved one does
+				const j = setOfPosition.get(e.rec);
+				const state = setEntries.get(j);
 				adopt(key, e, j, removed.has(key) ? (removed.get(key) ?? null) : undefined);
 				let keys = state.byRec.get(e.rec);
 				if (keys === undefined) {
@@ -1032,6 +1044,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				if (fen.vals[at] !== oct) setFen(at, oct);
 			}
 			for (const { at, examined } of m.recs) {
+				const state = setEntries.get(setOfPosition.get(at));
 				for (const key of examined) {
 					let ps = state.byKey.get(key);
 					if (ps === undefined) {
@@ -1044,7 +1057,7 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 						ix = new Set();
 						index.set(key, ix);
 					}
-					ix.add(j);
+					ix.add(setOfPosition.get(at));
 				}
 			}
 		};
@@ -1053,7 +1066,9 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 		// (drainInvalid), record-level disturbances come off the queue, and all three feed the same re-measure.
 		// There is no rollback any more: a keep is never provisional under the largest-fit rule (every prefix's
 		// total is read off the model, so every set stays folded), and when the guard trips the model is abandoned
-		// for the rest of the section outright. Returns false when the guard trips.
+		// for the rest of the section outright. Returns false when the guard trips. Each round is a WAVE: every set
+		// currently queued re-measures in one merged pass (CLDMV/digby#43, round 9), so a crossing that unseats
+		// many examiners costs one pass, not one per examiner.
 		const cascade = (seedKeys, exceptSet) => {
 			if (seedKeys !== undefined)
 				for (const key of seedKeys) {
@@ -1066,9 +1081,12 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				drainInvalid();
 				if (queue.size === 0) return true;
 				if (++rounds > 64 + sets.length) return false;
-				const [j, keys] = queue.entries().next().value;
-				queue.delete(j);
-				if (setEntries.has(j)) remeasure(j, keys);
+				const jobs = [];
+				for (const [j, keys] of queue) {
+					queue.delete(j);
+					if (setEntries.has(j)) jobs.push([j, keys]);
+				}
+				if (jobs.length > 0) remeasureJobs(jobs);
 			}
 		};
 		// The scan: fold every set into the model, in first-appearance order, recording each prefix's exact
