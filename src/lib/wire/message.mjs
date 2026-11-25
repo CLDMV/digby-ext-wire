@@ -767,7 +767,10 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 					// is only re-keyed here, never queued.
 					const off = realOf(entry);
 					if (off < 0x4000) {
-						entry.score = 0x4000 - off + cumPos;
+						// the re-keyed slack is floored at one octet so a re-keyed entry can never satisfy the pop
+						// condition immediately — every drain pop makes progress (the crossed-out branch below is
+						// what a registration exactly on the boundary takes)
+						entry.score = Math.max(1, 0x4000 - off) + cumPos;
 						heapPush(heapV, entry);
 					} else {
 						entry.score = off - 0x4000 + cumNeg;
@@ -777,8 +780,10 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				}
 				const off = realOf(entry);
 				if (off < 0x4000) {
-					// still in range: re-key with the fresh slack and wait for the next shift
-					entry.score = 0x4000 - off + cumPos;
+					// still in range: re-key with the fresh slack and wait for the next shift — the slack is at
+					// least one octet (the entry is strictly inside the range), so the re-keyed entry never
+					// satisfies `score <= cumPos` on its own and the drain loop always makes progress
+					entry.score = Math.max(1, 0x4000 - off) + cumPos;
 					heapPush(heapV, entry);
 					continue;
 				}
@@ -969,28 +974,19 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				// is two octets to either target, so the examiners' stored octets are unchanged and nobody
 				// re-measures. The out-of-range registration is still recorded, in the drift-in heap. A `prevKnown`
 				// prev was removed from the model before the measurement (a re-measured record's own registration),
-				// so it goes back in — and back into the in-range heap, where its own crossings stay watched.
-				if (model.get(key) !== prev) {
-					model.set(key, prev);
-					prev.score = 0x4000 - prevOff + cumPos;
-					heapPush(heapV, prev);
-				}
+				// so it goes back in. It is NOT re-pushed: every entry lives in exactly one heap slot from its
+				// adoption (removing it from the model never touches the heaps, and a pop re-keys it), and pushing
+				// it again would put one object in two slots — its shared mutable score would then corrupt the
+				// min-heap order and pops would miss crossings (the 15,080-mismatch m2kill regression this round
+				// fixed — CLDMV/digby#43).
+				if (model.get(key) !== prev) model.set(key, prev);
 				entry.score = off - 0x4000 + cumNeg;
 				heapPush(heapI, entry);
 				return;
 			}
 			model.set(key, entry);
-			if (prev !== null) {
-				// the displaced entry stays watched: its own offset moves with the same shifts, and a later
-				// crossing or comeback of it still reaches the examiners that measured against it (round 10)
-				if (prevOff < 0x4000) {
-					prev.score = 0x4000 - prevOff + cumPos;
-					heapPush(heapV, prev);
-				} else {
-					prev.score = prevOff - 0x4000 + cumNeg;
-					heapPush(heapI, prev);
-				}
-			}
+			// the displaced prev needs no re-push either: its adoption slot still holds it, and when that slot pops,
+			// `model.get(key) !== entry` routes it through the watcher path, which re-keys it by its fresh offset
 			if (off < 0x4000) {
 				entry.score = 0x4000 - off + cumPos;
 				heapPush(heapV, entry);
