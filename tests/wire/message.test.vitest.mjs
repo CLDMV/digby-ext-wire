@@ -953,7 +953,7 @@ describe("encodeCapped: in-flight registrations and the 0x4000 drift window (CLD
 	// frozen point — which trusts its totals — hides the fitting prefix outright (no trial ever runs). The family:
 	// the filler centres Y2's K registration exactly on 0x4000 in the transient state right after its set folds,
 	// X1's shrink (compressing against Y1's N) pulls it under, and C — which measured K absent — is its examiner.
-	const m2Shape = (filler, nLen, kLen, variant = 0) => {
+	const m2Shape = (filler, nLen, kLen, zSize = 3000, variant = 0) => {
 		const N = `${"n".repeat(nLen)}.example.`;
 		const K = `${"k".repeat(kLen)}.kk.`;
 		const answers = [
@@ -965,7 +965,7 @@ describe("encodeCapped: in-flight registrations and the 0x4000 drift window (CLD
 			ns("l.t.", `c.${K}`)
 		];
 		if (variant === 1) answers.push(ns("l.t.", `d.${K}`));
-		answers.push(bigTxt("z.t.", 3000));
+		answers.push(bigTxt("z.t.", zSize));
 		return { id: 1, flags: { qr: true }, questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }], answers };
 	};
 	const m2Prefix2 = (filler, nLen, kLen, variant) => ({ ...m2Shape(filler, nLen, kLen, 3000, variant), answers: m2Shape(filler, nLen, kLen, 3000, variant).answers.filter((r) => r.name !== "z.t.") });
@@ -986,6 +986,9 @@ describe("encodeCapped: in-flight registrations and the 0x4000 drift window (CLD
 		return center;
 	};
 	it("matches the best-fit reference when a registration lands exactly on 0x4000 and drifts back under (CLDMV/digby#43)", () => {
+		// both variants, and the filler swept +-40 around the centred landing the way the review harness sweeps it
+		// (tmp/agents/r10/m2kill.mjs stands for the sweep; the harness centres the same way) — the round-9 test
+		// passed 3000 in the variant slot, so variant 1 (the second l.t. examiner of K) never ran
 		for (const [nLen, kLen] of [
 			[20, 20],
 			[20, 63],
@@ -993,10 +996,12 @@ describe("encodeCapped: in-flight registrations and the 0x4000 drift window (CLD
 			[63, 63]
 		]) {
 			const center = m2Center(nLen, kLen);
-			for (const filler of [center - 8, center, center + 8]) {
-				const m = m2Shape(filler, nLen, kLen, 3000, 0);
-				const size2 = encodeMessage(m2Prefix2(filler, nLen, kLen, 0)).length;
-				for (let limit = size2 - 3; limit <= size2 + 12; limit++) compare(m, limit, `m2 n=${nLen} k=${kLen} filler=${filler} limit=${limit}`);
+			for (const variant of [0, 1]) {
+				for (const filler of [center - 40, center - 8, center, center + 8, center + 40]) {
+					const m = m2Shape(filler, nLen, kLen, 3000, variant);
+					const size2 = encodeMessage(m2Prefix2(filler, nLen, kLen, variant)).length;
+					for (let limit = size2 - 3; limit <= size2 + 12; limit++) compare(m, limit, `m2 n=${nLen} k=${kLen} variant=${variant} filler=${filler} limit=${limit}`);
+				}
 			}
 		}
 	}, 600_000);
