@@ -201,6 +201,24 @@ export function cloneOptions(options, what) {
 		if (err instanceof WireError) throw err;
 		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
 	}
+	// a nested option object must be plain too (CLDMV/digby#39, round 8): the copy resets every prototype, so an
+	// option living on a nested custom prototype — encodeForTransport's query among them — would be silently dropped,
+	// while the same value handed to udpLimit directly is read through it. Refusing the non-plain shape here makes
+	// both entries refuse it the same way. Arrays are copied whole by the serializer and carry no prototype-borne
+	// fields, and an accessor's value is the serializer's single read — both are left to it. The walk reads
+	// descriptors, never the values, so no getter is read here and the copy still reads each field exactly once.
+	try {
+		for (const k of Object.keys(options)) {
+			const d = Object.getOwnPropertyDescriptor(options, k);
+			const v = d !== undefined && "value" in d ? d.value : undefined;
+			if (v === null || typeof v !== "object") continue;
+			if (!isPlainObject(v) && !Array.isArray(v))
+				fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} hold a non-plain object under "${k}"; the copy would silently drop its prototype-borne options (CLDMV/digby#39)`);
+		}
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
+	}
 	return cloneInput(options, what);
 }
 
