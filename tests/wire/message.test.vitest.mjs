@@ -535,6 +535,33 @@ function oracleCapped(message, { limit, truncate = true, compress = true }) {
 	const sections = [message.answers ?? [], message.authorities ?? [], message.additionals ?? []];
 	const written = [0, 0, 0];
 	let truncated = false;
+	// The plain attempt first (CLDMV/digby#43): a message whose full encode fits the limit is returned whole, without
+	// TC. The greedy keep below stops at the first RRset whose drop-here stream does not fit, and stream size is not
+	// monotone in the sets kept — the sets interleave, so a set decided later can register a compression target the
+	// already-kept records compress against, and continuing past a non-fitting set can shrink the stream until
+	// everything fits — so the reference answers fit-or-truncate exactly the way the codec now does: encode
+	// everything once, return it when it fits, and only otherwise decide by the exact trials.
+	const plainMark = w.checkpoint();
+	let plainFits = true;
+	try {
+		for (let s = 0; s < 3; s++)
+			for (let i = 0; i < sections[s].length; i++) {
+				writeRecord(w, sections[s][i]);
+				written[s]++;
+			}
+	} catch (err) {
+		if (!(err instanceof WireError && err.code === WireErrorCode.MESSAGE_TOO_LARGE)) throw err;
+		plainFits = false;
+	}
+	if (plainFits && w.length <= limit) {
+		written.forEach((n, i) => w.patch16(countAt + i * 2, n));
+		return { bytes: w.finish(), truncated: false };
+	}
+	// it does not fit whole: undo the attempt — its registrations included — and decide by the exact trials below
+	w.rollback(plainMark);
+	written[0] = 0;
+	written[1] = 0;
+	written[2] = 0;
 	outer: for (let s = 0; s < 3; s++) {
 		const list = sections[s];
 		const { sets, owner } = rrsets(list);
@@ -766,4 +793,51 @@ describe("encodeCapped matches the exact-trial reference on 0x4000-straddling in
 		expect(d.answers[0].data.strings.reduce((n, s) => n + s.length, 0)).toBe(16000);
 		expect(d.answers[1].data.strings.reduce((n, s) => n + s.length, 0)).toBe(g);
 	});
+
+	// The C1 repro of round 7 (CLDMV/digby#43): a message whose full encode fits the limit, but whose greedy prefix
+	// keep stops early. The y.t. record writes N at an offset just below 0x4000 and registers it, so the l.t.
+	// records' targets (a60<i>.N) compress against it — but the l.t. set is decided BEFORE the y.t. set, and the
+	// drop-here stream at the l.t. set (the y.t. record absent) writes every a60<i>.N target in full, which does not
+	// fit at a limit the whole message fits. Stream size is not monotone in the sets kept. The greedy stop used to
+	// truncate there: at limit == full the encode came back TC'd with 3 of 13 answers.
+	const c1Shape = (trailing) => {
+		const N = `${"w".repeat(60)}.${"x".repeat(63)}.example.`;
+		const a60 = (i) => `${"a".repeat(60)}${i}`;
+		return {
+			id: 1,
+			flags: { qr: true },
+			questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }],
+			answers: [
+				bigTxt("f.t.", 16176),
+				ns("e.t.", "s.q."),
+				ns("l.t.", "s.q."),
+				ns("y.t.", N),
+				ns("e.t.", `p63.${N}`),
+				...Array.from({ length: trailing }, (_, i) => ns("l.t.", `${a60(i + 1)}.${N}`))
+			]
+		};
+	};
+
+	it("returns whole a message whose full encode fits though a prefix's drop-here stream does not (CLDMV/digby#43)", () => {
+		for (const [trailing, fullExpected] of [
+			[8, 17142],
+			[3, 16762]
+		]) {
+			const m = c1Shape(trailing);
+			const full = encodeMessage(m).length;
+			for (const limit of [full, full + 1]) {
+				const capped = encodeCapped(m, { limit });
+				expect(capped.truncated, `trailing=${trailing} limit=${limit}: the whole message fits, no TC`).toBe(false);
+				expect(hex.to(capped.bytes), `trailing=${trailing} limit=${limit}: the whole message, byte for byte`).toBe(hex.to(encodeMessage(m)));
+				const d = decodeMessage(capped.bytes);
+				expect(d.answers, `trailing=${trailing} limit=${limit}: every answer survives`).toHaveLength(m.answers.length);
+				expect(d.flags.tc, `trailing=${trailing} limit=${limit}: no TC`).toBe(false);
+			}
+			// and the differential holds across the window the bug sat in: below the full size the greedy truncation
+			// applies and must match the exact-trial reference byte for byte
+			for (let limit = full - 700; limit <= full; limit++) compareWithReference(m, limit, `trailing=${trailing} limit=${limit}`);
+			// the repro's size, pinned last so the property above is what a failure reports
+			expect(full, `trailing=${trailing}: the repro's full encode (the finding's number)`).toBe(fullExpected);
+		}
+	}, 300_000);
 });
