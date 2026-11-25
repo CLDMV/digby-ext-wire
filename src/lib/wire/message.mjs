@@ -859,15 +859,16 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 			// heap), but the measurement writes the name in full while its real offset stays at or past 0x4000
 			if (o !== undefined) return o.real < 0x4000 ? o.real : undefined;
 			const m = model.get(key);
-			if (m !== undefined) {
+			// a target is visible only where the stream already has it: written by an EARLIER record — record
+			// order, not an offset read off the tree, because the records being measured are not in the tree yet
+			// and an offset check would place a later record's registration before the in-flight write position
+			// (the probe then saw a target the real stream did not have yet, an uncompressed-but-registering name
+			// never recorded its registration, and the model overcounted — CLDMV/digby#43, round 9) — and inside
+			// the pointer range. The record-order check gates first, so realOf is only computed for a target the
+			// stream already has.
+			if (m !== undefined && m.rec < curRec) {
 				const r = realOf(m);
-				// a target is visible only where the stream already has it: written by an EARLIER record — record
-				// order, not an offset read off the tree, because the records being measured are not in the tree yet
-				// and an offset check would place a later record's registration before the in-flight write position
-				// (the probe then saw a target the real stream did not have yet, an uncompressed-but-registering name
-				// never recorded its registration, and the model overcounted — CLDMV/digby#43, round 9) — and inside
-				// the pointer range.
-				return r < 0x4000 && m.rec < curRec ? r : undefined;
+				return r < 0x4000 ? r : undefined;
 			}
 			return w.names.get(key);
 		};
@@ -995,7 +996,11 @@ function encodeCappedRaw(message, { limit, truncate, compress }) {
 				heapPush(heapI, entry);
 			}
 			const moved = prev !== null && off !== prevOff;
-			if ((prev === null && off < 0x4000) || (moved && (off < 0x4000 || prevOff < 0x4000))) {
+			// `prevOff < 0x4000` needs no disjunct here: the no-displacement branch above returns early on exactly
+			// the case prevOff < 0x4000 && off >= 0x4000 (an out-of-range registration arriving over an in-range
+			// one — nobody re-measures, the examiners' octets are unchanged), and when off < 0x4000 the first
+			// disjunct of the condition already fires
+			if ((prev === null && off < 0x4000) || (moved && off < 0x4000)) {
 				const ix = index.get(key);
 				if (ix !== undefined) for (const q of ix) queuePush(q, key, except);
 			}
