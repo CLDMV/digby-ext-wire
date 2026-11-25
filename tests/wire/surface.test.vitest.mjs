@@ -166,6 +166,43 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		expect(() => decodeMessage(bytes, Object.assign(Object.create(null), { allowTrailing: true }))).not.toThrow();
 	});
 
+	it("a bound on the prototype is refused however it is hidden: by key, not by prototype shape (CLDMV/digby#39, round 9)", () => {
+		// round 8's plain-object check was forgeable: any prototype whose own `constructor` is a function named
+		// "Object" with `.prototype ===` that prototype passed it, and the bound it carries was silently dropped by
+		// the copy — the forged-function, renamed-class and inherited forms below all encoded at 1117 octets with
+		// maxSize 40 in force. The check is now by key: an inherited ENUMERABLE key is refused (the copy drops it),
+		// and so is an inherited KNOWN option key however hidden — a class getter is non-enumerable and the
+		// enumerable check cannot see it.
+		const big = {
+			...message(),
+			answers: [
+				{ name: "a.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.1" } },
+				{ name: "b.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.2" } }
+			]
+		};
+		const F = function Object() {};
+		F.prototype.maxSize = 40;
+		expect(code(() => encodeMessage(big, new F()))).toBe("VALUE_OUT_OF_RANGE");
+		class Object2 {
+			get maxSize() {
+				return 40;
+			}
+		}
+		Object.defineProperty(Object2, "name", { value: "Object" });
+		expect(code(() => encodeMessage(big, new Object2()))).toBe("VALUE_OUT_OF_RANGE");
+		const G = function Object() {};
+		G.prototype.maxNameOctets = 1;
+		expect(code(() => decodeMessage(bytes, new G()))).toBe("VALUE_OUT_OF_RANGE");
+		// the same forge against the query: encodeForTransport's options walk refuses the prototype-borne edns before
+		// the copy could silently drop it (udpLimit's own reader catches it once its guarded snapshot lands)
+		const Q = function Object() {};
+		Q.prototype.edns = { udpSize: 4096 };
+		expect(code(() => encodeForTransport(message(), { transport: "udp", cap: 4096, query: new Q() }))).toBe("VALUE_OUT_OF_RANGE");
+		// plain data of every realm still works: vm, JSON, null-prototype, frozen and structuredClone'd options are
+		// all own-keyed, so nothing is dropped and nothing needs the prototype shape
+		expect(() => decodeMessage(bytes, structuredClone({ allowTrailing: true }))).not.toThrow();
+	});
+
 	it("an own non-enumerable or symbol-keyed option is refused, never silently dropped (CLDMV/digby#39, round 8)", () => {
 		// structuredClone copies own enumerable string-keyed properties only: Object.defineProperty({}, "maxSize",
 		// { value: 40 }) used to encode the whole message — the bound silently gone. Every known bound hides the same

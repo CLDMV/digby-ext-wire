@@ -91,13 +91,137 @@ export function isSharedBuffer(b) {
 }
 
 /**
+ * Every option key any public entry reads (CLDMV/digby#39, round 9): decodeMessage's (`allowTrailing`, `maxQuestions`,
+ * `maxNameOctets`), encodeMessage's (`maxSize`, `compress`), encodeCapped's (`limit`, `reserveTsig`, `truncate`),
+ * parseRecord's (`origin`, `ttl`, `class`), the transport entries' (`cap`, `transport`, `query`) and the query's own
+ * fields (`edns`, `udpSize`). A key from this set that an options object — or a nested option object, or the query —
+ * carries only on its prototype is refused, however it got there: enumerable (the copy would silently drop it) or
+ * non-enumerable, a class getter among them, which the enumerable check cannot see.
+ */
+const OPTION_KEYS = Object.freeze([
+	"allowTrailing", "cap", "class", "compress", "edns", "limit", "maxNameOctets", "maxQuestions", "maxSize", "origin", "query", "reserveTsig", "transport", "truncate", "ttl", "udpSize"
+]);
+
+/**
+ * The refusal for an option that lives on the prototype: the snapshot and the copy behind it read own enumerable
+ * properties only, so the bound would silently vanish (CLDMV/digby#39, round 9).
+ * @param {string} where
+ * @param {string} k
+ * @returns {never}
+ */
+function hiddenOption(where, k) {
+	return fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} carry the "${k}" option on the prototype; the copy would silently drop it (CLDMV/digby#39, round 9)`);
+}
+
+/**
+ * Build a plain-data snapshot of a caller value, reading every own enumerable property exactly once and refusing
+ * everything the copy would silently drop or that could split a check from its use (CLDMV/digby#39, round 9). The
+ * rules, at every depth:
+ *
+ * - every SharedArrayBuffer form is refused NOT_CLONEABLE first, by brand — a SharedArrayBuffer is not a shape
+ *   question, and the old plain-shape refusal reported it VALUE_OUT_OF_RANGE;
+ * - a shape read that throws — a Proxy whose traps throw, a revoked Proxy — is the NOT_CLONEABLE refusal, never a raw
+ *   TypeError;
+ * - only plain objects and arrays are copied; anything else is refused VALUE_OUT_OF_RANGE by the
+ *   `Object.prototype.toString` tag, whose read runs no caller code but a `Symbol.toStringTag` getter;
+ * - an own non-enumerable key, a symbol-keyed own key and an inherited key — enumerable, or a known option key however
+ *   hidden ({@link OPTION_KEYS}) — are all refused: the copy reads own enumerable properties only, so every one of
+ *   them would silently vanish;
+ * - an array keeps its length and its holes, so the copy's density checks see what the caller gave, and an own
+ *   non-index property is refused, which the copy would drop;
+ * - an accessor is read exactly once, here — the snapshot holds the value the checks saw, so a getter cannot show the
+ *   guard one value and the copy another.
+ *
+ * The snapshot is caller-independent: every plain object and array in it is freshly built, so what {@link cloneInput}
+ * then copies is already the guarded data, and no caller method, iterator or `Symbol.species` runs.
+ *
+ * @param {unknown} v
+ * @param {string} where - what the value is, for the refusal messages
+ * @param {Map<object, unknown>} memo - source object → its snapshot, so a cycle is walked once and preserved
+ * @returns {unknown}
+ */
+function snapshotValue(v, where, memo) {
+	if (v === null || typeof v !== "object") return v; // primitives; a function is the copy's NOT_CLONEABLE refusal
+	// every SharedArrayBuffer form, before any shape check (CLDMV/digby#39, round 9): the buffer read through the
+	// intrinsic getter, so an own `buffer` property cannot shadow it
+	if (ArrayBuffer.isView(v) ? isSharedBuffer(intrinsicBuffer(v)) : isSharedBuffer(v))
+		fail(WireErrorCode.NOT_CLONEABLE, `${where} is ${ArrayBuffer.isView(v) ? "a view over " : ""}a SharedArrayBuffer; the copy would share it, not copy it (CLDMV/digby#39)`);
+	// the shape reads below run caller code on a Proxy (a revoked Proxy included) — any such throw is the
+	// NOT_CLONEABLE refusal, never a raw TypeError (CLDMV/digby#39, round 9)
+	let tag;
+	try {
+		tag = Object.prototype.toString.call(v);
+	} catch {
+		fail(WireErrorCode.NOT_CLONEABLE, `${where} is not structured-clone data (CLDMV/digby#39)`);
+	}
+	const isArray = tag === "[object Array]";
+	if (tag !== "[object Object]" && !isArray)
+		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} must be plain data, got a ${tag.slice(8, -1)} (CLDMV/digby#39)`);
+	if (memo.has(v)) return memo.get(v);
+	const out = isArray ? [] : {};
+	memo.set(v, out);
+	// own enumerable string keys only, each read exactly once. On a plain object the reads run no caller code; on a
+	// Proxy they fire its traps, and any throw is NOT_CLONEABLE.
+	let descs;
+	try {
+		descs = Object.getOwnPropertyDescriptors(v);
+		if (Object.getOwnPropertySymbols(v).length > 0)
+			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} carry a symbol-keyed option; the copy would silently drop it (CLDMV/digby#39, round 8)`);
+		// an inherited enumerable key is dropped by the copy; so is an inherited KNOWN option key however hidden — a
+		// class getter is non-enumerable, and only the known-key check can see it (CLDMV/digby#39, round 9)
+		for (const k in v) if (!Object.hasOwn(v, k)) hiddenOption(where, k);
+		for (const k of OPTION_KEYS) if (k in v && !Object.hasOwn(v, k)) hiddenOption(where, k);
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		fail(WireErrorCode.NOT_CLONEABLE, `${where} is not structured-clone data (CLDMV/digby#39)`);
+	}
+	for (const [k, d] of Object.entries(descs)) {
+		if (isArray && k === "length") {
+			// the list's length — and with it its holes — is preserved, so the copy's density checks see what the
+			// caller gave (CLDMV/digby#39)
+			out.length = "value" in d ? d.value : v.length;
+			continue;
+		}
+		if (!d.enumerable)
+			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} hide the "${k}" option behind a non-enumerable own property; the copy would silently drop it (CLDMV/digby#39, round 8)`);
+		if (isArray && `${k >>> 0}` !== k)
+			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} carry the "${k}" property; a list holds indices only, and the copy would silently drop it (CLDMV/digby#39, round 9)`);
+		let value;
+		if ("value" in d) value = d.value; // the descriptor's value: read once, never a second get
+		else
+			try {
+				value = v[k]; // an accessor: the one read, here — the snapshot holds the value the checks saw
+			} catch {
+				fail(WireErrorCode.NOT_CLONEABLE, `${where} is not structured-clone data (CLDMV/digby#39)`);
+			}
+		out[k] = snapshotValue(value, `${where}.${k}`, memo);
+	}
+	return out;
+}
+
+/**
+ * {@link snapshotValue} behind a catch-all: any throw it does not itself recognise as a {@link WireError} — an internal
+ * slot read on a revoked Proxy, a trap it does not wrap, deep recursion — is the NOT_CLONEABLE refusal, never a raw
+ * error (CLDMV/digby#39).
+ * @param {unknown} v
+ * @param {string} where
+ * @returns {unknown}
+ */
+function snapshotGuarded(v, where) {
+	try {
+		return snapshotValue(v, where, new Map());
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		fail(WireErrorCode.NOT_CLONEABLE, `${where} is not structured-clone data (CLDMV/digby#39)`);
+	}
+}
+
+/**
  * Whether `o` is a plain object, by shape rather than realm (CLDMV/digby#39, round 8): its prototype is `null`, or is some
  * realm's `Object.prototype` — an object whose own `constructor` is a function named `Object` whose `prototype` is that
- * object. Prototype identity against this realm's `Object.prototype` refuses options `structuredClone`d, JSON-parsed or
- * built in another realm (a `vm` context's `Object.prototype` is a different object), and `instanceof Object` fails for
- * null-prototype objects. The reads (`Object.getPrototypeOf`, `getOwnPropertyDescriptor`, and the `constructor`, `name` and
- * `prototype` property reads off the descriptor's value) run no caller code on a plain object; on a Proxy or anything
- * hostile they may throw, and false is returned — the caller refuses a non-plain value anyway.
+ * object. Forgeable (round 9): any prototype whose own `constructor` is such a function passes it, and a bound on that
+ * prototype is silently dropped by the copy — the options path no longer uses it, and udpLimit's query stops using it
+ * when its guarded reader lands; kept until then for that one caller.
  * @param {unknown} o
  * @returns {boolean}
  */
@@ -155,71 +279,35 @@ export function asBytes(bytes) {
 
 /**
  * Guard a public entry's options argument (CLDMV/digby#39): `null` and `undefined` mean "no options"; any other
- * non-object is refused VALUE_OUT_OF_RANGE; and the options are copied once with structuredClone — a getter that
- * throws, a Proxy (a revoked one included) or a function option value is the NOT_CLONEABLE refusal, never a raw
- * TypeError, and every option is read exactly once.
+ * non-object is refused VALUE_OUT_OF_RANGE; and the options are snapshotted once ({@link snapshotGuarded}) — every own
+ * enumerable property read exactly once, a getter that throws, a Proxy whose traps throw and a revoked Proxy the
+ * NOT_CLONEABLE refusal, never a raw TypeError, and every option the copy would silently drop — a prototype-borne,
+ * hidden, symbol-keyed or non-index one — refused before the copy runs.
  * @param {unknown} options
  * @param {string} what
  * @returns {object}
  */
 export function cloneOptions(options, what) {
+	// `typeof` runs no caller code on any value — not even on a revoked Proxy, which does not throw for it (round 9
+	// corrects the old comment, which claimed it does). `Array.isArray` can throw on one (its IsArray walks to the
+	// revoked target), so it sits inside the refusal it feeds, like the snapshot below — which CAN run caller code (a
+	// Proxy's traps, a throwing getter) (CLDMV/digby#39).
 	if (options === null || options === undefined) return {};
-	// `typeof` runs no caller code on any value (a revoked Proxy throws even for it) — it sits inside the refusal it
-	// feeds. The walk and the copy below can run caller code (a Proxy's traps, a throwing getter) — they sit inside
-	// the refusals they feed too.
-	let tag;
+	if (typeof options !== "object") fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be an object, got ${describe(options)}`);
+	let isArray;
 	try {
-		tag = typeof options;
+		isArray = Array.isArray(options);
 	} catch {
 		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
 	}
-	if (tag !== "object") fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be an object, got ${describe(options)}`);
-	// structuredClone copies own enumerable properties only, so an option that lives on the prototype — a size or
-	// name bound among them — would silently vanish into the copy: encodeMessage(big, Object.create({ maxSize: 40 }))
-	// encoded the whole message, udpLimit read the default cap, decodeMessage decoded without its name cap. Refuse
-	// every non-plain object, by shape rather than realm (CLDMV/digby#39, round 8): a class instance, a Map,
-	// Object.create(proto) — and the check is the null prototype or some realm's Object.prototype ({@link
-	// isPlainObject}), never identity with this realm's, so plain options from another realm still work.
-	if (!isPlainObject(options))
-		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object; an option on the prototype would be silently dropped by the copy (CLDMV/digby#39)`);
-	// structuredClone copies own enumerable STRING-keyed properties only, so a non-enumerable own option or a
-	// symbol-keyed one would be silently dropped by the copy: encodeMessage(big, Object.defineProperty({}, "maxSize",
-	// { value: 40 })) used to encode the whole message. A bound hidden behind either is refused here, before the copy
-	// (CLDMV/digby#39, round 8). The reads run no caller code on a plain object; on a Proxy they fire its traps, and
-	// any throw is the NOT_CLONEABLE refusal, before the copy would refuse it anyway.
-	let names;
-	try {
-		names = Object.getOwnPropertyNames(options);
-		if (Object.getOwnPropertySymbols(options).length > 0)
-			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} carry a symbol-keyed option; the copy would silently drop it (CLDMV/digby#39)`);
-		for (const k of names) {
-			const d = Object.getOwnPropertyDescriptor(options, k);
-			if (d !== undefined && !d.enumerable)
-				fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} hide the "${k}" option behind a non-enumerable own property; the copy would silently drop it (CLDMV/digby#39)`);
-		}
-	} catch (err) {
-		if (err instanceof WireError) throw err;
-		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
-	}
-	// a nested option object must be plain too (CLDMV/digby#39, round 8): the copy resets every prototype, so an
-	// option living on a nested custom prototype — encodeForTransport's query among them — would be silently dropped,
-	// while the same value handed to udpLimit directly is read through it. Refusing the non-plain shape here makes
-	// both entries refuse it the same way. Arrays are copied whole by the serializer and carry no prototype-borne
-	// fields, and an accessor's value is the serializer's single read — both are left to it. The walk reads
-	// descriptors, never the values, so no getter is read here and the copy still reads each field exactly once.
-	try {
-		for (const k of Object.keys(options)) {
-			const d = Object.getOwnPropertyDescriptor(options, k);
-			const v = d !== undefined && "value" in d ? d.value : undefined;
-			if (v === null || typeof v !== "object") continue;
-			if (!isPlainObject(v) && !Array.isArray(v))
-				fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} hold a non-plain object under "${k}"; the copy would silently drop its prototype-borne options (CLDMV/digby#39)`);
-		}
-	} catch (err) {
-		if (err instanceof WireError) throw err;
-		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
-	}
-	return cloneInput(options, what);
+	if (isArray) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object, not an array`);
+	// The options are snapshotted, not handed to structuredClone directly (CLDMV/digby#39, round 9): the snapshot
+	// carries only own enumerable data, so the copy reads the snapshot, never the caller's objects — a getter cannot
+	// show the guard one value and the copy another. Round 8's prototype-shape check is gone: it was forgeable — any
+	// prototype whose own `constructor` is a function named "Object" with `.prototype ===` that prototype passed it,
+	// and its bound was silently dropped — and once only own keys are read, the realm of the prototype does not
+	// matter: plain options from another realm, JSON-parsed, frozen, structuredClone'd or null-prototype ones all work.
+	return cloneInput(snapshotGuarded(options, what), what);
 }
 
 /**
