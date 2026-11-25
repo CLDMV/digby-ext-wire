@@ -158,6 +158,25 @@ export function cloneOptions(options, what) {
 	// silently dropping a bound is not allowed (CLDMV/digby#39).
 	if (proto !== Object.prototype && proto !== null)
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object; an option on the prototype would be silently dropped by the copy (CLDMV/digby#39)`);
+	// structuredClone copies own enumerable STRING-keyed properties only, so a non-enumerable own option or a
+	// symbol-keyed one would be silently dropped by the copy: encodeMessage(big, Object.defineProperty({}, "maxSize",
+	// { value: 40 })) used to encode the whole message. A bound hidden behind either is refused here, before the copy
+	// (CLDMV/digby#39, round 8). The reads run no caller code on a plain object; on a Proxy they fire its traps, and
+	// any throw is the NOT_CLONEABLE refusal, before the copy would refuse it anyway.
+	let names;
+	try {
+		names = Object.getOwnPropertyNames(options);
+		if (Object.getOwnPropertySymbols(options).length > 0)
+			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} carry a symbol-keyed option; the copy would silently drop it (CLDMV/digby#39)`);
+		for (const k of names) {
+			const d = Object.getOwnPropertyDescriptor(options, k);
+			if (d !== undefined && !d.enumerable)
+				fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} hide the "${k}" option behind a non-enumerable own property; the copy would silently drop it (CLDMV/digby#39)`);
+		}
+	} catch (err) {
+		if (err instanceof WireError) throw err;
+		fail(WireErrorCode.NOT_CLONEABLE, `${what} are not structured-clone data (CLDMV/digby#39)`);
+	}
 	return cloneInput(options, what);
 }
 
