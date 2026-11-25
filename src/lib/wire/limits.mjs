@@ -39,8 +39,10 @@ export function udpLimit(query, options) {
 	// 9): null and undefined mean "no query", any other non-object is refused instead of reading as one without EDNS
 	// (udpLimit("x") used to return 512), and the shape rules are the snapshot's, at every depth — a prototype-borne,
 	// hidden, symbol-keyed or non-index key is refused instead of being read here and silently dropped by
-	// encodeForTransport's copy, a SharedArrayBuffer form inside the query is refused NOT_CLONEABLE, and a Proxy is
-	// refused NOT_CLONEABLE by the copy exactly as the transport encode refuses it. Only the snapshot is read
+	// encodeForTransport's copy, a SharedArrayBuffer form inside the query is refused NOT_CLONEABLE, a Proxy is
+	// refused NOT_CLONEABLE by the copy exactly as the transport encode refuses it, and the decoded query the contract
+	// names is accepted: a TypedArray or ArrayBuffer leaf (a COOKIE's client octets, a raw option's data, byte-valued
+	// rdata) is accepted by brand and copied, never walked (CLDMV/digby#39, round 10). Only the snapshot is read
 	// afterwards: the advertised size is validated, never coerced — Math.max's ToNumber on a BigInt, a Symbol, a
 	// hostile toString or a throwing Symbol.toPrimitive throws a raw TypeError, a sparse or deep array coerces to a
 	// wrong limit, and a missing udpSize produced a NaN
@@ -60,7 +62,9 @@ export function udpLimit(query, options) {
  * @param {object} message - the response
  * @param {object} options
  * @param {"udp"|"tcp"} options.transport
- * @param {object} [options.query] - the query being answered (UDP: its EDNS size sets the limit)
+ * @param {object} [options.query] - the query being answered (UDP: its EDNS size sets the limit); the decoded query is
+ *   accepted — a TypedArray or ArrayBuffer leaf inside it (a COOKIE's client octets, a raw option's data, byte-valued
+ *   rdata) is copied by brand, and only its `edns.udpSize` is read (CLDMV/digby#39, round 10)
  * @param {number} [options.cap=1232] - UDP: our EDNS buffer size
  * @param {number} [options.limit] - override the computed limit
  * @param {boolean} [options.compress=true]

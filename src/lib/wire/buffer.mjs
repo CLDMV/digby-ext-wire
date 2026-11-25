@@ -125,7 +125,11 @@ function hiddenOption(where, k) {
  * - a shape read that throws — a Proxy whose traps throw, a revoked Proxy — is the NOT_CLONEABLE refusal, never a raw
  *   TypeError;
  * - only plain objects and arrays are copied; anything else is refused VALUE_OUT_OF_RANGE by the
- *   `Object.prototype.toString` tag, whose read runs no caller code but a `Symbol.toStringTag` getter;
+ *   `Object.prototype.toString` tag, whose read runs no caller code but a `Symbol.toStringTag` getter — except inside a
+ *   query ({@link snapshotQuery}, or the transport options' `query` key and everything under it), where a TypedArray or
+ *   ArrayBuffer leaf is accepted by brand (CLDMV/digby#39, round 10): the decoded query the contract names carries
+ *   byte values everywhere, and the SAB forms were refused NOT_CLONEABLE above, so a leaf here carries a plain
+ *   ArrayBuffer slot; the leaf is copied by the clone, never walked;
  * - an own non-enumerable key, a symbol-keyed own key and an inherited key — enumerable, or a known option key however
  *   hidden ({@link OPTION_KEYS}) — are all refused: the copy reads own enumerable properties only, so every one of
  *   them would silently vanish;
@@ -135,14 +139,17 @@ function hiddenOption(where, k) {
  *   guard one value and the copy another.
  *
  * The snapshot is caller-independent: every plain object and array in it is freshly built, so what {@link cloneInput}
- * then copies is already the guarded data, and no caller method, iterator or `Symbol.species` runs.
+ * then copies is already the guarded data, and no caller method, iterator or `Symbol.species` runs. (A query-mode leaf
+ * is the caller's own TypedArray or ArrayBuffer, held by reference for the one synchronous hop to the clone — the
+ * serializer copies its octets, so nothing shared or aliasing survives.)
  *
  * @param {unknown} v
  * @param {string} where - what the value is, for the refusal messages
  * @param {Map<object, unknown>} memo - source object → its snapshot, so a cycle is walked once and preserved
+ * @param {boolean} [query=false] - inside a query: a TypedArray or ArrayBuffer leaf is accepted by brand
  * @returns {unknown}
  */
-function snapshotValue(v, where, memo) {
+function snapshotValue(v, where, memo, query = false) {
 	if (v === null || typeof v !== "object") return v; // primitives; a function is the copy's NOT_CLONEABLE refusal
 	// every SharedArrayBuffer form, before any shape check (CLDMV/digby#39, round 9): the buffer read through the
 	// intrinsic getter, so an own `buffer` property cannot shadow it
@@ -157,8 +164,14 @@ function snapshotValue(v, where, memo) {
 		fail(WireErrorCode.NOT_CLONEABLE, `${where} is not structured-clone data (CLDMV/digby#39)`);
 	}
 	const isArray = tag === "[object Array]";
-	if (tag !== "[object Object]" && !isArray)
+	if (tag !== "[object Object]" && !isArray) {
+		// a TypedArray or ArrayBuffer leaf inside a query is accepted by brand (CLDMV/digby#39, round 10): the brand
+		// getters verify the internal slot from any realm, under any prototype swap, and run no caller code — a fake
+		// tag is not enough here. The SAB forms are already refused above, a DataView is not (never in a decoded
+		// query), and the options proper stay strict: a non-plain value under any other option key is refused (round 9)
+		if (query && queryLeaf(v)) return v;
 		fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} must be plain data, got a ${tag.slice(8, -1)} (CLDMV/digby#39)`);
+	}
 	if (memo.has(v)) return memo.get(v);
 	const out = isArray ? [] : {};
 	memo.set(v, out);
@@ -196,9 +209,35 @@ function snapshotValue(v, where, memo) {
 			} catch {
 				fail(WireErrorCode.NOT_CLONEABLE, `${where} is not structured-clone data (CLDMV/digby#39)`);
 			}
-		out[k] = snapshotValue(value, `${where}.${k}`, memo);
+		// inside the transport options' `query` key the query rules take over for the whole subtree (CLDMV/digby#39,
+		// round 10) — the same walk, so the options and the query still read the one guarded snapshot
+		out[k] = snapshotValue(value, `${where}.${k}`, memo, query || k === "query");
 	}
 	return out;
+}
+
+/**
+ * Whether `v` is a TypedArray or an ArrayBuffer leaf, by brand (CLDMV/digby#39, round 10): the intrinsic TypedArray
+ * `Symbol.toStringTag` getter succeeds only on an object carrying the TypedArray internal slot, and the intrinsic
+ * `ArrayBuffer.prototype.byteLength` getter only on one carrying the ArrayBuffer slot — neither can be faked by a
+ * prototype swap or another realm, and neither runs caller code. The SharedArrayBuffer forms never reach here (they
+ * are refused NOT_CLONEABLE first, by brand), and a DataView is not accepted: no decoded query carries one, so the
+ * plain-data refusal stays.
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+function queryLeaf(v) {
+	if (ArrayBuffer.isView(v)) {
+		try {
+			return typeof TYPED_ARRAY_TAG.call(v) === "string";
+		} catch {}
+		return false;
+	}
+	try {
+		AB_BYTE_LENGTH.call(v);
+		return true;
+	} catch {}
+	return false;
 }
 
 /**
@@ -207,11 +246,12 @@ function snapshotValue(v, where, memo) {
  * error (CLDMV/digby#39).
  * @param {unknown} v
  * @param {string} where
+ * @param {boolean} [query=false] - inside a query: a TypedArray or ArrayBuffer leaf is accepted by brand
  * @returns {unknown}
  */
-function snapshotGuarded(v, where) {
+function snapshotGuarded(v, where, query = false) {
 	try {
-		return snapshotValue(v, where, new Map());
+		return snapshotValue(v, where, new Map(), query);
 	} catch (err) {
 		if (err instanceof WireError) throw err;
 		fail(WireErrorCode.NOT_CLONEABLE, `${where} is not structured-clone data (CLDMV/digby#39)`);
@@ -225,8 +265,10 @@ function snapshotGuarded(v, where) {
  * VALUE_OUT_OF_RANGE (udpLimit("x") used to return 512); an array is refused (its non-index properties would be
  * silently dropped by the copy); and the shape rules are {@link snapshotValue}'s, at every depth — prototype-borne,
  * hidden, symbol-keyed and non-index keys refused, a SharedArrayBuffer form refused NOT_CLONEABLE, a Proxy whose traps
- * throw or a revoked Proxy NOT_CLONEABLE — and only the snapshot is read afterwards: a getter is read once, by the
- * snapshot, so an object-then-undefined flip cannot split the check from the use.
+ * throw or a revoked Proxy NOT_CLONEABLE — except that the decoded query the contract names is accepted: a TypedArray
+ * or ArrayBuffer leaf (a COOKIE's client octets, a raw option's data, byte-valued rdata) is accepted by brand and
+ * copied by the clone, never walked (CLDMV/digby#39, round 10). Only the snapshot is read afterwards: a getter is read
+ * once, by the snapshot, so an object-then-undefined flip cannot split the check from the use.
  * @param {unknown} query
  * @param {string} what
  * @returns {object | null}
@@ -241,7 +283,7 @@ export function snapshotQuery(query, what) {
 		fail(WireErrorCode.NOT_CLONEABLE, `${what} is not structured-clone data (CLDMV/digby#39)`);
 	}
 	if (isArray) fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be a plain object, not an array`);
-	return cloneInput(snapshotGuarded(query, what), what);
+	return cloneInput(snapshotGuarded(query, what, true), what);
 }
 
 /**

@@ -308,6 +308,52 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 	});
 });
 
+describe("a decoded query is accepted at both transport entries (CLDMV/digby#39, round 10)", () => {
+	// R10-2: snapshotQuery refused every non-plain value at any depth, so a decoded query — a COOKIE's client octets, a
+	// raw option's data, byte-valued rdata — got VALUE_OUT_OF_RANGE from udpLimit and encodeForTransport alike, and
+	// most resolvers send cookies. The contract is the decoded query: inside a query (the udpLimit argument, or the
+	// transport options' `query` key and everything under it) a TypedArray or ArrayBuffer leaf is accepted by brand and
+	// copied by the clone, never walked; the SharedArrayBuffer forms stay NOT_CLONEABLE, and the options proper stay
+	// strict (a TypedArray under any other option key is still refused, round 9).
+	const msg = message();
+	const cookieEdns = { udpSize: 4096, version: 0, dnssecOk: false, z: 0, options: [{ code: 10, client: new Uint8Array(8).fill(1), server: null }] };
+	const rawEdns = { ...cookieEdns, options: [{ code: 65001, data: new Uint8Array([1, 2, 3]) }] };
+	const decoded = (edns) =>
+		decodeMessage(
+			encodeMessage({
+				id: 7,
+				flags: { rd: true },
+				questions: [{ name: "a.example.", type: TYPE.A, class: 1 }],
+				// byte-valued rdata in the answer, the shape the server answers with
+				answers: [{ name: "a.example.", type: TYPE.TXT, class: 1, ttl: 60, data: { strings: [new Uint8Array([1, 2, 3])] } }],
+				edns
+			})
+		);
+
+	it("a COOKIE option, a raw option and byte-valued rdata all read the same limit at both entries", () => {
+		for (const [what, edns] of [
+			["COOKIE", cookieEdns],
+			["raw option", rawEdns]
+		]) {
+			const d = decoded(edns);
+			expect(udpLimit(d, { cap: 4096 }), what).toBe(4096);
+			expect(encodeForTransport(msg, { transport: "udp", cap: 4096, query: d }).limit, what).toBe(4096);
+		}
+	});
+
+	it("an ArrayBuffer leaf inside the query is accepted like a TypedArray one", () => {
+		expect(udpLimit({ edns: { udpSize: 4096, blob: new ArrayBuffer(4) } }, { cap: 4096 })).toBe(4096);
+		expect(encodeForTransport(msg, { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096, blob: new ArrayBuffer(4) } } }).limit).toBe(4096);
+	});
+
+	it("a SharedArrayBuffer inside the decoded query is still refused NOT_CLONEABLE at both entries", () => {
+		const d = decoded(cookieEdns);
+		d.edns.options[0].client = new Uint8Array(new SharedArrayBuffer(8));
+		expect(code(() => udpLimit(d, { cap: 4096 }))).toBe("NOT_CLONEABLE");
+		expect(code(() => encodeForTransport(msg, { transport: "udp", cap: 4096, query: d }))).toBe("NOT_CLONEABLE");
+	});
+});
+
 describe("udpLimit reads the query's EDNS size once and validates it (CLDMV/digby#39, round 6)", () => {
 	const q = (udpSize) => ({ edns: { udpSize } });
 
