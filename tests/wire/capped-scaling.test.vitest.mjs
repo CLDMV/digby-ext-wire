@@ -313,7 +313,10 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 				{ name: "l.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `c.${K}` } }
 			];
 			if (variant === 1) answers.push({ name: "l.t.", type: TYPE.NS, class: CLASS.IN, ttl: 60, data: { target: `d.${K}` } });
-			answers.push({ name: "z.t.", type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: [new Uint8Array(3000).fill(0x78)] } });
+			// z.t. is the same 3,000-octet TXT the review harness builds: 12 character-strings of at most 255 octets
+			// — a single 3,000-octet string is not a legal character-string and the encode refuses it, which used
+			// to zero out most of this section's counted work
+			answers.push({ name: "z.t.", type: TYPE.TXT, class: CLASS.IN, ttl: 60, data: { strings: (() => { const s = []; let left = 3000; while (left > 255) { s.push(new Uint8Array(255).fill(0x78)); left -= 255; } s.push(new Uint8Array(left).fill(0x78)); return s; })() } });
 			return { id: 1, flags: { qr: true }, questions: [{ name: "q.", type: TYPE.A, class: CLASS.IN }], answers };
 		};
 		const kOffsetOf = (bytes, kl) => {
@@ -338,7 +341,7 @@ describe("encodeCapped scaling (CLDMV/digby#43)", () => {
 			}
 		}
 		const sweepWork = wireCounters.recordWrites + wireCounters.scratchEncodes + wireCounters.modelWork;
-		expect(sweepWork, `sweep: ${sweepWork} units of counted work (clean 77,975, range-check mutant 63,930)`).toBeGreaterThanOrEqual(71000);
+		expect(sweepWork, `sweep: ${sweepWork} units of counted work (clean 77,975, range-check mutant 77,719, pop-condition mutant 77,927)`).toBeGreaterThanOrEqual(77850);
 		// and the c1x centre filler, where a registration's drift-up lands its drain pop exactly on the boundary:
 		// the crossing-test mutant (off < 0x4000 -> <= in the drain) routes that pop back into the in-range heap
 		// instead of queuing its examiners, and the re-measure cycle it delays is counted work — measured 486
