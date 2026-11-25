@@ -351,3 +351,34 @@ describe("parseRecord validates its default ttl and class like parsed values (CL
 		expect(parseRecord("a.example. A 10.0.0.1", { ttl: 3600, class: 3 })).toEqual({ name: "a.example.", ttl: 3600, class: 3, type: TYPE.A, data: { address: "10.0.0.1" } });
 	});
 });
+
+describe("only a real ArrayBuffer, TypedArray or DataView is byte input (CLDMV/digby#39, round 8)", () => {
+	// today: asBytes' `bytes instanceof ArrayBuffer` accepts any object wearing ArrayBuffer.prototype, and the
+	// `new Uint8Array(bytes)` behind it copies it as an array-like or iterable: { length: 2e8 } allocated 200 MB and
+	// took 4.2 s before failing INPUT_TOO_LARGE, at 2**32 the pod was OOM-killed (exit 137), and an iterator walking a
+	// SharedArrayBuffer view got that shared memory copied
+	const fake = (extra) => Object.assign(Object.create(ArrayBuffer.prototype), { length: 3, 0: 1, 1: 2, 2: 3 }, extra);
+	const shapes = [
+		["decodeMessage", (b) => () => decodeMessage(b)],
+		["frameTcp", (b) => () => frameTcp(b)],
+		["TcpFramer.push", (b) => () => new TcpFramer().push(b)],
+		["formatGeneric", (b) => () => formatGeneric(b)]
+	];
+
+	it("a pod wearing ArrayBuffer.prototype is VALUE_OUT_OF_RANGE before any allocation, however large its length claims to be", () => {
+		for (const [what, shape] of shapes) expect(code(shape(fake({ length: 2e8 }))), what).toBe("VALUE_OUT_OF_RANGE");
+	});
+
+	it("an array-like whose iterator walks a SharedArrayBuffer view is refused before the iterator runs", () => {
+		const walker = Object.create(ArrayBuffer.prototype);
+		walker.length = 3;
+		const shared = new Uint8Array(new SharedArrayBuffer(3));
+		shared.set([1, 2, 3]);
+		Object.defineProperty(walker, Symbol.iterator, {
+			value: function* () {
+				yield* shared;
+			}
+		});
+		for (const [what, shape] of shapes) expect(code(shape(walker)), what).toBe("VALUE_OUT_OF_RANGE");
+	});
+});
