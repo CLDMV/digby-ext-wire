@@ -33,9 +33,9 @@ const DATAVIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(DataView.prototype,
 /** The getter sets per view kind: a typed array's (off the %TypedArray% prototype) and a DataView's. */
 const VIEW_GETTERS = [VIEW_BUFFER, VIEW_BYTE_OFFSET, VIEW_BYTE_LENGTH];
 const DATAVIEW_GETTERS = [DATAVIEW_BUFFER, DATAVIEW_BYTE_OFFSET, DATAVIEW_BYTE_LENGTH];
-/** The `byteLength` getter off `SharedArrayBuffer.prototype`: it succeeds only on a buffer carrying the SharedArrayBuffer internal slot, from any realm (CLDMV/digby#39). */
+/** The fallback `byteLength` getter, off `SharedArrayBuffer.prototype`: it succeeds only on a buffer carrying the SharedArrayBuffer internal slot, from any realm — reached only when the ArrayBuffer getter threw (CLDMV/digby#39, rounds 8 and 10). */
 const SAB_BYTE_LENGTH = Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength").get;
-/** The `byteLength` getter off `ArrayBuffer.prototype`: it throws on a SharedArrayBuffer, so it never accepts one (CLDMV/digby#39). */
+/** The first `byteLength` getter, off `ArrayBuffer.prototype`: it succeeds only on a buffer carrying the plain ArrayBuffer internal slot, so the common case answers "not shared" with no throw; it throws on a SharedArrayBuffer, which is what sends the check to the SAB getter (CLDMV/digby#39, rounds 8 and 10). */
 const AB_BYTE_LENGTH = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
 /** The typed-array `Symbol.toStringTag` getter, off `%TypedArray%.prototype`: it succeeds only on an object carrying the TypedArray internal slot — from any realm, under any prototype swap — and answers with that array's tag, so a Uint8Array is recognised by brand, never by `instanceof` (CLDMV/digby#39, round 9). */
 export const TYPED_ARRAY_TAG = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
@@ -77,14 +77,24 @@ export function intrinsicBuffer(v) {
 }
 
 /**
- * Whether `b` is a SharedArrayBuffer, by brand (CLDMV/digby#39, round 8): the intrinsic `SharedArrayBuffer.prototype.byteLength`
- * getter succeeds only on a buffer carrying the SharedArrayBuffer internal slot, from any realm and under any prototype swap —
- * `instanceof` tests the prototype chain, which `Object.setPrototypeOf(sab, ArrayBuffer.prototype)` fakes, and a cross-realm
- * SharedArrayBuffer fails `instanceof SharedArrayBuffer` from this realm outright. The getter runs no caller code.
+ * Whether `b` is a SharedArrayBuffer, by brand (CLDMV/digby#39, rounds 8 and 10): the intrinsic `ArrayBuffer.prototype.byteLength`
+ * getter runs first — it succeeds only on a buffer carrying the plain ArrayBuffer internal slot, so a normal ArrayBuffer
+ * answers "not shared" with no throw at all (round 10: the old SAB-getter-first order threw and caught for every normal
+ * buffer, and the encode profile put 84% of encode time in that throw). When it throws, the receiver is a SharedArrayBuffer
+ * or not a buffer at all, and the intrinsic `SharedArrayBuffer.prototype.byteLength` getter decides: it succeeds only on a
+ * buffer carrying the SharedArrayBuffer internal slot, from any realm and under any prototype swap — `instanceof` tests the
+ * prototype chain, which `Object.setPrototypeOf(sab, ArrayBuffer.prototype)` fakes, and a cross-realm SharedArrayBuffer
+ * fails `instanceof SharedArrayBuffer` from this realm outright. Neither getter runs caller code, and neither can be faked
+ * by a tag or a prototype: the ArrayBuffer getter throws on every SharedArrayBuffer (a plain ArrayBuffer slot is required),
+ * so no SharedArrayBuffer — swapped or cross-realm — can take the fast false.
  * @param {unknown} b
  * @returns {boolean}
  */
 export function isSharedBuffer(b) {
+	try {
+		AB_BYTE_LENGTH.call(b);
+		return false;
+	} catch {}
 	try {
 		SAB_BYTE_LENGTH.call(b);
 		return true;

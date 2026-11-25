@@ -39,11 +39,16 @@ export function obj(data, type) {
  * @returns {Uint8Array}
  */
 export function bytes(v, what) {
-	// every SharedArrayBuffer form first (CLDMV/digby#39, round 9): the brand checks run no caller code, so a bare
-	// SharedArrayBuffer and a view over one — from any realm, under any prototype swap — are the NOT_CLONEABLE refusal;
-	// the old `instanceof Uint8Array`-first order reported them VALUE_OUT_OF_RANGE, the wrong-type refusal, because a
-	// bare or cross-realm SAB fails `instanceof` and a DataView over one is not a Uint8Array at all
-	if (isSharedBuffer(intrinsicBuffer(v)) || isSharedBuffer(v))
+	// the view's buffer is read through the intrinsic getter (CLDMV/digby#39): an own `buffer` property cannot shadow
+	// it, and the read carries the slot — so the brand check below runs on the buffer, and round 9's second check on
+	// the view itself (which threw and caught for every normal view, CLDMV/digby#39 round 10) is gone
+	const buffer = intrinsicBuffer(v);
+	// every SharedArrayBuffer form first (CLDMV/digby#39, round 9): the brand check runs no caller code, so a bare
+	// SharedArrayBuffer (no intrinsic buffer — the check falls to the value itself) and a view over one — from any
+	// realm, under any prototype swap — are the NOT_CLONEABLE refusal; the old `instanceof Uint8Array`-first order
+	// reported them VALUE_OUT_OF_RANGE, the wrong-type refusal, because a bare or cross-realm SAB fails `instanceof`
+	// and a DataView over one is not a Uint8Array at all
+	if (isSharedBuffer(buffer === null ? v : buffer))
 		fail(WireErrorCode.NOT_CLONEABLE, `${what} is a SharedArrayBuffer or a view over one; it would be read, not copied (CLDMV/digby#39, round 9)`);
 	// the type check runs no caller code until the brand getter (CLDMV/digby#39, round 9): ArrayBuffer.isView is an
 	// internal-slot read, so a plain object — or a Proxy, which carries no slot of its own — is refused as the wrong
