@@ -54,16 +54,18 @@ export const RDATA_REQUIRED = new Set([TYPE.TSIG, TYPE.TKEY, TYPE.SIG, TYPE.IXFR
 const RESERVED_TYPE = 0xffff;
 /**
  * Diagnostic counters for the scaling tests (CLDMV/digby#43): `recordWrites` counts {@link writeRecord} calls — every
- * record any encode touches, in the probe measurements, the exact trials, the records written for good and the
- * {@link appendTsig} append — so tests bound the work by count rather than wall-clock. `scratchEncodes` counts the
- * encodes that go through a scratch writer and are thrown away: the tail's uncompressed size measurement and the
- * near-boundary tail probes of {@link tailFitsOn} (a rolled-back OPT encode is not a {@link writeRecord} call, so
- * `recordWrites` alone would hide it). `modelWork` counts every unit of the truncation model's own work: each
- * Fenwick operation, each validity-heap push and pop, each registration, index and queue mutation, and each record
- * the re-measure bookkeeping visits — the round-5 flip scan over the whole model was uncounted work of exactly this
- * kind, and a bound that did not see it could be cheated by moving work out of `recordWrites` (CLDMV/digby#43).
- * None of them is part of the codec's public surface (index.mjs does not re-export them); a test resets them before
- * the encode it measures.
+ * record any encode touches, in the plain attempt's full pass, the probe measurements, the exact trials, the records
+ * written for good and the {@link appendTsig} append — so tests bound the work by count rather than wall-clock. A
+ * record written twice is two units; the plain attempt's rolled-back pass counts like any other (CLDMV/digby#43,
+ * round 7). `scratchEncodes` counts the encodes that go through a scratch writer and are thrown away: the tail's
+ * uncompressed size measurement and the near-boundary tail probes of {@link tailFitsOn} (a rolled-back OPT encode is
+ * not a {@link writeRecord} call, so `recordWrites` alone would hide it). `modelWork` counts every unit of the
+ * truncation model's own work: each Fenwick operation (every `set` and every `prefix`/`total` call, one unit per
+ * call, not per tree step), each validity-heap push and pop, each registration, index and queue mutation, and each
+ * record the re-measure bookkeeping visits — the round-5 flip scan over the whole model was uncounted work of
+ * exactly this kind, and a bound that did not see it could be cheated by moving work out of `recordWrites`
+ * (CLDMV/digby#43). None of them is part of the codec's public surface (index.mjs does not re-export them); a test
+ * resets them before the encode it measures.
  * @type {{ recordWrites: number, scratchEncodes: number, modelWork: number }}
  */
 export const wireCounters = { recordWrites: 0, scratchEncodes: 0, modelWork: 0 };
@@ -1163,6 +1165,7 @@ class Fenwick {
 
 	/** Set the octets at position `i`. @returns {number} the delta applied (0 when the value did not change) */
 	set(i, v) {
+		wireCounters.modelWork++; // a Fenwick operation is a unit of model work (CLDMV/digby#43)
 		const d = v - this.vals[i];
 		if (d === 0) return 0;
 		this.vals[i] = v;
@@ -1172,6 +1175,7 @@ class Fenwick {
 
 	/** Sum of the octets at positions `0..i-1`. */
 	prefix(i) {
+		wireCounters.modelWork++; // a Fenwick operation is a unit of model work (CLDMV/digby#43)
 		let sum = 0;
 		for (; i > 0; i -= i & -i) sum += this.tree[i];
 		return sum;
