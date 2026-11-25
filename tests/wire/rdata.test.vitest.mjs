@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { TYPE, typeFromString } from "../../src/lib/wire/constants.mjs";
 import { WireError } from "../../src/lib/wire/errors.mjs";
-import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, isTyped, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { TYPED, decodeRdataBytes, encodeRdataBytes, formatGeneric, formatRdata, isTyped, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {
@@ -452,5 +452,38 @@ describe("decodeRdataBytes applies the standalone type rules and reads the octet
 		expect(code(() => decodeRdataBytes(TYPE.A, shared))).toBe("NOT_CLONEABLE");
 		// a plain view still decodes, from the copy
 		expect(decodeRdataBytes(TYPE.A, new Uint8Array([10, 0, 0, 1]))).toEqual({ address: "10.0.0.1" });
+	});
+});
+
+describe("decodeRdataBytes reads the octets through the intrinsic view (CLDMV/digby#39, round 8)", () => {
+	const abc = () => Uint8Array.from([3, 0x61, 0x62, 0x63]);
+	const txt = { strings: [Uint8Array.from([0x61, 0x62, 0x63])] };
+
+	it("a shadowed byteLength cannot make it decode phantom octets", () => {
+		// today: the copy's length came off the caller's own `byteLength` property — 20 on a 4-octet array allocated 20
+		// octets, copied the 4 real ones and decoded 16 phantom empty strings
+		const v = abc();
+		Object.defineProperty(v, "byteLength", { value: 20 });
+		expect(decodeRdataBytes(TYPE.TXT, v)).toEqual(txt);
+	});
+
+	it("a throwing own byteLength is ignored, the way formatGeneric ignores it", () => {
+		// today: a throwing own getter was refused here while formatGeneric, going through the intrinsic getters,
+		// accepted the same value — the two entries disagreed
+		const v = abc();
+		Object.defineProperty(v, "byteLength", {
+			get() {
+				throw new RangeError("boom");
+			}
+		});
+		expect(decodeRdataBytes(TYPE.TXT, v)).toEqual(txt);
+		expect(formatGeneric(v)).toBe("\\# 4 03616263");
+	});
+
+	it("every SharedArrayBuffer form is still refused by brand, never by prototype", () => {
+		expect(code(() => decodeRdataBytes(TYPE.TXT, new Uint8Array(new SharedArrayBuffer(4))))).toBe("NOT_CLONEABLE");
+		const swapped = new Uint8Array(new SharedArrayBuffer(4));
+		Object.setPrototypeOf(swapped.buffer, ArrayBuffer.prototype);
+		expect(code(() => decodeRdataBytes(TYPE.TXT, swapped))).toBe("NOT_CLONEABLE");
 	});
 });
