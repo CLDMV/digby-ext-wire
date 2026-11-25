@@ -198,6 +198,15 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		expect(udpLimit({ edns: { udpSize: 4096 } }, { cap: 4096 })).toBe(4096);
 		expect(encodeForTransport(message(), { transport: "udp", cap: 4096, query: { edns: { udpSize: 4096 } } }).limit).toBe(4096);
 	});
+
+	it("options from another realm are plain data too (CLDMV/digby#39, round 8)", () => {
+		// round 7's plain-object rule compared the prototype by identity with this realm's Object.prototype: a plain
+		// options object built in a vm context failed it. The rule is the shape — a null prototype, or some realm's
+		// Object.prototype — and a prototype-borne option from another realm is still refused.
+		expect(() => decodeMessage(bytes, runInNewContext("({ allowTrailing: true })"))).not.toThrow();
+		expect(code(() => decodeMessage(bytes, runInNewContext("Object.create({ maxNameOctets: 5 })")))).toBe("VALUE_OUT_OF_RANGE");
+		expect(() => decodeMessage(bytes, runInNewContext("Object.freeze({ allowTrailing: true })"))).not.toThrow();
+	});
 });
 
 describe("udpLimit reads the query's EDNS size once and validates it (CLDMV/digby#39, round 6)", () => {
