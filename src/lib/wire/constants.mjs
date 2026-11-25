@@ -237,7 +237,9 @@ export function svcKeyToString(key) {
 export function svcKeyFromString(text) {
 	const s = mnemonicText(text, "a SvcParamKey name", WireErrorCode.BAD_SVCPARAM);
 	if (Object.hasOwn(SVC_KEY, s)) return SVC_KEY[s];
-	const m = /^key(\d{1,5})$/.exec(s);
+	// the generic form has no leading zeros (RFC 9460): "key00001" is not the presentation form of key 1, and key 0 is
+	// registered as "mandatory", so its presentation is the mnemonic — both refused here (CLDMV/digby#39, round 8)
+	const m = /^key([1-9]\d{0,4})$/.exec(s);
 	if (m) {
 		const n = Number(m[1]);
 		if (n <= 0xffff) return n;
