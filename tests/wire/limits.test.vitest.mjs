@@ -4,10 +4,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { DEFAULT_UDP_CAP, TCP_MAX, TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "../../src/lib/wire/limits.mjs";
-import { appendTsig, decodeMessage, encodeCapped, tsigRecordSize } from "../../src/lib/wire/message.mjs";
+import { TYPE } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { DEFAULT_UDP_CAP, TCP_MAX, TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "../../src/lib/limits.mjs";
+import { appendTsig, decodeMessage, encodeCapped, tsigRecordSize } from "../../src/lib/message.mjs";
 
 const code = (fn) => {
 	try {

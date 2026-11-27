@@ -4,8 +4,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import * as wire from "../../src/lib/wire/index.mjs";
-import { Reader, Writer, asBytes } from "../../src/lib/wire/buffer.mjs";
+import * as wire from "../../src/lib/index.mjs";
+import { Reader, Writer, asBytes } from "../../src/lib/buffer.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const { TYPE, WireError, decodeMessage, encodeMessage, encodeRdataBytes, parseRdata } = wire;

@@ -10,11 +10,11 @@
  */
 
 import { expect } from "vitest";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
-import { TC_BIT } from "../../src/lib/wire/header.mjs";
-import { nameKey } from "../../src/lib/wire/names.mjs";
-import { encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { WireError, WireErrorCode } from "../../src/lib/errors.mjs";
+import { TC_BIT } from "../../src/lib/header.mjs";
+import { nameKey } from "../../src/lib/names.mjs";
+import { encodeCapped, encodeMessage } from "../../src/lib/message.mjs";
 import { hex } from "./wire-gen.mjs";
 
 /**

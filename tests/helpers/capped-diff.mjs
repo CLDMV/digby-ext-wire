@@ -11,8 +11,8 @@
  * the seed, so a committed test pins a fixed case count, never a wall-time budget.
  */
 
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { encodeMessage } from "../../src/lib/wire/message.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { encodeMessage } from "../../src/lib/message.mjs";
 
 const strs = (n, fillByte = 0x78) => {
 	const out = [];

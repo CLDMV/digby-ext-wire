@@ -13,10 +13,10 @@
 
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
-import { Writer } from "../../src/lib/wire/buffer.mjs";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
-import { writeName } from "../../src/lib/wire/names.mjs";
+import { Writer } from "../../src/lib/buffer.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { encodeCapped, encodeMessage } from "../../src/lib/message.mjs";
+import { writeName } from "../../src/lib/names.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 // A 100-label apex of one-octet labels: 201 wire octets, the "long apex" shape of CLDMV/digby#40.

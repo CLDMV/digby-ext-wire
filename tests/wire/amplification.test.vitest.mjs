@@ -12,10 +12,10 @@
 
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
-import { Reader } from "../../src/lib/wire/buffer.mjs";
-import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
-import { decodeMessage } from "../../src/lib/wire/message.mjs";
-import { MAX_NAME_OCTETS, readName } from "../../src/lib/wire/names.mjs";
+import { Reader } from "../../src/lib/buffer.mjs";
+import { WireError, WireErrorCode } from "../../src/lib/errors.mjs";
+import { decodeMessage } from "../../src/lib/message.mjs";
+import { MAX_NAME_OCTETS, readName } from "../../src/lib/names.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {

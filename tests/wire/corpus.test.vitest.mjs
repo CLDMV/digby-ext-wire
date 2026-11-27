@@ -5,10 +5,10 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { classToString, typeToString } from "../../src/lib/wire/constants.mjs";
-import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
-import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
-import { decodeRdataBytes, encodeRdataBytes } from "../../src/lib/wire/rdata/index.mjs";
+import { classToString, typeToString } from "../../src/lib/constants.mjs";
+import { decodeMessage, encodeMessage } from "../../src/lib/message.mjs";
+import { formatRecord, parseRecord } from "../../src/lib/presentation.mjs";
+import { decodeRdataBytes, encodeRdataBytes } from "../../src/lib/rdata/index.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const load = (name) => JSON.parse(readFileSync(new URL(`../fixtures/wire/${name}`, import.meta.url), "utf8"));

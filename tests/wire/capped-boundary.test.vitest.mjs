@@ -13,8 +13,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { encodeCapped, encodeMessage } from "../../src/lib/message.mjs";
 import { beat, bigTxt, boundaryLimits, c1Shape, compareWithReference, landingOf, ns, oracleCapped, srv, txt, x63 } from "../helpers/capped-oracle.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 

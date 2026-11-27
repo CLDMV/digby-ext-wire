@@ -15,12 +15,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError, WireErrorCode } from "../../src/lib/wire/errors.mjs";
-import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
-import { canonicalName } from "../../src/lib/wire/names.mjs";
-import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
-import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { WireError, WireErrorCode } from "../../src/lib/errors.mjs";
+import { decodeMessage, encodeMessage } from "../../src/lib/message.mjs";
+import { canonicalName } from "../../src/lib/names.mjs";
+import { formatRecord, parseRecord } from "../../src/lib/presentation.mjs";
+import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/rdata/index.mjs";
 import { genMessage, genRdata, genRecord, hex, prng, seedFromEnv } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_FUZZ_SEED");

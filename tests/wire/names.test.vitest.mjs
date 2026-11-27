@@ -4,9 +4,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { Reader, Writer } from "../../src/lib/wire/buffer.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { canonicalName, labelCount, nameKey, namesEqual, parseName, readName, writeName } from "../../src/lib/wire/names.mjs";
+import { Reader, Writer } from "../../src/lib/buffer.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { canonicalName, labelCount, nameKey, namesEqual, parseName, readName, writeName } from "../../src/lib/names.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {

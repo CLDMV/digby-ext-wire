@@ -13,13 +13,13 @@
 import { Buffer } from "node:buffer";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { CLASS, TYPE, classFromString, classToString, svcKeyFromString, svcKeyToString, typeFromString, typeToString } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "../../src/lib/wire/limits.mjs";
-import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
-import { formatName, parseName } from "../../src/lib/wire/names.mjs";
-import { parseRecord } from "../../src/lib/wire/presentation.mjs";
-import { decodeRdataBytes, formatGeneric } from "../../src/lib/wire/rdata/index.mjs";
+import { CLASS, TYPE, classFromString, classToString, svcKeyFromString, svcKeyToString, typeFromString, typeToString } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { TcpFramer, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "../../src/lib/limits.mjs";
+import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/message.mjs";
+import { formatName, parseName } from "../../src/lib/names.mjs";
+import { parseRecord } from "../../src/lib/presentation.mjs";
+import { decodeRdataBytes, formatGeneric } from "../../src/lib/rdata/index.mjs";
 
 const code = (fn) => {
 	try {

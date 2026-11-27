@@ -12,9 +12,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/message.mjs";
 import { genMessage, genName, genRdata, prng, seedFromEnv } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_TSIG_SEED");

@@ -5,9 +5,9 @@
 
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { TYPE, typeFromString } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { TYPED, decodeRdataBytes, encodeRdataBytes, formatGeneric, formatRdata, isTyped, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { TYPE, typeFromString } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { TYPED, decodeRdataBytes, encodeRdataBytes, formatGeneric, formatRdata, isTyped, parseRdata } from "../../src/lib/rdata/index.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {

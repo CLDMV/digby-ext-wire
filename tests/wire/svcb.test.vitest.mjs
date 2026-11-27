@@ -4,9 +4,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { SVC_KEY, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { SVC_KEY, TYPE } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/rdata/index.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {

@@ -4,10 +4,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CLASS, TYPE, classFromString, classToString, svcKeyFromString, svcKeyToString, typeFromString, typeToString } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { formatRecord, parseRecord, parseTtl } from "../../src/lib/wire/presentation.mjs";
-import { formatIPv6, fromBase32Hex, parseIPv6, toBase32Hex, tokenize, unescapeBytes } from "../../src/lib/wire/text.mjs";
+import { CLASS, TYPE, classFromString, classToString, svcKeyFromString, svcKeyToString, typeFromString, typeToString } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { formatRecord, parseRecord, parseTtl } from "../../src/lib/presentation.mjs";
+import { formatIPv6, fromBase32Hex, parseIPv6, toBase32Hex, tokenize, unescapeBytes } from "../../src/lib/text.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {

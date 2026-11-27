@@ -10,13 +10,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { Reader, Writer } from "../../src/lib/wire/buffer.mjs";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
-import { parseName, formatName, readName, writeName } from "../../src/lib/wire/names.mjs";
-import { formatRecord, parseRecord } from "../../src/lib/wire/presentation.mjs";
-import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/wire/rdata/index.mjs";
+import { Reader, Writer } from "../../src/lib/buffer.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/message.mjs";
+import { parseName, formatName, readName, writeName } from "../../src/lib/names.mjs";
+import { formatRecord, parseRecord } from "../../src/lib/presentation.mjs";
+import { TYPED, decodeRdataBytes, encodeRdataBytes, formatRdata, parseRdata } from "../../src/lib/rdata/index.mjs";
 import { fitData, genMessage, genName, genRdata, genRecord, prng, seedFromEnv, wholeSetPrefix } from "../helpers/wire-gen.mjs";
 
 const SEED = seedFromEnv("DIGBY_PROPERTY_SEED");

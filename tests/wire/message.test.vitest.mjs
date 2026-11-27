@@ -4,12 +4,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { Writer } from "../../src/lib/wire/buffer.mjs";
-import { CLASS, OPCODE, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { TC_BIT, packFlags, unpackFlags } from "../../src/lib/wire/header.mjs";
-import { decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
-import { parseRecord } from "../../src/lib/wire/presentation.mjs";
+import { Writer } from "../../src/lib/buffer.mjs";
+import { CLASS, OPCODE, TYPE } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { TC_BIT, packFlags, unpackFlags } from "../../src/lib/header.mjs";
+import { decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/message.mjs";
+import { parseRecord } from "../../src/lib/presentation.mjs";
 import { genMessage } from "../helpers/capped-diff.mjs";
 import { bigTxt, boundaryLimits, c1Shape, compareWithReference, ns, oracleCapped, txt, x63 } from "../helpers/capped-oracle.mjs";
 import { hex } from "../helpers/wire-gen.mjs";

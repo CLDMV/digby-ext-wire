@@ -5,8 +5,8 @@
 
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { TcpFramer, frameTcp } from "../../src/lib/wire/limits.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { TcpFramer, frameTcp } from "../../src/lib/limits.mjs";
 
 /**
  * Deterministic pseudo-random payload (a plain LCG, so a failure is reproducible).

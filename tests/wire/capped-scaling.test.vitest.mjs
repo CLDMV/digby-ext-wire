@@ -13,9 +13,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { decodeMessage, encodeCapped, encodeMessage, wireCounters } from "../../src/lib/wire/message.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { decodeMessage, encodeCapped, encodeMessage, wireCounters } from "../../src/lib/message.mjs";
 import { c1Shape } from "../helpers/capped-oracle.mjs";
 
 // A 100-label apex of one-octet labels: 201 wire octets, the "long apex" shape of CLDMV/digby#40.

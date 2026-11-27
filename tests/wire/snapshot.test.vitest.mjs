@@ -23,18 +23,18 @@
 import { Buffer } from "node:buffer";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { Writer } from "../../src/lib/wire/buffer.mjs";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { writeTypeBitmap } from "../../src/lib/wire/rdata/dnssec.mjs";
-import { encodeRdataBytes, formatGeneric, formatRdata } from "../../src/lib/wire/rdata/index.mjs";
-import { TcpFramer, frameTcp } from "../../src/lib/wire/limits.mjs";
-import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/wire/message.mjs";
-import { parseName } from "../../src/lib/wire/names.mjs";
-import { formatRecord } from "../../src/lib/wire/presentation.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
+import { Writer } from "../../src/lib/buffer.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { writeTypeBitmap } from "../../src/lib/rdata/dnssec.mjs";
+import { encodeRdataBytes, formatGeneric, formatRdata } from "../../src/lib/rdata/index.mjs";
+import { TcpFramer, frameTcp } from "../../src/lib/limits.mjs";
+import { appendTsig, decodeMessage, encodeCapped, encodeMessage, tsigRecordSize } from "../../src/lib/message.mjs";
+import { parseName } from "../../src/lib/names.mjs";
+import { formatRecord } from "../../src/lib/presentation.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
 
 // the enumerated public surface the structural test below sweeps (CLDMV/digby#39, round 6): every export of the index
-const wire = await import("../../src/lib/wire/index.mjs");
+const wire = await import("../../src/lib/index.mjs");
 
 const code = (fn) => {
 	try {

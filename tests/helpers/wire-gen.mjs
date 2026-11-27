@@ -10,10 +10,10 @@
  */
 
 import { expect } from "vitest";
-import { formatIPv4, formatIPv6 } from "../../src/lib/wire/text.mjs";
-import { formatName, nameKey } from "../../src/lib/wire/names.mjs";
-import { CLASS, EDNS_OPTION, SVC_KEY, TYPE } from "../../src/lib/wire/constants.mjs";
-import { TYPED } from "../../src/lib/wire/rdata/index.mjs";
+import { formatIPv4, formatIPv6 } from "../../src/lib/text.mjs";
+import { formatName, nameKey } from "../../src/lib/names.mjs";
+import { CLASS, EDNS_OPTION, SVC_KEY, TYPE } from "../../src/lib/constants.mjs";
+import { TYPED } from "../../src/lib/rdata/index.mjs";
 
 /**
  * mulberry32: small, fast, good enough for test data.

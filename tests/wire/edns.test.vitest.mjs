@@ -4,9 +4,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { EDNS_OPTION, RCODE } from "../../src/lib/wire/constants.mjs";
-import { WireError } from "../../src/lib/wire/errors.mjs";
-import { decodeMessage, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { EDNS_OPTION, RCODE } from "../../src/lib/constants.mjs";
+import { WireError } from "../../src/lib/errors.mjs";
+import { decodeMessage, encodeMessage } from "../../src/lib/message.mjs";
 import { hex } from "../helpers/wire-gen.mjs";
 
 const code = (fn) => {

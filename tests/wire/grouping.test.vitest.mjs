@@ -12,8 +12,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CLASS, TYPE } from "../../src/lib/wire/constants.mjs";
-import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/wire/message.mjs";
+import { CLASS, TYPE } from "../../src/lib/constants.mjs";
+import { decodeMessage, encodeCapped, encodeMessage } from "../../src/lib/message.mjs";
 import { wholeSetPrefix } from "../helpers/wire-gen.mjs";
 
 const SECTIONS = ["answers", "authorities", "additionals"];
