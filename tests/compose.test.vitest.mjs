@@ -49,7 +49,7 @@ import { MAX_LABEL, MAX_NAME, MAX_NAME_OCTETS, canonicalName, formatName, labelC
 import { decodeRdataBytes, encodeRdataBytes, formatGeneric, formatRdata, parseRdata } from "../src/lib/rdata/index.mjs";
 import { CLASS, EDNS_OPTION, OPCODE, RCODE, SVC_KEY, TYPE, classFromString, classToString, typeFromString, typeToString } from "../src/lib/constants.mjs";
 import { WireError, WireErrorCode } from "../src/lib/errors.mjs";
-import { DEFAULT_UDP_CAP, TCP_MAX, UDP_MIN, TcpFramer, encodeForTransport, frameTcp, udpLimit } from "../src/lib/limits.mjs";
+import { DEFAULT_UDP_CAP, TCP_MAX, UDP_MIN, encodeForTransport, frameTcp, udpLimit } from "../src/lib/limits.mjs";
 import { MAX_MESSAGE } from "../src/lib/buffer.mjs";
 import manifest from "../rummage.manifest.mjs";
 
@@ -140,10 +140,10 @@ const callEveryLeaf = (wire) => {
 	expect(wire.decode(BYTES)).toEqual(decodeMessage(BYTES));
 	expect(wire.encode(MESSAGE)).toEqual(encodeMessage(MESSAGE));
 	expect(wire.encodeCapped(MESSAGE, { limit: 4096 })).toEqual(encodeCapped(MESSAGE, { limit: 4096 }));
-	// framer
+	// framer (a composed instance is a separate module copy — the leaves test pins instanceof, this suite pins behavior)
 	const framer = wire.framer.create();
-	expect(framer).toBeInstanceOf(TcpFramer);
 	expect(framer.push(frameTcp(BYTES))).toEqual([BYTES]);
+	expect(wire.framer.create()).not.toBe(framer);
 	// records, ttl, rdata
 	expect(wire.record.parse("ns.example. 60 IN A 10.0.0.1")).toEqual(parseRecord("ns.example. 60 IN A 10.0.0.1"));
 	expect(wire.record.format(RECORD)).toEqual(formatRecord(RECORD));
@@ -176,14 +176,14 @@ const callEveryLeaf = (wire) => {
 	expect(wire.transport.encode(MESSAGE, { transport: "udp" }).bytes).toEqual(encodeForTransport(MESSAGE, { transport: "udp" }).bytes);
 	expect(wire.tcp.frame(BYTES)).toEqual(frameTcp(BYTES));
 	// the data leaves: plain data through the composed api (CLDMV/digby#42 A1) — each returns the codec's own
-	// frozen table or constant, compared by value AND by identity with the lib export this module imported
-	expect(wire.constants.type()).toBe(TYPE);
-	expect(wire.constants.class()).toBe(CLASS);
-	expect(wire.constants.rcode()).toBe(RCODE);
-	expect(wire.constants.opcode()).toBe(OPCODE);
-	expect(wire.constants.edns.option()).toBe(EDNS_OPTION);
-	expect(wire.constants.svc.key()).toBe(SVC_KEY);
-	expect(wire.errors.codes()).toBe(WireErrorCode);
+	// frozen table or constant. A composed module is a separate module copy (slothlet loads leaves
+	// instance-scoped), so the tables compare by value and frozen-ness, not by reference with this module's import
+	const table = ([path, value]) => {
+		const got = at(wire, path)();
+		expect(got, `wire.${path}() should be the codec's table`).toEqual(value);
+		expect(Object.isFrozen(got), `wire.${path}() should be frozen`).toBe(true);
+	};
+	for (const [p, v] of [["constants.type", TYPE], ["constants.class", CLASS], ["constants.rcode", RCODE], ["constants.opcode", OPCODE], ["constants.edns.option", EDNS_OPTION], ["constants.svc.key", SVC_KEY], ["errors.codes", WireErrorCode]]) table([p, v]);
 	expect(wire.limits.message()).toBe(MAX_MESSAGE);
 	expect(wire.limits.label()).toBe(MAX_LABEL);
 	expect(wire.limits.name()).toBe(MAX_NAME);

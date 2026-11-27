@@ -1,7 +1,7 @@
 /**
  *	@Project: @cldmv/digby-ext-wire
  *	@Filename: /src/api/wire/tsig/size.mjs
- *	@Date: 2026-11-27T00:00:00-08:00
+ *	@Date: 2026-11-26T00:00:00-08:00
  *	@Author: Nate Corcoran <CLDMV>
  *	@Email: <Shinrai@users.noreply.github.com>
  *	-----
@@ -13,11 +13,9 @@
  */
 
 /**
- * @fileoverview Slothlet leaf — exposed at self.wire.tsig.size; re-exports the codec's tsigRecordSize from
- * src/lib/message.mjs. Cross-extension callers reach the codec only through this leaf — never a
- * deep import of another extension's lib.
+ * @fileoverview Slothlet leaf — exposed at self.wire.tsig.size; re-exports the codec's tsigRecordSize from src/lib/message.mjs. Cross-extension callers reach the codec only through this leaf — never a deep import of another extension's lib. The leaf's named export matches its filename, so slothlet's single-export flatten places the codec's own export at the api path — that is what the ext-host's api.add mount needs, where a top-level default export would become the mount node itself (CLDMV/digby#42).
  */
 
-import { tsigRecordSize } from "../../lib/message.mjs";
+import { tsigRecordSize } from "../../../lib/message.mjs";
 
-export default tsigRecordSize;
+export { tsigRecordSize as size };
