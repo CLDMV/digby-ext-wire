@@ -101,6 +101,10 @@ export function parseName(text, origin) {
 				label.push(v);
 				i += 3;
 			} else {
+				// a non-digit escape takes the next UTF-16 unit verbatim, so it must itself be printable ASCII:
+				// a wider unit — a lone surrogate included — would be silently truncated by the octet copy in
+				// finishLabel (CLDMV/digby#38: parseName("a\\Ł.") equalled parseName("aA."))
+				if (next > 0x7e) fail(WireErrorCode.BAD_PRESENTATION, `a name may hold only printable ASCII; escape other octets as \\DDD: ${text}`);
 				label.push(next);
 				i += 1;
 			}
