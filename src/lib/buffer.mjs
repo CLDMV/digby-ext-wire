@@ -193,9 +193,11 @@ function snapshotValue(v, where, memo, query = false) {
 		descs = Object.getOwnPropertyDescriptors(v);
 		if (Object.getOwnPropertySymbols(v).length > 0)
 			fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${where} carry a symbol-keyed option; the copy would silently drop it (CLDMV/digby#39, round 8)`);
-		// an inherited enumerable key is dropped by the copy; so is an inherited KNOWN option key however hidden — a
-		// class getter is non-enumerable, and only the known-key check can see it (CLDMV/digby#39, round 9)
-		for (const k in v) if (!Object.hasOwn(v, k)) hiddenOption(where, k);
+		// an inherited KNOWN option key is refused however hidden — a class getter is non-enumerable, and only
+		// this by-key check can see it (CLDMV/digby#39, round 9). The old inherited-key sweep (`for … in`) went
+		// further and refused every options object whenever ANY enumerable Object.prototype key existed —
+		// prototype pollution broke every call. An inherited enumerable key that names no option is dropped by
+		// the copy (structuredClone copies own properties only), so ignoring it is the faithful behavior (r2 nits).
 		for (const k of OPTION_KEYS) if (k in v && !Object.hasOwn(v, k)) hiddenOption(where, k);
 	} catch (err) {
 		if (err instanceof WireError) throw err;
@@ -352,7 +354,9 @@ export function cloneOptions(options, what) {
 	// corrects the old comment, which claimed it does). `Array.isArray` can throw on one (its IsArray walks to the
 	// revoked target), so it sits inside the refusal it feeds, like the snapshot below — which CAN run caller code (a
 	// Proxy's traps, a throwing getter) (CLDMV/digby#39).
-	if (options === null || options === undefined) return {};
+	// null prototype: a plain {} would READ Object.prototype — a non-enumerable Object.prototype.limit made
+	// encodeCapped truncate to 10 octets when the caller passed no options at all (r2 nits)
+	if (options === null || options === undefined) return Object.create(null);
 	if (typeof options !== "object") fail(WireErrorCode.VALUE_OUT_OF_RANGE, `${what} must be an object, got ${describe(options)}`);
 	let isArray;
 	try {
