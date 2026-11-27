@@ -16,7 +16,7 @@
  * @fileoverview Slothlet leaf — exposed at self.wire.transport.udp.min; answers the codec's UDP_MIN floor from src/lib/limits.mjs. Cross-extension callers reach the codec only through this leaf — never a deep import of another extension's lib. The leaf's named export matches its filename, so slothlet's single-export flatten places the codec's own export at the api path (CLDMV/digby#42). Data composes as a zero-arg leaf function returning the frozen table or constant (CLDMV/digby#42 A1: an object export composes as a namespace wrapper — the table itself is not what a caller reads back).
  */
 
-import { UDP_MIN } from "../../../lib/limits.mjs";
+import { UDP_MIN } from "../../../../lib/limits.mjs";
 
 export function min() {
 	return UDP_MIN;
