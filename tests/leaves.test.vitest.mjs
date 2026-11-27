@@ -48,7 +48,7 @@ import codesLeaf from "../src/api/wire/errors/codes.mjs";
 import root from "../src/api/wire/wire.mjs";
 
 // The codec modules the leaves re-export:
-import { decodeMessage, encodeMessage, encodeCapped, appendTsig, tsigRecordSize } from "../src/lib/message.mjs";
+import { decodeMessage, encodeMessage, encodeCapped as libEncodeCapped, appendTsig, tsigRecordSize } from "../src/lib/message.mjs";
 import { parseRecord, formatRecord, parseTtl } from "../src/lib/presentation.mjs";
 import { parseName, formatName, canonicalName, nameKey as libNameKey } from "../src/lib/names.mjs";
 import { parseRdata, formatRdata, encodeRdataBytes, decodeRdataBytes } from "../src/lib/rdata/index.mjs";
@@ -72,7 +72,7 @@ describe("the leaves are the codec's own exports — identity, not wrappers", ()
 	it("the message codec leaves", () => {
 		expect(decode).toBe(decodeMessage);
 		expect(encode).toBe(encodeMessage);
-		expect(encodeCapped).toBe(encodeCapped);
+		expect(encodeCapped).toBe(libEncodeCapped);
 	});
 
 	it("the presentation leaves", () => {
