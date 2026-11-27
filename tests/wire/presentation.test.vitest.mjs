@@ -151,6 +151,11 @@ describe("records", () => {
 		expect(code(() => parseRecord("a 1 IN A 1.2.3.4"))).toBe("RELATIVE_NAME");
 	});
 
+	it("refuses a non-ASCII escape in a record's owner name (CLDMV/digby#38)", () => {
+		// the owner name reaches parseName, which truncated \\Ł to A: "ex\\Łmple." parsed as "exAmple."
+		expect(code(() => parseRecord("ex\\Łmple. 60 IN A 192.0.2.1"))).toBe("BAD_PRESENTATION");
+	});
+
 	it("parses multi-line records with comments", () => {
 		const text = `example. 86400 IN SOA ns.example. hostmaster.example. (
 			2026112101 ; serial

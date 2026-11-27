@@ -58,6 +58,14 @@ describe("presentation names", () => {
 		expect(() => parseName(`${"a".repeat(63)}.`.repeat(3) + `${"b".repeat(61)}.`)).not.toThrow();
 	});
 
+	it("refuses a non-ASCII unit after a backslash — the octet copy would truncate it (CLDMV/digby#38)", () => {
+		// label.push took the UTF-16 unit after the backslash unchecked and Uint8Array.from truncated it:
+		// parseName("a\\Ł.") equalled parseName("aA.") and parseName("a\\\uD800.") gave [97, 0]
+		expect(parseName("a\\A.")).toEqual(parseName("aA.")); // the printable-ASCII escape still works
+		expect(code(() => parseName("a\\Ł."))).toBe("BAD_PRESENTATION");
+		expect(code(() => parseName("a\\\uD800."))).toBe("BAD_PRESENTATION");
+	});
+
 	it("compares case-insensitively after escape normalisation", () => {
 		expect(namesEqual("WWW.Example.com.", "www.example.COM.")).toBe(true);
 		expect(namesEqual("\\065.", "a.")).toBe(true);
