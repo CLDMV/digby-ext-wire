@@ -315,10 +315,12 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 			delete Object.prototype.limit;
 		}
 		// with no options the guard used to answer {}, which READ the prototype: a non-enumerable
-		// Object.prototype.limit made encodeCapped truncate to 10 octets. It answers a null-prototype object now.
+		// Object.prototype.limit of 10 was USED — encodeCapped measured against it and refused
+		// MESSAGE_TOO_LARGE instead of its own missing-option refusal. It answers a null-prototype object now,
+		// so the polluted limit is invisible and the call refuses "limit out of range: undefined".
 		Object.defineProperty(Object.prototype, "limit", { value: 10, configurable: true });
 		try {
-			expect(() => encodeCapped(message())).not.toThrow();
+			expect(code(() => encodeCapped(message()))).toBe("VALUE_OUT_OF_RANGE");
 		} finally {
 			delete Object.prototype.limit;
 		}
