@@ -229,6 +229,9 @@ describe("the composed wire surface (CLDMV/digby#42)", () => {
 	it("composes in lazy mode to the same surface once the namespaces materialize", async () => {
 		const api = await slothlet({ base: API_BASE, mode: "lazy" });
 		const wire = await api.wire;
+		// a lazy node answers its own placeholder until its module loads: awaiting each namespace materializes it
+		// (the docs' "any other member access, a call, or await self.owner loads it")
+		for (const ns of ["framer", "record", "ttl", "rdata", "domain", "type", "class", "tsig", "transport", "tcp", "constants", "limits", "errors"]) await wire[ns];
 		const missing = SURFACE.filter(([p, kind]) => typeof at(wire, p) !== kind).map(([p]) => p);
 		expect(missing, `leaves missing or the wrong kind: ${missing.join(", ")}`).toEqual([]);
 		callEveryLeaf(wire);
