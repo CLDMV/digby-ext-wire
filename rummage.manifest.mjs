@@ -24,9 +24,68 @@
  *   required           true if the user must not be able to disable it
  *   platforms          ["desktop"] etc. — omit to activate everywhere
  *   requires           EXTENSION package names the loader mounts and activates BEFORE this one
+ *   public             mount-relative leaf paths other extensions may call (rummage composes
+ *                      default-deny: without an entry a peer's self.<mount>.<leaf> call is refused)
  */
 
+// The whole codec surface is public — wire is a pure library extension with no state, no settings and no
+// lifecycle a peer could disturb, so every leaf a consumer (zones, server) may reach is published here, and
+// nothing else is: the root's activate/deactivate stay the host's. A peer reaching an unpublished leaf is
+// refused with PERMISSION_DENIED; an entry that does not resolve on the composed tree is a load error, so the
+// list cannot silently drift from the api tree (tests/compose.test.vitest.mjs asserts both halves).
 export default {
 	protocol: { version: "1.0" },
-	i18n: { prefix: "wire" }
+	i18n: { prefix: "wire" },
+	public: [
+		// messages
+		"decode",
+		"encode",
+		"encodeCapped",
+		// transports
+		"transport.encode",
+		"transport.limit",
+		"transport.udp.min",
+		"transport.udp.cap",
+		"tcp.frame",
+		"tcp.max",
+		// framer
+		"framer.create",
+		// records, ttl, rdata
+		"record.parse",
+		"record.format",
+		"ttl.parse",
+		"rdata.parse",
+		"rdata.format",
+		"rdata.encode",
+		"rdata.decode",
+		"rdata.generic",
+		// names
+		"domain.parse",
+		"domain.format",
+		"domain.canonical",
+		"domain.key",
+		"domain.equal",
+		"domain.count",
+		// mnemonics
+		"type.mnemonic",
+		"type.parse",
+		"class.mnemonic",
+		"class.parse",
+		// tsig
+		"tsig.append",
+		"tsig.size",
+		// constants, limits, errors — the data leaves are zero-arg functions
+		"constants.type",
+		"constants.class",
+		"constants.rcode",
+		"constants.opcode",
+		"constants.edns.option",
+		"constants.svc.key",
+		"limits.message",
+		"limits.label",
+		"limits.name",
+		"limits.name.octets",
+		"errors.WireError",
+		"errors.codes"
+	]
 };
