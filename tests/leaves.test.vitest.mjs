@@ -45,7 +45,7 @@ import CLASSLeaf from "../src/api/wire/constants/CLASS.mjs";
 import RCODELeaf from "../src/api/wire/constants/RCODE.mjs";
 import WireErrorLeaf from "../src/api/wire/errors/WireError.mjs";
 import codesLeaf from "../src/api/wire/errors/codes.mjs";
-import root from "../src/api/wire/wire.mjs";
+import * as root from "../src/api/wire/wire.mjs";
 
 // The codec modules the leaves re-export:
 import { decodeMessage, encodeMessage, encodeCapped as libEncodeCapped, appendTsig, tsigRecordSize } from "../src/lib/message.mjs";
