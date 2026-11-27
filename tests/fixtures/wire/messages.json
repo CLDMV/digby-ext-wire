@@ -1,0 +1,165 @@
+{
+	"about": "Known-good DNS messages. dig cannot reach the network from the test environment, so each message is built by hand from the RFC 1035 / 6891 / 7873 / 8914 / 2136 / 1996 field layouts in the shape dig and common servers produce; the hex lines carry ';' comments naming each field. 'records' is each record in this codec's canonical presentation form, in section order. 'reencode' says the codec's own compression reproduces the bytes exactly.",
+	"messages": [
+		{
+			"name": "query, A, RD",
+			"hex": [
+				"1234 0100 ; id, flags: RD",
+				"0001 0000 0000 0000 ; qd an ns ar",
+				"07 6578616d706c65 03 636f6d 00 0001 0001 ; example.com. A IN"
+			],
+			"header": { "id": 4660, "rcode": 0, "flags": { "qr": false, "rd": true, "ad": false } },
+			"questions": ["example.com. A IN"],
+			"records": [],
+			"edns": null,
+			"reencode": true
+		},
+		{
+			"name": "query as dig sends it: RD AD, EDNS 1232 with a client cookie",
+			"hex": [
+				"a1b2 0120 ; id, flags: RD AD",
+				"0001 0000 0000 0001",
+				"07 6578616d706c65 03 636f6d 00 0001 0001 ; example.com. A IN",
+				"00 0029 04d0 00000000 000c ; OPT: root, udp 1232, ttl 0, rdlen 12",
+				"000a 0008 0123456789abcdef ; COOKIE, 8-octet client cookie"
+			],
+			"header": { "id": 41394, "rcode": 0, "flags": { "rd": true, "ad": true } },
+			"questions": ["example.com. A IN"],
+			"records": [],
+			"edns": { "udpSize": 1232, "version": 0, "dnssecOk": false, "z": 0, "optionCodes": [10] },
+			"reencode": true
+		},
+		{
+			"name": "response, one A, owner compressed to the question",
+			"hex": [
+				"a1b2 8180 ; QR RD RA",
+				"0001 0001 0000 0000",
+				"07 6578616d706c65 03 636f6d 00 0001 0001 ; question at offset 12",
+				"c00c 0001 0001 00000e10 0004 5db8d822 ; example.com. 3600 IN A 93.184.216.34"
+			],
+			"header": { "id": 41394, "rcode": 0, "flags": { "qr": true, "rd": true, "ra": true } },
+			"questions": ["example.com. A IN"],
+			"records": ["example.com. 3600 IN A 93.184.216.34"],
+			"edns": null,
+			"reencode": true
+		},
+		{
+			"name": "NXDOMAIN with the zone's SOA in authority",
+			"hex": [
+				"0001 8183 ; QR RD RA, rcode 3",
+				"0001 0000 0001 0000",
+				"04 6e6f7065 07 6578616d706c65 03 636f6d 00 0001 0001 ; nope.example.com. A IN; example.com. starts at 17",
+				"c011 0006 0001 00000e10 0027 ; example.com. 3600 IN SOA, rdlen 39",
+				"03 6e7331 c011 ; ns1.example.com.",
+				"0a 686f73746d6173746572 c011 ; hostmaster.example.com.",
+				"78c5ab35 00001c20 00000e10 00127500 0000012c ; serial 2026220341 refresh retry expire minimum"
+			],
+			"header": { "id": 1, "rcode": 3, "flags": { "qr": true } },
+			"questions": ["nope.example.com. A IN"],
+			"records": ["example.com. 3600 IN SOA ns1.example.com. hostmaster.example.com. 2026220341 7200 3600 1209600 300"],
+			"edns": null,
+			"reencode": true
+		},
+		{
+			"name": "two MX, exchanges compressed (RFC 1035 3.3.9 rdata is compressible)",
+			"hex": [
+				"0002 8580 ; QR AA RD RA",
+				"0001 0002 0000 0000",
+				"07 6578616d706c65 03 636f6d 00 000f 0001 ; example.com. MX IN",
+				"c00c 000f 0001 0000012c 0009 000a 04 6d61696c c00c ; 10 mail.example.com.",
+				"c00c 000f 0001 0000012c 0009 0014 04 6261636b c00c ; 20 back.example.com."
+			],
+			"header": { "id": 2, "rcode": 0, "flags": { "qr": true, "aa": true } },
+			"questions": ["example.com. MX IN"],
+			"records": ["example.com. 300 IN MX 10 mail.example.com.", "example.com. 300 IN MX 20 back.example.com."],
+			"edns": null,
+			"reencode": true
+		},
+		{
+			"name": "SERVFAIL with EDNS, DO, a server cookie and an extended DNS error",
+			"hex": [
+				"0003 8182 ; QR RD RA, rcode 2",
+				"0001 0000 0000 0001",
+				"07 6578616d706c65 03 636f6d 00 0001 0001",
+				"00 0029 04d0 00008000 0033 ; OPT: udp 1232, DO, rdlen 51",
+				"000a 0018 0123456789abcdef 0100000065a1b2c3d4e5f60718293a4b ; COOKIE: client 8, server 16",
+				"000f 0013 0007 7369676e617475726520657870697265 64 ; EDE 7 'signature expired'"
+			],
+			"header": { "id": 3, "rcode": 2, "flags": { "qr": true } },
+			"questions": ["example.com. A IN"],
+			"records": [],
+			"edns": { "udpSize": 1232, "version": 0, "dnssecOk": true, "z": 0, "optionCodes": [10, 15] },
+			"reencode": true
+		},
+		{
+			"name": "BADVERS: extended rcode 1 in the OPT",
+			"hex": [
+				"0004 8180",
+				"0000 0000 0000 0001",
+				"00 0029 04d0 01000000 0000 ; extended rcode 1 => rcode 16"
+			],
+			"header": { "id": 4, "rcode": 16, "flags": { "qr": true } },
+			"questions": [],
+			"records": [],
+			"edns": { "udpSize": 1232, "version": 0, "dnssecOk": false, "z": 0, "optionCodes": [] },
+			"reencode": true
+		},
+		{
+			"name": "a truncated UDP response (TC, no records)",
+			"hex": [
+				"0005 8380 ; QR TC RD RA",
+				"0001 0000 0000 0000",
+				"03 626967 07 6578616d706c65 00 00ff 0001 ; big.example. ANY IN"
+			],
+			"header": { "id": 5, "rcode": 0, "flags": { "qr": true, "tc": true } },
+			"questions": ["big.example. ANY IN"],
+			"records": [],
+			"edns": null,
+			"reencode": true
+		},
+		{
+			"name": "NOTIFY (RFC 1996): opcode 4, AA, the zone's SOA as question",
+			"hex": [
+				"0006 2400 ; opcode 4, AA",
+				"0001 0000 0000 0000",
+				"07 6578616d706c65 03 636f6d 00 0006 0001 ; example.com. SOA IN"
+			],
+			"header": { "id": 6, "rcode": 0, "flags": { "qr": false, "opcode": 4, "aa": true } },
+			"questions": ["example.com. SOA IN"],
+			"records": [],
+			"edns": null,
+			"reencode": true
+		},
+		{
+			"name": "UPDATE (RFC 2136): delete an RRset and add a record",
+			"hex": [
+				"0007 2800 ; opcode 5",
+				"0001 0000 0002 0000 ; zone 1, prerequisites 0, updates 2",
+				"07 6578616d706c65 03 636f6d 00 0006 0001 ; zone: example.com. SOA IN",
+				"03 777777 c00c 0001 00ff 00000000 0000 ; delete www.example.com. A (class ANY, empty rdata)",
+				"03 777777 c00c 0001 0001 0000012c 0004 c0000201 ; add www.example.com. 300 IN A 192.0.2.1 (the sender compressed only to the zone name; the codec points at the first www.example.com. instead)"
+			],
+			"header": { "id": 7, "rcode": 0, "flags": { "opcode": 5 } },
+			"questions": ["example.com. SOA IN"],
+			"records": ["www.example.com. 0 ANY A", "www.example.com. 300 IN A 192.0.2.1"],
+			"edns": null,
+			"reencode": false
+		},
+		{
+			"name": "AAAA, NS and glue across sections",
+			"hex": [
+				"0008 8100 ; QR RD",
+				"0001 0000 0001 0002",
+				"03 777777 07 6578616d706c65 00 001c 0001 ; www.example. AAAA IN; example. at 16",
+				"c010 0002 0001 00015180 0006 03 6e7331 c010 ; example. 86400 IN NS ns1.example.",
+				"c029 0001 0001 00015180 0004 c0000235 ; ns1.example. A 192.0.2.53 (ns1.example. at 41)",
+				"c029 001c 0001 00015180 0010 20010db8000000000000000000000035 ; ns1.example. AAAA 2001:db8::35"
+			],
+			"header": { "id": 8, "rcode": 0, "flags": { "qr": true } },
+			"questions": ["www.example. AAAA IN"],
+			"records": ["example. 86400 IN NS ns1.example.", "ns1.example. 86400 IN A 192.0.2.53", "ns1.example. 86400 IN AAAA 2001:db8::35"],
+			"edns": null,
+			"reencode": true
+		}
+	]
+}
