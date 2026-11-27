@@ -292,6 +292,38 @@ describe("the options argument is guarded (CLDMV/digby#39, round 6)", () => {
 		expect(encodeForTransport(msg, { transport: "udp", cap: 4096, query: runInNewContext("({ edns: { udpSize: 4096 } })") }).limit).toBe(4096);
 	});
 
+	it("a prototype-polluted key is ignored unless it is a known option; no options means a null-prototype answer (CLDMV/digby#39, r2 nits)", () => {
+		const big = {
+			...message(),
+			answers: [{ name: "a.example.", type: TYPE.A, class: 1, ttl: 60, data: { address: "10.0.0.1" } }]
+		};
+		// an enumerable Object.prototype key that names no option: the old inherited-key sweep refused EVERY
+		// options object whenever any pollution existed. structuredClone copies own properties only, so ignoring
+		// the key is the faithful behavior — the copy drops exactly what the prototype carried.
+		Object.prototype.pollutedBySomeoneElse = true;
+		try {
+			expect(() => encodeMessage(big, { maxSize: 4096 })).not.toThrow();
+			expect(() => encodeMessage(big)).not.toThrow();
+		} finally {
+			delete Object.prototype.pollutedBySomeoneElse;
+		}
+		// a polluted KNOWN option key is still refused, however hidden — by key, not by prototype shape
+		Object.prototype.limit = 10;
+		try {
+			expect(code(() => encodeMessage(big, {}))).toBe("VALUE_OUT_OF_RANGE");
+		} finally {
+			delete Object.prototype.limit;
+		}
+		// with no options the guard used to answer {}, which READ the prototype: a non-enumerable
+		// Object.prototype.limit made encodeCapped truncate to 10 octets. It answers a null-prototype object now.
+		Object.defineProperty(Object.prototype, "limit", { value: 10, configurable: true });
+		try {
+			expect(() => encodeCapped(message())).not.toThrow();
+		} finally {
+			delete Object.prototype.limit;
+		}
+	});
+
 	it("options from another realm are plain data too (CLDMV/digby#39, round 8)", () => {
 		// round 7's plain-object rule compared the prototype by identity with this realm's Object.prototype: a plain
 		// options object built in a vm context failed it. The rule is the shape — a null prototype, or some realm's
