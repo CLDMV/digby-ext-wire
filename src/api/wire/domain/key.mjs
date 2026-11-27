@@ -1,6 +1,6 @@
 /**
  *	@Project: @cldmv/digby-ext-wire
- *	@Filename: /src/api/wire/class/name.mjs
+ *	@Filename: /src/api/wire/domain/key.mjs
  *	@Date: 2026-11-26T00:00:00-08:00
  *	@Author: Nate Corcoran <CLDMV>
  *	@Email: <Shinrai@users.noreply.github.com>
@@ -13,11 +13,11 @@
  */
 
 /**
- * @fileoverview Slothlet leaf — exposed at self.wire.class.name; re-exports the codec's classToString from
- * src/lib/constants.mjs. Cross-extension callers reach the codec only through this leaf — never a
+ * @fileoverview Slothlet leaf — exposed at self.wire.domain.key; re-exports the codec's nameKey from
+ * src/lib/names.mjs. Cross-extension callers reach the codec only through this leaf — never a
  * deep import of another extension's lib.
  */
 
-import { classToString } from "../../../lib/constants.mjs";
+import { nameKey } from "../../../lib/names.mjs";
 
-export default classToString;
+export default nameKey;

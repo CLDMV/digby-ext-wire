@@ -1,6 +1,6 @@
 /**
  *	@Project: @cldmv/digby-ext-wire
- *	@Filename: /src/api/wire/name/key.mjs
+ *	@Filename: /src/api/wire/domain/parse.mjs
  *	@Date: 2026-11-26T00:00:00-08:00
  *	@Author: Nate Corcoran <CLDMV>
  *	@Email: <Shinrai@users.noreply.github.com>
@@ -13,11 +13,11 @@
  */
 
 /**
- * @fileoverview Slothlet leaf — exposed at self.wire.name.key; re-exports the codec's nameKey from
+ * @fileoverview Slothlet leaf — exposed at self.wire.domain.parse; re-exports the codec's parseName from
  * src/lib/names.mjs. Cross-extension callers reach the codec only through this leaf — never a
  * deep import of another extension's lib.
  */
 
-import { nameKey } from "../../../lib/names.mjs";
+import { parseName } from "../../../lib/names.mjs";
 
-export default nameKey;
+export default parseName;

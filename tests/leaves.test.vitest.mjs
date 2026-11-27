@@ -29,17 +29,17 @@ import encodeCapped from "../src/api/wire/encodeCapped.mjs";
 import createFramer from "../src/api/wire/framer/create.mjs";
 import recordParse from "../src/api/wire/record/parse.mjs";
 import recordFormat from "../src/api/wire/record/format.mjs";
-import nameParse from "../src/api/wire/name/parse.mjs";
-import nameFormat from "../src/api/wire/name/format.mjs";
-import nameCanonical from "../src/api/wire/name/canonical.mjs";
-import nameKey from "../src/api/wire/name/key.mjs";
+import domainParse from "../src/api/wire/domain/parse.mjs";
+import domainFormat from "../src/api/wire/domain/format.mjs";
+import domainCanonical from "../src/api/wire/domain/canonical.mjs";
+import domainKey from "../src/api/wire/domain/key.mjs";
 import ttlParse from "../src/api/wire/ttl/parse.mjs";
 import rdataParse from "../src/api/wire/rdata/parse.mjs";
 import rdataFormat from "../src/api/wire/rdata/format.mjs";
 import rdataEncode from "../src/api/wire/rdata/encode.mjs";
 import rdataDecode from "../src/api/wire/rdata/decode.mjs";
-import typeName from "../src/api/wire/type/name.mjs";
-import className from "../src/api/wire/class/name.mjs";
+import typeMnemonic from "../src/api/wire/type/mnemonic.mjs";
+import classMnemonic from "../src/api/wire/class/mnemonic.mjs";
 import TYPELeaf from "../src/api/wire/constants/TYPE.mjs";
 import CLASSLeaf from "../src/api/wire/constants/CLASS.mjs";
 import RCODELeaf from "../src/api/wire/constants/RCODE.mjs";
@@ -83,11 +83,11 @@ describe("the leaves are the codec's own exports — identity, not wrappers", ()
 		expect(ttlParse).toBe(parseTtl);
 	});
 
-	it("the name leaves", () => {
-		expect(nameParse).toBe(parseName);
-		expect(nameFormat).toBe(formatName);
-		expect(nameCanonical).toBe(canonicalName);
-		expect(nameKey).toBe(libNameKey);
+	it("the domain leaves", () => {
+		expect(domainParse).toBe(parseName);
+		expect(domainFormat).toBe(formatName);
+		expect(domainCanonical).toBe(canonicalName);
+		expect(domainKey).toBe(libNameKey);
 	});
 
 	it("the rdata leaves", () => {
@@ -98,8 +98,8 @@ describe("the leaves are the codec's own exports — identity, not wrappers", ()
 	});
 
 	it("the mnemonic leaves", () => {
-		expect(typeName).toBe(typeToString);
-		expect(className).toBe(classToString);
+		expect(typeMnemonic).toBe(typeToString);
+		expect(classMnemonic).toBe(classToString);
 	});
 
 	it("the constants leaves are the frozen tables", () => {
@@ -157,7 +157,7 @@ describe("the root leaf", () => {
 
 describe("the composed surface covers the codec's public entry points", () => {
 	it("every exported leaf is defined — none silently missing", () => {
-		for (const leaf of [decode, encode, encodeCapped, createFramer, recordParse, recordFormat, nameParse, nameFormat, nameCanonical, nameKey, ttlParse, rdataParse, rdataFormat, rdataEncode, rdataDecode, typeName, className, TYPELeaf, CLASSLeaf, RCODELeaf, WireErrorLeaf, codesLeaf, tsigAppend, tsigSize]) {
+		for (const leaf of [decode, encode, encodeCapped, createFramer, recordParse, recordFormat, domainParse, domainFormat, domainCanonical, domainKey, ttlParse, rdataParse, rdataFormat, rdataEncode, rdataDecode, typeMnemonic, classMnemonic, TYPELeaf, CLASSLeaf, RCODELeaf, WireErrorLeaf, codesLeaf, tsigAppend, tsigSize]) {
 			expect(leaf).toBeDefined();
 		}
 	});

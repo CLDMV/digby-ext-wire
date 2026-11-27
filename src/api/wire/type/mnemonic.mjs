@@ -1,6 +1,6 @@
 /**
  *	@Project: @cldmv/digby-ext-wire
- *	@Filename: /src/api/wire/name/canonical.mjs
+ *	@Filename: /src/api/wire/type/mnemonic.mjs
  *	@Date: 2026-11-26T00:00:00-08:00
  *	@Author: Nate Corcoran <CLDMV>
  *	@Email: <Shinrai@users.noreply.github.com>
@@ -13,11 +13,11 @@
  */
 
 /**
- * @fileoverview Slothlet leaf — exposed at self.wire.name.canonical; re-exports the codec's canonicalName from
- * src/lib/names.mjs. Cross-extension callers reach the codec only through this leaf — never a
+ * @fileoverview Slothlet leaf — exposed at self.wire.type.mnemonic; re-exports the codec's typeToString from
+ * src/lib/constants.mjs. Cross-extension callers reach the codec only through this leaf — never a
  * deep import of another extension's lib.
  */
 
-import { canonicalName } from "../../../lib/names.mjs";
+import { typeToString } from "../../../lib/constants.mjs";
 
-export default canonicalName;
+export default typeToString;
