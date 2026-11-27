@@ -45,6 +45,8 @@ import CLASSLeaf from "../src/api/wire/constants/CLASS.mjs";
 import RCODELeaf from "../src/api/wire/constants/RCODE.mjs";
 import WireErrorLeaf from "../src/api/wire/errors/WireError.mjs";
 import codesLeaf from "../src/api/wire/errors/codes.mjs";
+import tsigAppend from "../src/api/wire/tsig/append.mjs";
+import tsigSize from "../src/api/wire/tsig/size.mjs";
 import * as root from "../src/api/wire/wire.mjs";
 
 // The codec modules the leaves re-export:
@@ -155,15 +157,15 @@ describe("the root leaf", () => {
 
 describe("the composed surface covers the codec's public entry points", () => {
 	it("every exported leaf is defined — none silently missing", () => {
-		for (const leaf of [decode, encode, encodeCapped, createFramer, recordParse, recordFormat, nameParse, nameFormat, nameCanonical, nameKey, ttlParse, rdataParse, rdataFormat, rdataEncode, rdataDecode, typeName, className, TYPELeaf, CLASSLeaf, RCODELeaf, WireErrorLeaf, codesLeaf]) {
+		for (const leaf of [decode, encode, encodeCapped, createFramer, recordParse, recordFormat, nameParse, nameFormat, nameCanonical, nameKey, ttlParse, rdataParse, rdataFormat, rdataEncode, rdataDecode, typeName, className, TYPELeaf, CLASSLeaf, RCODELeaf, WireErrorLeaf, codesLeaf, tsigAppend, tsigSize]) {
 			expect(leaf).toBeDefined();
 		}
 	});
 
-	it("the message codec's TSIG helpers stay lib-side — #42's leaf list ends at decode/encode/encodeCapped", () => {
-		// appendTsig and tsigRecordSize are codec surface but deliberately NOT leaves (the issue's leaf list);
-		// consumers that need them go through the extension's own composition, not this package's api.
-		expect(typeof appendTsig).toBe("function");
-		expect(typeof tsigRecordSize).toBe("function");
+	it("the TSIG leaves — tsig.append and tsig.size, composed per the orchestrator's order (20261127T195149Z)", () => {
+		// the TSIG helpers joined the leaf set as nested leaves (`tsig.append` / `tsig.size` — multi-word names
+		// become nested paths per the slothlet naming rule); the identity pins hold: the leaves ARE the lib exports
+		expect(tsigAppend).toBe(appendTsig);
+		expect(tsigSize).toBe(tsigRecordSize);
 	});
 });
