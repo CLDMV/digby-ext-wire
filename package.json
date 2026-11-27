@@ -1,0 +1,38 @@
+{
+	"name": "@cldmv/digby-ext-wire",
+	"version": "0.0.1",
+	"description": "Wire — the DNS wire codec, built on @cldmv/rummage.",
+	"type": "module",
+	"license": "Apache-2.0",
+	"author": { "name": "Shinrai", "company": "CLDMV", "email": "git+npm@cldmv.net", "url": "https://cldmv.net" },
+	"contributors": [{ "name": "CLDMV", "url": "https://github.com/CLDMV" }],
+	"funding": { "type": "github", "url": "https://github.com/sponsors/shinrai" },
+	"publishConfig": { "access": "public" },
+	"sideEffects": false,
+	"engines": { "node": ">=24.15.0" },
+	"devEngines": { "runtime": { "name": "node", "version": ">=24.15.0", "onFail": "error" } },
+	"repository": { "type": "git", "url": "git+https://github.com/CLDMV/digby-ext-wire.git" },
+	"bugs": { "url": "https://github.com/CLDMV/digby-ext-wire/issues" },
+	"homepage": "https://github.com/CLDMV/digby-ext-wire#readme",
+	"main": "./src/api/wire/wire.mjs",
+	"exports": {
+		".": "./src/api/wire/wire.mjs",
+		"./api": "./src/api/wire/wire.mjs",
+		"./package.json": "./package.json"
+	},
+	"files": ["src/", "rummage.manifest.mjs", "LICENSE", "README.md"],
+	"scripts": {
+		"test": "node tests/run-vitest.mjs",
+		"coverage": "node tests/run-vitest.mjs --coverage-quiet",
+		"ci:coverage": "npm run coverage",
+		"generate": "rummage generate",
+		"generate:check": "rummage check"
+	},
+	"peerDependencies": { "@cldmv/rummage": "^0.1.0" },
+	"devDependencies": {
+		"@cldmv/rummage": "workspace:*",
+		"@cldmv/vitest-runner": "^1.8.0",
+		"@vitest/coverage-v8": "^5.1.1",
+		"vitest": "^5.1.1"
+	}
+}
