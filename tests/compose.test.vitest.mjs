@@ -98,16 +98,17 @@ const leafPathsOf = (wire) =>
 		.map(([p]) => p);
 
 /**
- * The namespace paths a leaf set implies — the prefixes of the leaf paths, built from the tree being checked (in
- * lazy mode a materialized namespace is still a function node, so the walk's function filter picks namespaces up
- * too and they are exempt from the leaf-set and publication checks). RED-FIRST SHAPE (the r3 bug, r4-1): the
- * `.slice(0, -1)` trims the FLATTENED list, not each path, so every leaf path stays in the set — 43 of the 44
- * leaf paths exempt themselves, and the publication check is vacuous. The fix computes each path's PROPER
- * prefixes (`p.split(".").slice(0, -1)`), leaving only `limits.domain` (a leaf that prefixes another leaf) exempt.
+ * The namespace paths a leaf set implies — every PROPER prefix of every leaf path, built PER PATH from the tree
+ * being checked (in lazy mode a materialized namespace is still a function node, so the walk's function filter
+ * picks namespaces up too, and they are exempt from the leaf-set and publication checks). The r3 shape was the
+ * whole-list `.slice(0, -1)` (r4-1): it trims ONE element off the flattened prefix list and leaves every leaf
+ * path counted as its own namespace — 43 of the 44 leaf paths exempt themselves, so the publication check was
+ * vacuous (a dropped manifest entry and a new unpublished leaf both waved through). Proper prefixes leave exactly
+ * one leaf exempt: `limits.domain`, a leaf that is a prefix of another leaf (`limits.domain.octets`).
  * @param {string[]} leafPaths - the leaf paths of the tree being checked
  * @returns {Set<string>}
  */
-const namespacePathsOf = (leafPaths) => new Set(leafPaths.flatMap((p) => p.split(".").map((_, i, a) => a.slice(0, i + 1).join("."))).slice(0, -1));
+const namespacePathsOf = (leafPaths) => new Set(leafPaths.flatMap((p) => p.split(".").slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join("."))));
 
 /**
  * The composed leaf paths the manifest does not publish — the host's own lifecycle (`activate`, `deactivate`) and
@@ -121,6 +122,9 @@ const unpublishedLeavesOf = (paths, pub) =>
 	paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate" && !namespacePathsOf(paths).has(p));
 
 // The reference surface, derived once from an eager compose of the real tree — no fixed list anywhere in this suite.
+// The composed surface is 44 leaves: the 42 the manifest publishes, plus the host's own activate and deactivate
+// (never published). The manifest's `public` list has exactly 42 entries (r4-4: the count, pinned by a test below —
+// the r3 handback's "45 leaves" was wrong).
 const reference = await slothlet({ base: API_BASE, mode: "eager" });
 const LEAF_PATHS = leafPathsOf(reference.wire);
 
@@ -311,6 +315,14 @@ describe("the leaf-publication check is not vacuous (CLDMV/digby#42 r4-1, red on
 		const paths = [...LEAF_PATHS.slice(0, at), "rdata.extra", ...LEAF_PATHS.slice(at)];
 		const offenders = unpublishedLeavesOf(paths, new Set(manifest.public));
 		expect(offenders, "the unpublished new leaf must be flagged, and nothing else").toEqual(["rdata.extra"]);
+	});
+
+	it("the composed surface counts 44 leaves — 42 published plus activate and deactivate (r4-4)", () => {
+		// the count, pinned: 44 composed leaves, of which the 42 the manifest publishes are eligible for peers and
+		// the host's own activate/deactivate are not (r4-4 — the r3 statements said 45)
+		expect(LEAF_PATHS.length, "the composed leaf count").toBe(44);
+		expect(LEAF_PATHS.filter((p) => p !== "activate" && p !== "deactivate").length, "the published-eligible leaves").toBe(42);
+		expect(manifest.public.length, "the manifest's public entries").toBe(42);
 	});
 });
 
