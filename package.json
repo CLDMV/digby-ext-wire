@@ -24,6 +24,9 @@
 		"test": "node tests/run-vitest.mjs",
 		"coverage": "node tests/run-vitest.mjs --coverage-quiet",
 		"ci:coverage": "npm run coverage",
+		"build": "node scripts/build.mjs",
+		"build:ci": "npm run build",
+		"prepack": "npm run build",
 		"generate": "rummage generate",
 		"generate:check": "rummage check"
 	},
@@ -32,6 +35,7 @@
 		"@cldmv/rummage": "workspace:*",
 		"@cldmv/vitest-runner": "^1.8.0",
 		"@vitest/coverage-v8": "^5.1.1",
+		"esbuild": "^0.28.2",
 		"vitest": "^5.1.1"
 	}
 }
