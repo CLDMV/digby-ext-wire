@@ -25,7 +25,7 @@ import { describe, expect, it } from "vitest";
 // The leaves, at their api paths:
 import { decode } from "../src/api/wire/decode.mjs";
 import { encode } from "../src/api/wire/encode.mjs";
-import { encodeCapped } from "../src/api/wire/encodeCapped.mjs";
+import { capped } from "../src/api/wire/messages/encode/capped.mjs";
 import { create as createFramer } from "../src/api/wire/framer/create.mjs";
 import { parse as recordParse } from "../src/api/wire/record/parse.mjs";
 import { format as recordFormat } from "../src/api/wire/record/format.mjs";
@@ -48,7 +48,7 @@ import { parse as classParse } from "../src/api/wire/class/parse.mjs";
 import { type as TYPELeaf } from "../src/api/wire/constants/type.mjs";
 import { class as CLASSLeaf } from "../src/api/wire/constants/class.mjs";
 import { rcode as RCODELeaf } from "../src/api/wire/constants/rcode.mjs";
-import { WireError as WireErrorLeaf } from "../src/api/wire/errors/WireError.mjs";
+import { is as isLeaf } from "../src/api/wire/errors/is.mjs";
 import { codes as codesLeaf } from "../src/api/wire/errors/codes.mjs";
 import { append as tsigAppend } from "../src/api/wire/tsig/append.mjs";
 import { size as tsigSize } from "../src/api/wire/tsig/size.mjs";
@@ -63,8 +63,8 @@ import { option as ednsOptionLeaf } from "../src/api/wire/constants/edns/option.
 import { key as svcKeyLeaf } from "../src/api/wire/constants/svc/key.mjs";
 import { message as maxMessageLeaf } from "../src/api/wire/limits/message.mjs";
 import { label as maxLabelLeaf } from "../src/api/wire/limits/label.mjs";
-import { name as maxNameLeaf } from "../src/api/wire/limits/name.mjs";
-import { octets as maxNameOctetsLeaf } from "../src/api/wire/limits/name/octets.mjs";
+import { domain as maxDomainLeaf } from "../src/api/wire/limits/domain.mjs";
+import { octets as maxDomainOctetsLeaf } from "../src/api/wire/limits/domain/octets.mjs";
 import * as root from "../src/api/wire/wire.mjs";
 
 // The codec modules the leaves re-export:
@@ -94,7 +94,7 @@ describe("the leaves are the codec's own exports — identity, not wrappers", ()
 	it("the message codec leaves", () => {
 		expect(decode).toBe(decodeMessage);
 		expect(encode).toBe(encodeMessage);
-		expect(encodeCapped).toBe(libEncodeCapped);
+		expect(capped).toBe(libEncodeCapped);
 	});
 
 	it("the presentation leaves", () => {
@@ -145,8 +145,8 @@ describe("the leaves are the codec's own exports — identity, not wrappers", ()
 		expect(svcKeyLeaf()).toBe(SVC_KEY);
 		expect(maxMessageLeaf()).toBe(MAX_MESSAGE);
 		expect(maxLabelLeaf()).toBe(MAX_LABEL);
-		expect(maxNameLeaf()).toBe(MAX_NAME);
-		expect(maxNameOctetsLeaf()).toBe(MAX_NAME_OCTETS);
+		expect(maxDomainLeaf()).toBe(MAX_NAME);
+		expect(maxDomainOctetsLeaf()).toBe(MAX_NAME_OCTETS);
 		expect(udpMin()).toBe(UDP_MIN);
 		expect(udpCap()).toBe(DEFAULT_UDP_CAP);
 		expect(tcpMax()).toBe(TCP_MAX);
@@ -158,9 +158,16 @@ describe("the leaves are the codec's own exports — identity, not wrappers", ()
 		expect(RCODELeaf()).toBe(RCODE);
 	});
 
-	it("the error leaves are the class and its frozen code table", () => {
-		expect(WireErrorLeaf).toBe(WireError);
+	it("the error leaves are the predicate and its frozen code table", () => {
+		// the class itself stays lib-internal: rummage's own-leaf check sanitizes WireError.mjs to `wireError` while
+		// slothlet composes it as `WireError`, so a class leaf cannot be published (CLDMV/rummage#1100) — and
+		// `instanceof` is false across the composed boundary anyway. Callers ask errors.is.
 		expect(codesLeaf()).toBe(WireErrorCode);
+		expect(isLeaf(new WireError("TRUNCATED", "boom"))).toBe(true);
+		// name-plus-code answers a WireError-shaped error another module copy re-threw (zones' master-file decorator)
+		expect(isLeaf(Object.assign(new Error("boom"), { name: "WireError", code: "TRUNCATED" }))).toBe(true);
+		expect(isLeaf(new Error("plain"))).toBe(false);
+		expect(isLeaf(null)).toBe(false);
 	});
 });
 
@@ -196,7 +203,6 @@ describe("framer.create()", () => {
 
 describe("the root leaf", () => {
 	it("is the wire root: named, activate-able, no state to capture", () => {
-		expect(root.name).toBe("wire");
 		expect(typeof root.activate).toBe("function");
 		expect(typeof root.deactivate).toBe("function");
 		// A no-op activate: the codec owns nothing disposable.
@@ -207,7 +213,7 @@ describe("the root leaf", () => {
 
 describe("the composed surface covers the codec's public entry points", () => {
 	it("every exported leaf is defined — none silently missing", () => {
-		for (const leaf of [decode, encode, encodeCapped, createFramer, recordParse, recordFormat, domainParse, domainFormat, domainCanonical, domainKey, domainEqual, domainCount, ttlParse, rdataParse, rdataFormat, rdataEncode, rdataDecode, rdataGeneric, typeMnemonic, typeParse, classMnemonic, classParse, TYPELeaf, CLASSLeaf, RCODELeaf, opcodeLeaf, ednsOptionLeaf, svcKeyLeaf, maxMessageLeaf, maxLabelLeaf, maxNameLeaf, maxNameOctetsLeaf, udpMin, udpCap, tcpFrame, tcpMax, transportEncode, transportLimit, WireErrorLeaf, codesLeaf, tsigAppend, tsigSize]) {
+		for (const leaf of [decode, encode, capped, createFramer, recordParse, recordFormat, domainParse, domainFormat, domainCanonical, domainKey, domainEqual, domainCount, ttlParse, rdataParse, rdataFormat, rdataEncode, rdataDecode, rdataGeneric, typeMnemonic, typeParse, classMnemonic, classParse, TYPELeaf, CLASSLeaf, RCODELeaf, opcodeLeaf, ednsOptionLeaf, svcKeyLeaf, maxMessageLeaf, maxLabelLeaf, maxDomainLeaf, maxDomainOctetsLeaf, udpMin, udpCap, tcpFrame, tcpMax, transportEncode, transportLimit, isLeaf, codesLeaf, tsigAppend, tsigSize]) {
 			expect(leaf).toBeDefined();
 		}
 	});

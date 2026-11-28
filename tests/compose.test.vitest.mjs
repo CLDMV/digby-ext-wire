@@ -15,26 +15,35 @@
 /**
  * @fileoverview The composed-surface suite: the REAL src/api tree through slothlet itself, in the three shapes that
  * matter — eager {@link slothlet} composition, the rummage-style `api.slothlet.api.add` mount (the ext-host composes
- * eagerly, api-tree.mjs), and lazy. The leaves test imports the leaf files directly, which composes nothing; this
- * suite is what proves the tree survives composition (a Function.prototype-name leaf such as `name` crashes eager
- * compose with `TypeError: Cannot use 'in' operator …`), that every leaf is present under the path the api names, and
- * that every leaf is callable. Slothlet resolves the module exports' own answers, not the file import — the leaves
- * test's identity pins do not transfer here, so every leaf is called and its result compared with the codec's own
- * function on the same input.
+ * eagerly, api-tree.mjs), and lazy — plus the real production host, rummage's `composeTestHost` (@cldmv/rummage/testing:
+ * the in-process ext-host under the tree's defaultPolicy "deny"), which is what actually loads wire in a rummage app.
+ * The leaves test imports the leaf files directly, which composes nothing; this suite is what proves the tree survives
+ * composition and that every leaf is callable. Slothlet resolves the module exports' own answers, not the file import —
+ * the leaves test's identity pins do not transfer here, so every leaf is called and its result compared with the codec's
+ * own function on the same input.
+ *
+ * The surface itself is never a fixed list: each mode walks the composed tree and asserts the leaf set against an eager
+ * reference compose of the same tree, that no leaf path runs through a `Function.prototype` key (a leaf named `name` —
+ * or `length`, `bind`, … — answers the placeholder's own property instead of itself: `wire.limits.name` came back as the
+ * string "wire_waitingProxy" in lazy mode, CLDMV/digby#42 B1), and that the walk and the manifest's `public` list agree
+ * in both directions — rummage refuses to LOAD a manifest entry that does not resolve on the composed tree
+ * (CLDMV/rummage#193), so drift is a load failure, not a silent gap.
  *
  * Plus the two data findings this surface must answer (CLDMV/digby#42 review):
  * - the frozen tables (constants, error codes, limits) are plain data through the composed api — leaf functions
  *   returning the frozen table (CLDMV/slothlet docs, API-RULES Rule 5: an object default export composes as a
  *   namespace wrapper, so a table leaf is a zero-arg function and callers call it);
- * - the manifest's `public` list publishes the composed surface (rummage's default-deny policy refuses every
- *   cross-extension call an extension does not declare — extension-host.md), proven by a second, minimal extension
- *   composed alongside wire under the same rules rummage derives.
+ * - the error surface is a predicate, not the class: rummage's own-leaf check sanitizes WireError.mjs to `wireError`
+ *   while slothlet composes it as `WireError`, so a `errors.WireError` manifest entry is refused and wire does not load
+ *   in any rummage host (CLDMV/rummage#1100), and `instanceof` is false across the composed boundary anyway (a composed
+ *   instance is a separate module copy) — callers ask `errors.is(err)`.
  */
 
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { composeTestHost } from "@cldmv/rummage/testing";
+import { self } from "@cldmv/rummage/runtime";
 
 // Slothlet resolves through rummage's own dependency (the review-proven pod path: wire does not depend on slothlet
 // directly — its ext-host does — so the specifier would not resolve from this package).
@@ -53,61 +62,62 @@ import { DEFAULT_UDP_CAP, TCP_MAX, UDP_MIN, encodeForTransport, frameTcp, udpLim
 import { MAX_MESSAGE } from "../src/lib/buffer.mjs";
 import manifest from "../rummage.manifest.mjs";
 
-const API_DIR = fileURLToPath(new URL("../src/api/wire/", import.meta.url));
 const API_BASE = fileURLToPath(new URL("../src/api/", import.meta.url));
+const API_DIR = fileURLToPath(new URL("../src/api/wire/", import.meta.url));
 
 /** Resolve a dotted api path, `undefined` when a segment is missing. */
 const at = (node, p) => p.split(".").reduce((v, s) => (v == null ? v : v[s]), node);
 
+// ---------------------------------------------------------------- the walk
+
+/** Every own property name `Function.prototype` carries — a leaf may not sit behind one of them (CLDMV/digby#42 B1). */
+const FN_SEGMENT = new Set(Object.getOwnPropertyNames(Function.prototype));
+
 /**
- * The composed surface: every leaf path under the mount, with the kind a caller must see. The data leaves are
- * FUNCTIONS (calling returns the frozen table or constant) — see the fileoverview.
- * @type {Array<[string, "function"]>}
+ * Walk a composed subtree depth-first, collecting every reachable `[path, value]`. A `seen` set bounds it on a tree
+ * that closes over itself.
  */
-const SURFACE = [
-	["decode", "function"],
-	["encode", "function"],
-	["encodeCapped", "function"],
-	["framer.create", "function"],
-	["record.parse", "function"],
-	["record.format", "function"],
-	["ttl.parse", "function"],
-	["rdata.parse", "function"],
-	["rdata.format", "function"],
-	["rdata.encode", "function"],
-	["rdata.decode", "function"],
-	["rdata.generic", "function"],
-	["domain.parse", "function"],
-	["domain.format", "function"],
-	["domain.canonical", "function"],
-	["domain.key", "function"],
-	["domain.equal", "function"],
-	["domain.count", "function"],
-	["type.mnemonic", "function"],
-	["type.parse", "function"],
-	["class.mnemonic", "function"],
-	["class.parse", "function"],
-	["tsig.append", "function"],
-	["tsig.size", "function"],
-	["transport.encode", "function"],
-	["transport.limit", "function"],
-	["transport.udp.min", "function"],
-	["transport.udp.cap", "function"],
-	["tcp.frame", "function"],
-	["tcp.max", "function"],
-	["constants.type", "function"],
-	["constants.class", "function"],
-	["constants.rcode", "function"],
-	["constants.opcode", "function"],
-	["constants.edns.option", "function"],
-	["constants.svc.key", "function"],
-	["limits.message", "function"],
-	["limits.label", "function"],
-	["limits.name", "function"],
-	["limits.name.octets", "function"],
-	["errors.WireError", "function"],
-	["errors.codes", "function"]
-];
+const walkTree = (node, pre, seen, out) => {
+	if (node == null || (typeof node !== "function" && typeof node !== "object") || seen.has(node)) return out;
+	seen.add(node);
+	for (const k of Object.keys(node)) {
+		const p = pre ? `${pre}.${k}` : k;
+		out.push([p, node[k]]);
+		walkTree(node[k], p, seen, out);
+	}
+	return out;
+};
+
+/** The composed leaf paths — the walk's function entries (every leaf is a function; namespaces are plain objects). */
+const leafPathsOf = (wire) =>
+	walkTree(wire, "", new Set(), [])
+		.filter(([, v]) => typeof v === "function")
+		.map(([p]) => p);
+
+// The reference surface, derived once from an eager compose of the real tree — no fixed list anywhere in this suite.
+const reference = await slothlet({ base: API_BASE, mode: "eager" });
+const LEAF_PATHS = leafPathsOf(reference.wire);
+
+/**
+ * Assert a composed tree carries exactly the reference leaf set, that no leaf path runs through a
+ * `Function.prototype` key, and that the manifest's `public` list agrees with the walk in both directions:
+ * every composed leaf (but the host's own activate/deactivate) is published, and every published entry resolves.
+ * @param {object} wire - the composed wire node
+ */
+const checkSurface = (wire) => {
+	const paths = leafPathsOf(wire);
+	const missing = LEAF_PATHS.filter((p) => !paths.includes(p));
+	expect(missing, `leaves missing from the composed tree: ${missing.join(", ")}`).toEqual([]);
+	const extra = paths.filter((p) => !LEAF_PATHS.includes(p));
+	expect(extra, `composed leaves the eager reference does not have: ${extra.join(", ")}`).toEqual([]);
+	const fnSegment = paths.filter((p) => p.split(".").some((s) => FN_SEGMENT.has(s)));
+	expect(fnSegment, `leaf paths through a Function.prototype key (CLDMV/digby#42 B1): ${fnSegment.join(", ")}`).toEqual([]);
+	const pub = new Set(manifest.public);
+	const unpublished = paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate");
+	expect(unpublished, `composed leaves the manifest does not publish: ${unpublished.join(", ")}`).toEqual([]);
+	const uncomposed = manifest.public.filter((p) => !paths.includes(p));
+	expect(uncomposed, `public entries that do not resolve on the composed tree: ${uncomposed.join(", ")}`).toEqual([]);
+};
 
 /** One well-formed one-question message — every leaf's valid input comes from it. */
 const MESSAGE = {
@@ -139,7 +149,7 @@ const callEveryLeaf = (wire) => {
 	// message codec
 	expect(wire.decode(BYTES)).toEqual(decodeMessage(BYTES));
 	expect(wire.encode(MESSAGE)).toEqual(encodeMessage(MESSAGE));
-	expect(wire.encodeCapped(MESSAGE, { limit: 4096 })).toEqual(encodeCapped(MESSAGE, { limit: 4096 }));
+	expect(wire.messages.encode.capped(MESSAGE, { limit: 4096 })).toEqual(encodeCapped(MESSAGE, { limit: 4096 }));
 	// framer (a composed instance is a separate module copy — the leaves test pins instanceof, this suite pins behavior)
 	const framer = wire.framer.create();
 	expect(framer.push(frameTcp(BYTES))).toEqual([BYTES]);
@@ -168,7 +178,7 @@ const callEveryLeaf = (wire) => {
 	// tsig
 	const need = wire.tsig.size(TSIG);
 	expect(need).toBe(tsigRecordSize(TSIG));
-	const capped = wire.encodeCapped(MESSAGE, { limit: 280, reserveTsig: need });
+	const capped = wire.messages.encode.capped(MESSAGE, { limit: 280, reserveTsig: need });
 	const signed = wire.tsig.append(capped, TSIG);
 	expect(signed.length).toBe(capped.bytes.length + need);
 	// transport
@@ -186,85 +196,104 @@ const callEveryLeaf = (wire) => {
 	for (const [p, v] of [["constants.type", TYPE], ["constants.class", CLASS], ["constants.rcode", RCODE], ["constants.opcode", OPCODE], ["constants.edns.option", EDNS_OPTION], ["constants.svc.key", SVC_KEY], ["errors.codes", WireErrorCode]]) table([p, v]);
 	expect(wire.limits.message()).toBe(MAX_MESSAGE);
 	expect(wire.limits.label()).toBe(MAX_LABEL);
-	expect(wire.limits.name()).toBe(MAX_NAME);
-	expect(wire.limits.name.octets()).toBe(MAX_NAME_OCTETS);
+	expect(wire.limits.domain()).toBe(MAX_NAME);
+	expect(wire.limits.domain.octets()).toBe(MAX_NAME_OCTETS);
 	expect(wire.transport.udp.min()).toBe(UDP_MIN);
 	expect(wire.transport.udp.cap()).toBe(DEFAULT_UDP_CAP);
 	expect(wire.tcp.max()).toBe(TCP_MAX);
-	// errors: a refusal from a composed leaf carries the codec's own code
+	// errors: a refusal from a composed leaf carries the codec's own code, and errors.is answers it — through the
+	// composed api, where `instanceof` is false for errors wire's own leaves threw (CLDMV/digby#42 D)
 	try {
 		wire.domain.parse("");
 		expect.unreachable("domain.parse('') must refuse");
 	} catch (err) {
 		expect(err.code).toBe("BAD_PRESENTATION");
+		expect(wire.errors.is(err)).toBe(true);
 	}
-	// the WireError leaf constructs
-	const err = new wire.errors.WireError("BAD_PRESENTATION", "boom");
-	expect(err.message).toBe("boom");
-	expect(err.code).toBe("BAD_PRESENTATION");
+	expect(wire.errors.is(new WireError("TRUNCATED", "boom"))).toBe(true);
+	// name-plus-code also answers a WireError-shaped error another module copy re-threw (zones' master-file
+	// decorator): the class is lib-internal, the shape is the contract
+	expect(wire.errors.is(Object.assign(new Error("boom"), { name: "WireError", code: "TRUNCATED" }))).toBe(true);
+	expect(wire.errors.is(new Error("plain"))).toBe(false);
+	expect(wire.errors.is(null)).toBe(false);
+	expect(wire.errors.is({ name: "WireError" })).toBe(false);
 };
 
 describe("the composed wire surface (CLDMV/digby#42)", () => {
 	it("composes the real src/api tree in eager mode — every leaf present and callable", async () => {
 		const api = await slothlet({ base: API_BASE, mode: "eager" });
 		const wire = api.wire;
-		// the root leaf: named, activate-able
-		expect(wire.name).toBe("wire");
+		// the root leaf: activate-able (the host's lifecycle; no state to capture)
 		expect(typeof wire.activate).toBe("function");
 		expect(typeof wire.deactivate).toBe("function");
-		const missing = SURFACE.filter(([p, kind]) => typeof at(wire, p) !== kind).map(([p]) => p);
-		expect(missing, `leaves missing or the wrong kind: ${missing.join(", ")}`).toEqual([]);
+		checkSurface(wire);
 		callEveryLeaf(wire);
 	});
 
 	it("composes through api.slothlet.api.add — the rummage-style mount — with the same surface", async () => {
 		const api = await slothlet({ mode: "eager" });
 		await api.slothlet.api.add(["ext", "digby", "wire"], API_DIR, { moduleID: "wire" });
-		const wire = api.ext.digby.wire;
-		const missing = SURFACE.filter(([p, kind]) => typeof at(wire, p) !== kind).map(([p]) => p);
-		expect(missing, `leaves missing or the wrong kind: ${missing.join(", ")}`).toEqual([]);
-		callEveryLeaf(wire);
+		checkSurface(api.ext.digby.wire);
+		callEveryLeaf(api.ext.digby.wire);
+	});
+});
+
+describe("the lazy compose answers without any namespace awaited first (CLDMV/digby#42 B1)", () => {
+	it("every leaf answers a function on fresh access — nothing awaited", async () => {
+		const api = await slothlet({ base: API_BASE, mode: "lazy" });
+		const wire = api.wire;
+		// fresh, nothing awaited: a leaf path must answer the leaf. A leaf behind a Function.prototype key — the
+		// old `limits.name` — answered the lazy placeholder's own property instead: the string "wire_waitingProxy"
+		for (const p of LEAF_PATHS) expect(typeof at(wire, p), `wire.${p} fresh in lazy mode`).toBe("function");
+		// the nested data leaf too, fresh: await the call, never the namespaces
+		await expect(wire.limits.domain.octets()).resolves.toBe(MAX_NAME_OCTETS);
 	});
 
 	it("composes in lazy mode to the same surface once the namespaces materialize", async () => {
 		const api = await slothlet({ base: API_BASE, mode: "lazy" });
-		const wire = await api.wire;
+		const wire = api.wire;
 		// a lazy node answers its own placeholder until its module loads: awaiting each namespace materializes it
 		// (the docs' "any other member access, a call, or await self.owner loads it") — and a materialized parent
 		// leaves ITS child namespaces lazy, so the nested ones are awaited too
-		for (const ns of ["framer", "record", "ttl", "rdata", "domain", "type", "class", "tsig", "transport", "transport.udp", "tcp", "constants", "constants.edns", "constants.svc", "limits", "errors"]) await at(wire, ns);
-		const missing = SURFACE.filter(([p, kind]) => typeof at(wire, p) !== kind).map(([p]) => p);
-		expect(missing, `leaves missing or the wrong kind: ${missing.join(", ")}`).toEqual([]);
+		for (const ns of ["framer", "record", "ttl", "rdata", "domain", "type", "class", "tsig", "transport", "transport.udp", "tcp", "constants", "constants.edns", "constants.svc", "limits", "errors", "messages", "messages.encode"]) await at(wire, ns);
+		checkSurface(wire);
 		callEveryLeaf(wire);
 	});
 });
 
-describe("the manifest's public list gates a peer (CLDMV/digby#42 A2)", () => {
-	// rummage's api tree composes with defaultPolicy "deny" and derives, per manifest `public` entry, an allow for
-	// the leaf AND its subtree for every caller (src/ext-host/api-tree.mjs deriveRules). The test derives the same
-	// rules from wire's own manifest — so the list is proven against the policy it must satisfy.
-	it("every manifest public entry resolves on the composed tree", async () => {
-		const api = await slothlet({ base: API_BASE, mode: "eager" });
-		const missing = manifest.public.filter((leaf) => typeof at(api.wire, leaf) !== "function");
-		expect(missing, `public entries that do not resolve: ${missing.join(", ")}`).toEqual([]);
+describe("the real ext-host composes wire — the manifest's public list (CLDMV/digby#42 A2)", () => {
+	let t;
+	beforeAll(async () => {
+		// the production web path: a real in-process ext-host composing wire under the tree's defaultPolicy "deny",
+		// exactly as a rummage app loads it — a manifest entry rummage cannot resolve is a load failure here
+		t = await composeTestHost({ ext: new URL("..", import.meta.url), store: null, app: "digby" });
+	}, 300_000);
+	afterAll(() => t?.close());
+
+	/** Where the host composed wire — first-party (`wire`) or third-party (`ext.digby.wire`). */
+	const mount = () => ["wire", "ext.digby.wire", "ext.wire"].find((p) => { try { return t.leaf(`${p}.decode`) !== undefined; } catch { return false; } });
+
+	it("boots wire — the manifest's public list is accepted", () => {
+		expect(mount(), "the host composed wire somewhere").toBeTruthy();
 	});
 
-	it("a second extension reaches the public leaves and is refused the rest", async () => {
-		const base = "ext.digby.wire";
-		const rules = [];
-		for (const leaf of manifest.public) {
-			rules.push({ caller: "**", target: `${base}.${leaf}`, effect: "allow" });
-			rules.push({ caller: "**", target: `${base}.${leaf}.**`, effect: "allow" });
-		}
-		const api = await slothlet({ mode: "eager", permissions: { defaultPolicy: "deny", rules } });
-		await api.slothlet.api.add(["ext", "digby", "wire"], API_DIR, { moduleID: "wire" });
-		// a minimal peer extension, composed alongside wire, reaching wire only through `self`
-		const peer = fileURLToPath(new URL("./fixtures/compose/peer/src/api/zones/", import.meta.url));
-		await api.slothlet.api.add(["ext", "digby", "zones"], peer, { moduleID: "zones" });
-		const zones = api.ext.digby.zones;
-		// public: the peer's leaf calls wire.decode through self and answers
-		expect(zones.probe(BYTES)).toEqual(decodeMessage(BYTES));
+	it("a peer reaches the public leaves and is refused the rest — through the real host", async () => {
+		const p = mount();
+		const node = () => p.split(".").reduce((v, s) => v[s], self);
+		// public: the peer's extent calls wire.decode through self and answers
+		expect(await t.run(() => node().decode(BYTES).questions.length)).toBe(1);
+		// the error predicate through the composed api, on an error wire's own decode threw
+		const caught = await t.run(() => {
+			try {
+				node().decode(new Uint8Array([1]));
+			} catch (e) {
+				return [e.code, node().errors.is(e)];
+			}
+		});
+		expect(caught[0]).toBe("TRUNCATED");
+		expect(caught[1]).toBe(true);
 		// not public: the lifecycle leaves are the host's, never a peer's
-		expect(() => zones.reach()).toThrow(/denied|PERMISSION/i);
+		await expect(t.run(() => node().activate({}))).rejects.toThrow(/denied|permission/i);
+		await expect(t.run(() => node().deactivate())).rejects.toThrow(/denied|permission/i);
 	});
 });
