@@ -317,6 +317,16 @@ describe("the leaf-publication check is not vacuous (CLDMV/digby#42 r4-1, red on
 		expect(offenders, "the unpublished new leaf must be flagged, and nothing else").toEqual(["rdata.extra"]);
 	});
 
+	it("M3 — a leaf that is also a namespace prefix is flagged when the manifest drops it (limits.domain, R5-7)", () => {
+		// R5-7: `limits.domain` is a real eager leaf (a zero-arg function returning the MAX_NAME table) AND a
+		// proper prefix of `limits.domain.octets` — the r4-1 prefix exemption self-exempted it, so dropping it
+		// from the manifest was caught only by the count pin, not by the publication check. A prefix that is
+		// itself a leaf must be published like any other.
+		const pub = new Set(manifest.public.filter((p) => p !== "limits.domain"));
+		const offenders = unpublishedLeavesOf(LEAF_PATHS, pub);
+		expect(offenders, "the dropped prefix-leaf must be flagged, and nothing else").toEqual(["limits.domain"]);
+	});
+
 	it("the composed surface counts 44 leaves — 42 published plus activate and deactivate (r4-4)", () => {
 		// the count, pinned: 44 composed leaves, of which the 42 the manifest publishes are eligible for peers and
 		// the host's own activate/deactivate are not (r4-4 — the r3 statements said 45)
