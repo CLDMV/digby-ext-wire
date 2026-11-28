@@ -9,8 +9,6 @@
  * directory, no settings declaration and no setupSettings call.
  */
 
-export const name = "wire";
-
 export function activate(context) {
 	// Nothing to capture: the codec has no state, no storage and no commands. activate()
 	// exists as the mount point — consumers reach this surface as self.wire.* (captured at

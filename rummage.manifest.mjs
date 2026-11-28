@@ -40,7 +40,7 @@ export default {
 		// messages
 		"decode",
 		"encode",
-		"encodeCapped",
+		"messages.encode.capped",
 		// transports
 		"transport.encode",
 		"transport.limit",
@@ -83,9 +83,9 @@ export default {
 		"constants.svc.key",
 		"limits.message",
 		"limits.label",
-		"limits.name",
-		"limits.name.octets",
-		"errors.WireError",
+		"limits.domain",
+		"limits.domain.octets",
+		"errors.is",
 		"errors.codes"
 	]
 };
