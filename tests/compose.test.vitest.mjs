@@ -104,22 +104,35 @@ const leafPathsOf = (wire) =>
  * whole-list `.slice(0, -1)` (r4-1): it trims ONE element off the flattened prefix list and leaves every leaf
  * path counted as its own namespace — 43 of the 44 leaf paths exempt themselves, so the publication check was
  * vacuous (a dropped manifest entry and a new unpublished leaf both waved through). Proper prefixes leave exactly
- * one leaf exempt: `limits.domain`, a leaf that is a prefix of another leaf (`limits.domain.octets`).
+ * one leaf self-exempted: `limits.domain`, a real eager leaf that is a prefix of another leaf
+ * (`limits.domain.octets`).
+ *
+ * R5-7: the PUBLICATION check must not exempt that self-prefixing leaf — `limits.domain` is a real zero-arg
+ * leaf (the MAX_NAME table), so a prefix qualifies for exemption only if it is NOT itself a leaf. The
+ * leaf-set check keeps the tree-derived set (a lazy materialized namespace is a function node the walk picks
+ * up, and only a prefix path is tolerated there); `unpublishedLeavesOf` below derives its exemption from the
+ * REFERENCE leaf set instead, minus the reference leaves.
  * @param {string[]} leafPaths - the leaf paths of the tree being checked
  * @returns {Set<string>}
  */
 const namespacePathsOf = (leafPaths) => new Set(leafPaths.flatMap((p) => p.split(".").slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join("."))));
 
 /**
- * The composed leaf paths the manifest does not publish — the host's own lifecycle (`activate`, `deactivate`) and
- * namespace paths excepted. Shared by the surface check and the r4-1 mutant tests, so the mutants exercise the
- * same logic the real check runs.
+ * The composed leaf paths the manifest does not publish — the host's own lifecycle (`activate`, `deactivate`)
+ * and namespace paths excepted. The exemption set is `namespacePathsOf(LEAF_PATHS)` MINUS `LEAF_PATHS`
+ * (R5-7): a prefix qualifies only if it is not itself a leaf, so `limits.domain` — a real eager leaf that is
+ * also a proper prefix of `limits.domain.octets` — must be published, and dropping it from the manifest fails
+ * the check instead of hiding behind the count pin. Lazy materialized namespaces (walk function nodes that are
+ * pure prefixes of reference leaves) stay exempt. Shared by the surface check and the r4-1/R5-7 mutant tests,
+ * so the mutants exercise the same logic the real check runs.
  * @param {string[]} paths - the tree's leaf paths
  * @param {Set<string>} pub - the manifest's `public` list
  * @returns {string[]}
  */
-const unpublishedLeavesOf = (paths, pub) =>
-	paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate" && !namespacePathsOf(paths).has(p));
+const unpublishedLeavesOf = (paths, pub) => {
+	const namespaceExempt = namespacePathsOf(LEAF_PATHS);
+	return paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate" && !(namespaceExempt.has(p) && !LEAF_PATHS.includes(p)));
+};
 
 // The reference surface, derived once from an eager compose of the real tree — no fixed list anywhere in this suite.
 // The composed surface is 44 leaves: the 42 the manifest publishes, plus the host's own activate and deactivate
