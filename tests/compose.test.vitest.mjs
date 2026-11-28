@@ -44,6 +44,9 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeTestHost } from "@cldmv/rummage/testing";
 import { self } from "@cldmv/rummage/runtime";
+// the error predicate leaf, imported directly — the leaves test's shape; the composed assertions below go through
+// the api, this one pins the leaf's own logic against a lookalike (r4-5)
+import { is as isLeaf } from "../src/api/wire/errors/is.mjs";
 
 // Slothlet resolves through rummage's own dependency (the review-proven pod path: wire does not depend on slothlet
 // directly — its ext-host does — so the specifier would not resolve from this package).
@@ -94,6 +97,29 @@ const leafPathsOf = (wire) =>
 		.filter(([, v]) => typeof v === "function")
 		.map(([p]) => p);
 
+/**
+ * The namespace paths a leaf set implies — the prefixes of the leaf paths, built from the tree being checked (in
+ * lazy mode a materialized namespace is still a function node, so the walk's function filter picks namespaces up
+ * too and they are exempt from the leaf-set and publication checks). RED-FIRST SHAPE (the r3 bug, r4-1): the
+ * `.slice(0, -1)` trims the FLATTENED list, not each path, so every leaf path stays in the set — 43 of the 44
+ * leaf paths exempt themselves, and the publication check is vacuous. The fix computes each path's PROPER
+ * prefixes (`p.split(".").slice(0, -1)`), leaving only `limits.domain` (a leaf that prefixes another leaf) exempt.
+ * @param {string[]} leafPaths - the leaf paths of the tree being checked
+ * @returns {Set<string>}
+ */
+const namespacePathsOf = (leafPaths) => new Set(leafPaths.flatMap((p) => p.split(".").map((_, i, a) => a.slice(0, i + 1).join("."))).slice(0, -1));
+
+/**
+ * The composed leaf paths the manifest does not publish — the host's own lifecycle (`activate`, `deactivate`) and
+ * namespace paths excepted. Shared by the surface check and the r4-1 mutant tests, so the mutants exercise the
+ * same logic the real check runs.
+ * @param {string[]} paths - the tree's leaf paths
+ * @param {Set<string>} pub - the manifest's `public` list
+ * @returns {string[]}
+ */
+const unpublishedLeavesOf = (paths, pub) =>
+	paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate" && !namespacePathsOf(paths).has(p));
+
 // The reference surface, derived once from an eager compose of the real tree — no fixed list anywhere in this suite.
 const reference = await slothlet({ base: API_BASE, mode: "eager" });
 const LEAF_PATHS = leafPathsOf(reference.wire);
@@ -110,14 +136,16 @@ const checkSurface = (wire) => {
 	expect(missing, `leaves missing from the composed tree: ${missing.join(", ")}`).toEqual([]);
 	// a namespace that is a prefix of a leaf is not itself a leaf — and in lazy mode a materialized namespace is
 	// still a function node (the lazy callable), so the walk's function filter picks it up; only prefix paths are
-	// tolerated, anything else in the walk that the eager reference lacks is an unexpected leaf
-	const namespacePaths = new Set(LEAF_PATHS.flatMap((p) => p.split(".").map((_, i, a) => a.slice(0, i + 1).join("."))).slice(0, -1));
+	// tolerated, anything else in the walk that the eager reference lacks is an unexpected leaf. The prefixes are
+	// derived from the tree BEING CHECKED (the mutant-faithful shape — a new leaf exempts itself as its own prefix,
+	// which is exactly what the publication check must refuse)
+	const namespacePaths = namespacePathsOf(paths);
 	const extra = paths.filter((p) => !LEAF_PATHS.includes(p) && !namespacePaths.has(p));
 	expect(extra, `composed leaves the eager reference does not have: ${extra.join(", ")}`).toEqual([]);
 	const fnSegment = paths.filter((p) => p.split(".").some((s) => FN_SEGMENT.has(s)));
 	expect(fnSegment, `leaf paths through a Function.prototype key (CLDMV/digby#42 B1): ${fnSegment.join(", ")}`).toEqual([]);
 	const pub = new Set(manifest.public);
-	const unpublished = paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate" && !namespacePaths.has(p));
+	const unpublished = unpublishedLeavesOf(paths, pub);
 	expect(unpublished, `composed leaves the manifest does not publish: ${unpublished.join(", ")}`).toEqual([]);
 	const uncomposed = manifest.public.filter((p) => !paths.includes(p));
 	expect(uncomposed, `public entries that do not resolve on the composed tree: ${uncomposed.join(", ")}`).toEqual([]);
@@ -262,6 +290,35 @@ describe("the lazy compose answers without any namespace awaited first (CLDMV/di
 		for (const ns of ["framer", "record", "ttl", "rdata", "domain", "type", "class", "tsig", "transport", "transport.udp", "tcp", "constants", "constants.edns", "constants.svc", "limits", "errors", "messages", "messages.encode"]) await at(wire, ns);
 		checkSurface(wire);
 		callEveryLeaf(wire);
+	});
+});
+
+describe("the leaf-publication check is not vacuous (CLDMV/digby#42 r4-1, red on fa65b3d)", () => {
+	it("M1 — a leaf the manifest drops is flagged unpublished (rdata.generic)", () => {
+		// the r3 reviewer's M1: remove the manifest's rdata.generic entry — a composed leaf left unpublished
+		const pub = new Set(manifest.public.filter((p) => p !== "rdata.generic"));
+		const offenders = unpublishedLeavesOf(LEAF_PATHS, pub);
+		expect(offenders, "the dropped leaf must be flagged, and nothing else").toEqual(["rdata.generic"]);
+	});
+
+	it("M2 — a new leaf the manifest does not know is flagged unpublished (rdata.extra)", () => {
+		// the r3 reviewer's M2: a new leaf file appears and is composed but the manifest does not publish it. The
+		// mutant-faithful simulation inserts the leaf path MID-WALK, where a new rdata sibling really lands — not
+		// at the end of the list, where the r3 bug's whole-list `.slice(0, -1)` would drop it by accident and let
+		// it through. (The real M2 run is scripted pod-side in the r4 evidence; this committed form exercises the
+		// same check logic on the same shape.)
+		const at = LEAF_PATHS.indexOf("rdata.parse");
+		const paths = [...LEAF_PATHS.slice(0, at), "rdata.extra", ...LEAF_PATHS.slice(at)];
+		const offenders = unpublishedLeavesOf(paths, new Set(manifest.public));
+		expect(offenders, "the unpublished new leaf must be flagged, and nothing else").toEqual(["rdata.extra"]);
+	});
+});
+
+describe("errors.is refuses a lookalike whose code is not a WireErrorCode (CLDMV/digby#42 r4-5, red on fa65b3d)", () => {
+	it("a WireError-named error with an unknown code is not the codec's error", () => {
+		expect(isLeaf(Object.assign(new Error("boom"), { name: "WireError", code: "NOT_A_WIRE_CODE" })), "the shape alone is not enough — the code must be a WireErrorCode").toBe(false);
+		// a known code keeps answering (the name-plus-code re-throw contract, unchanged)
+		expect(isLeaf(Object.assign(new Error("boom"), { name: "WireError", code: "TRUNCATED" }))).toBe(true);
 	});
 });
 
