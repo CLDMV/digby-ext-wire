@@ -108,12 +108,16 @@ const checkSurface = (wire) => {
 	const paths = leafPathsOf(wire);
 	const missing = LEAF_PATHS.filter((p) => !paths.includes(p));
 	expect(missing, `leaves missing from the composed tree: ${missing.join(", ")}`).toEqual([]);
-	const extra = paths.filter((p) => !LEAF_PATHS.includes(p));
+	// a namespace that is a prefix of a leaf is not itself a leaf — and in lazy mode a materialized namespace is
+	// still a function node (the lazy callable), so the walk's function filter picks it up; only prefix paths are
+	// tolerated, anything else in the walk that the eager reference lacks is an unexpected leaf
+	const namespacePaths = new Set(LEAF_PATHS.flatMap((p) => p.split(".").map((_, i, a) => a.slice(0, i + 1).join("."))).slice(0, -1));
+	const extra = paths.filter((p) => !LEAF_PATHS.includes(p) && !namespacePaths.has(p));
 	expect(extra, `composed leaves the eager reference does not have: ${extra.join(", ")}`).toEqual([]);
 	const fnSegment = paths.filter((p) => p.split(".").some((s) => FN_SEGMENT.has(s)));
 	expect(fnSegment, `leaf paths through a Function.prototype key (CLDMV/digby#42 B1): ${fnSegment.join(", ")}`).toEqual([]);
 	const pub = new Set(manifest.public);
-	const unpublished = paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate");
+	const unpublished = paths.filter((p) => !pub.has(p) && p !== "activate" && p !== "deactivate" && !namespacePaths.has(p));
 	expect(unpublished, `composed leaves the manifest does not publish: ${unpublished.join(", ")}`).toEqual([]);
 	const uncomposed = manifest.public.filter((p) => !paths.includes(p));
 	expect(uncomposed, `public entries that do not resolve on the composed tree: ${uncomposed.join(", ")}`).toEqual([]);
