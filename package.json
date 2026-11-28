@@ -27,7 +27,6 @@
 		"ci:coverage": "npm run coverage",
 		"build": "node scripts/build.mjs",
 		"build:ci": "npm run build",
-		"prepack": "npm run build",
 		"generate": "rummage generate",
 		"generate:check": "rummage check"
 	},

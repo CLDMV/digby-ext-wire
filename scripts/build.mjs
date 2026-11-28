@@ -14,15 +14,17 @@
 
 /**
  * @fileoverview The per-module build (npm run build): esbuild with `bundle: false` — every src file compiled and
- * minified in place with `keepNames: true`, dist/ mirroring src/ one file per module — plus the generic CommonJS
- * shim at dist/index.cjs. Nothing is merged, moved, split or duplicated: a module's code stays in exactly one file
- * at the path it lives at in src/, so import shapes and `new URL(..., import.meta.url)` paths survive (CLDMV
- * fleet build convention, package-layout). dist/ is a build artifact — gitignored, rebuilt by `prepack`, never
- * shipped (the package's main and the rummage manifest compose src/ directly).
+ * minified in place with `keepNames: true`, dist/ mirroring src/ one file per module. Nothing is merged, moved,
+ * split or duplicated: a module's code stays in exactly one file at the path it lives at in src/, so import shapes
+ * and `new URL(..., import.meta.url)` paths survive (CLDMV fleet build convention, package-layout). The build is a
+ * compile check, not a packaging step (r4-3): nothing ships dist/ — the package's `files` and the rummage manifest
+ * compose src/ directly, and there is no `prepack` (the fleet's generic dist/index.cjs shim is a ship-shape
+ * concern, and wire ships no dist/ at all). dist/ is a gitignored build artifact, rebuilt by the CI coverage and
+ * bundle-size legs (`coverage_build_command` / `build_command` both run `npm run build:ci`).
  */
 
 import { build } from "esbuild";
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,29 +55,4 @@ await build({
 	sourcemap: true,
 	logLevel: "info"
 });
-
-// The generic CommonJS shim, dist/index.cjs — the same ~1 kB file in every repo, only the package name and the
-// Node floor differ. Wire's ESM entry is src/api/wire/wire.mjs (the root leaf, `main`), so the shim requires the
-// mirrored build of that path; `require(esm)` is synchronous and wire.mjs has no top-level await. When the entry
-// exports one distinct value the shim returns it (require(x)(...) works); otherwise the module object, so
-// require(x).named and destructuring match import.
-await mkdir(dist, { recursive: true });
-await writeFile(
-	path.join(dist, "index.cjs"),
-	`"use strict";
-
-if (!process.features?.require_module) {
-	const error = new Error(
-		"@cldmv/digby-ext-wire: require() needs Node.js >=24.15.0 (this is " + process.version + "). On older Node.js, load the package with import() instead."
-	);
-	error.code = "ERR_REQUIRE_ESM";
-	throw error;
-}
-
-const esm = require("./api/wire/wire.mjs");
-const values = new Set(Object.keys(esm).filter((key) => key !== "__esModule").map((key) => esm[key]));
-module.exports = values.size === 1 ? values.values().next().value : esm;
-`,
-	"utf8"
-);
-console.log(`built ${entries.length} module(s) into dist/ + dist/index.cjs`);
+console.log(`built ${entries.length} module(s) into dist/`);
