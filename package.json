@@ -17,6 +17,7 @@
 	"main": "./src/api/wire/wire.mjs",
 	"exports": {
 		".": "./src/api/wire/wire.mjs",
+		"./api": "./src/api/wire/wire.mjs",
 		"./package.json": "./package.json"
 	},
 	"files": ["src/", "rummage.manifest.mjs", "LICENSE", "README.md"],
